@@ -1,0 +1,428 @@
+[
+ {
+  "id": "stand",
+  "label": "站立",
+  "category": "基础",
+  "description": "稳定站姿",
+  "defaultDurationSec": 2
+ },
+ {
+  "id": "wait",
+  "label": "等待",
+  "category": "基础",
+  "description": "带轻微呼吸的等待",
+  "defaultDurationSec": 2
+ },
+ {
+  "id": "idle-breathe",
+  "label": "自然呼吸",
+  "category": "基础",
+  "description": "克制的待机呼吸",
+  "defaultDurationSec": 3
+ },
+ {
+  "id": "stop",
+  "label": "停步",
+  "category": "基础",
+  "description": "从运动中收住重心",
+  "defaultDurationSec": 0.8
+ },
+ {
+  "id": "turn",
+  "label": "转身",
+  "category": "基础",
+  "description": "身体与视线共同转向",
+  "defaultDurationSec": 1.2
+ },
+ {
+  "id": "walk",
+  "label": "行走",
+  "category": "走位",
+  "description": "自然步速走位",
+  "defaultDurationSec": 2.5,
+  "moving": true,
+  "suggestedDistance": 2
+ },
+ {
+  "id": "fast-walk",
+  "label": "快走",
+  "category": "走位",
+  "description": "目的明确的快步",
+  "defaultDurationSec": 2,
+  "moving": true,
+  "suggestedDistance": 2.6
+ },
+ {
+  "id": "run",
+  "label": "跑动",
+  "category": "走位",
+  "description": "快速跑动",
+  "defaultDurationSec": 1.8,
+  "moving": true,
+  "suggestedDistance": 3.2
+ },
+ {
+  "id": "step-forward",
+  "label": "向前一步",
+  "category": "走位",
+  "description": "小范围靠近",
+  "defaultDurationSec": 1,
+  "moving": true,
+  "suggestedDistance": 0.7
+ },
+ {
+  "id": "step-back",
+  "label": "后退一步",
+  "category": "走位",
+  "description": "警惕或让位",
+  "defaultDurationSec": 1,
+  "moving": true,
+  "suggestedDistance": -0.7
+ },
+ {
+  "id": "follow",
+  "label": "跟随",
+  "category": "走位",
+  "description": "跟随另一人物的空间节奏",
+  "defaultDurationSec": 2.5,
+  "moving": true,
+  "suggestedDistance": 2
+ },
+ {
+  "id": "pass-by",
+  "label": "擦肩而过",
+  "category": "走位",
+  "description": "从另一人物身侧通过",
+  "defaultDurationSec": 2.2,
+  "moving": true,
+  "suggestedDistance": 2.4
+ },
+ {
+  "id": "dodge",
+  "label": "闪避",
+  "category": "走位",
+  "description": "快速侧向躲避",
+  "defaultDurationSec": 0.9,
+  "moving": true,
+  "suggestedDistance": 1.2
+ },
+ {
+  "id": "look-up",
+  "label": "抬眼",
+  "category": "视线",
+  "description": "由低处抬起视线",
+  "defaultDurationSec": 0.9
+ },
+ {
+  "id": "look-down",
+  "label": "低头",
+  "category": "视线",
+  "description": "视线和头部向下",
+  "defaultDurationSec": 0.9
+ },
+ {
+  "id": "look-at",
+  "label": "注视",
+  "category": "视线",
+  "description": "稳定看向目标",
+  "defaultDurationSec": 1.2
+ },
+ {
+  "id": "look-back",
+  "label": "回望",
+  "category": "视线",
+  "description": "头肩先后回转",
+  "defaultDurationSec": 1.1
+ },
+ {
+  "id": "glance",
+  "label": "快速一瞥",
+  "category": "视线",
+  "description": "短促看向侧方后收回",
+  "defaultDurationSec": 0.7
+ },
+ {
+  "id": "inspect",
+  "label": "仔细观察",
+  "category": "视线",
+  "description": "小幅扫视目标细节",
+  "defaultDurationSec": 1.8
+ },
+ {
+  "id": "speak",
+  "label": "说话",
+  "category": "交流",
+  "description": "克制的口头表达手势",
+  "defaultDurationSec": 2
+ },
+ {
+  "id": "listen",
+  "label": "倾听",
+  "category": "交流",
+  "description": "身体微向说话者开放",
+  "defaultDurationSec": 2
+ },
+ {
+  "id": "nod",
+  "label": "点头",
+  "category": "交流",
+  "description": "确认式点头",
+  "defaultDurationSec": 0.8
+ },
+ {
+  "id": "shake-head",
+  "label": "摇头",
+  "category": "交流",
+  "description": "否定式摇头",
+  "defaultDurationSec": 0.9
+ },
+ {
+  "id": "face-to-face",
+  "label": "面对面",
+  "category": "交流",
+  "description": "建立双人交流朝向",
+  "defaultDurationSec": 1.2
+ },
+ {
+  "id": "hand-over",
+  "label": "递交",
+  "category": "交流",
+  "description": "将手中物递向目标",
+  "defaultDurationSec": 1.2
+ },
+ {
+  "id": "receive",
+  "label": "接取",
+  "category": "交流",
+  "description": "伸手接过物品",
+  "defaultDurationSec": 1.2
+ },
+ {
+  "id": "reach",
+  "label": "伸手",
+  "category": "手部",
+  "description": "手臂伸向目标",
+  "defaultDurationSec": 1
+ },
+ {
+  "id": "hold",
+  "label": "托持",
+  "category": "手部",
+  "description": "双手稳定托住物体",
+  "defaultDurationSec": 1.4
+ },
+ {
+  "id": "pick-up",
+  "label": "拿起",
+  "category": "手部",
+  "description": "俯身或伸手拿起物体",
+  "defaultDurationSec": 1.3
+ },
+ {
+  "id": "put-down",
+  "label": "放下",
+  "category": "手部",
+  "description": "将物体稳定放下",
+  "defaultDurationSec": 1.3
+ },
+ {
+  "id": "point",
+  "label": "指向",
+  "category": "手部",
+  "description": "明确指向目标",
+  "defaultDurationSec": 1
+ },
+ {
+  "id": "wave",
+  "label": "挥手",
+  "category": "手部",
+  "description": "招呼式挥手",
+  "defaultDurationSec": 1.2
+ },
+ {
+  "id": "raise-hand",
+  "label": "抬手",
+  "category": "手部",
+  "description": "抬起一只手",
+  "defaultDurationSec": 0.8
+ },
+ {
+  "id": "clap",
+  "label": "鼓掌",
+  "category": "手部",
+  "description": "连续两到三次鼓掌",
+  "defaultDurationSec": 1.4
+ },
+ {
+  "id": "knock",
+  "label": "敲击",
+  "category": "手部",
+  "description": "手部连续敲击",
+  "defaultDurationSec": 1.1
+ },
+ {
+  "id": "phone",
+  "label": "接听电话",
+  "category": "手部",
+  "description": "抬手贴近耳侧",
+  "defaultDurationSec": 1.5
+ },
+ {
+  "id": "drink",
+  "label": "饮用",
+  "category": "手部",
+  "description": "抬手饮用后放回",
+  "defaultDurationSec": 1.8
+ },
+ {
+  "id": "sit",
+  "label": "坐下",
+  "category": "姿态",
+  "description": "重心后移坐下",
+  "defaultDurationSec": 1.5
+ },
+ {
+  "id": "stand-up",
+  "label": "起身",
+  "category": "姿态",
+  "description": "从坐姿恢复站立",
+  "defaultDurationSec": 1.5
+ },
+ {
+  "id": "crouch",
+  "label": "蹲下",
+  "category": "姿态",
+  "description": "降低重心观察",
+  "defaultDurationSec": 1.2
+ },
+ {
+  "id": "kneel",
+  "label": "跪下",
+  "category": "姿态",
+  "description": "单膝落地",
+  "defaultDurationSec": 1.4
+ },
+ {
+  "id": "lie-down",
+  "label": "躺下",
+  "category": "姿态",
+  "description": "身体落向地面",
+  "defaultDurationSec": 1.8
+ },
+ {
+  "id": "bow",
+  "label": "鞠躬",
+  "category": "姿态",
+  "description": "上身前倾后恢复",
+  "defaultDurationSec": 1.3
+ },
+ {
+  "id": "cross-arms",
+  "label": "抱臂",
+  "category": "姿态",
+  "description": "双臂收于胸前",
+  "defaultDurationSec": 1.2
+ },
+ {
+  "id": "hands-on-hips",
+  "label": "叉腰",
+  "category": "姿态",
+  "description": "双手落于腰侧",
+  "defaultDurationSec": 1.2
+ },
+ {
+  "id": "hesitate",
+  "label": "迟疑",
+  "category": "情绪",
+  "description": "欲言又止的小动作",
+  "defaultDurationSec": 1.5
+ },
+ {
+  "id": "hug",
+  "label": "拥抱",
+  "category": "情绪",
+  "description": "向目标张臂靠近",
+  "defaultDurationSec": 1.8
+ },
+ {
+  "id": "fall",
+  "label": "跌倒",
+  "category": "情绪",
+  "description": "失去重心倒地",
+  "defaultDurationSec": 1.2
+ },
+ {
+  "id": "get-up",
+  "label": "爬起",
+  "category": "情绪",
+  "description": "从地面恢复站立",
+  "defaultDurationSec": 1.8
+ },
+ {
+  "id": "read",
+  "label": "阅读",
+  "category": "专项",
+  "description": "双手持卷或书阅读",
+  "defaultDurationSec": 2
+ },
+ {
+  "id": "write",
+  "label": "书写",
+  "category": "专项",
+  "description": "一手扶持一手落笔",
+  "defaultDurationSec": 2
+ },
+ {
+  "id": "sew",
+  "label": "缝纫",
+  "category": "专项",
+  "description": "低头双手连续走针",
+  "defaultDurationSec": 2
+ },
+ {
+  "id": "open-door",
+  "label": "开门",
+  "category": "专项",
+  "description": "伸手并拉开门",
+  "defaultDurationSec": 1.5
+ },
+ {
+  "id": "close-door",
+  "label": "关门",
+  "category": "专项",
+  "description": "转身将门合上",
+  "defaultDurationSec": 1.4
+ },
+ {
+  "id": "push",
+  "label": "推物",
+  "category": "专项",
+  "description": "双手向前施力",
+  "defaultDurationSec": 1.5
+ },
+ {
+  "id": "pull",
+  "label": "拉物",
+  "category": "专项",
+  "description": "重心后移拉动物体",
+  "defaultDurationSec": 1.5
+ },
+ {
+  "id": "enter-car",
+  "label": "进入车辆",
+  "category": "专项",
+  "description": "靠近并进入车辆",
+  "defaultDurationSec": 2.2,
+  "moving": true,
+  "suggestedDistance": 1.5
+ },
+ {
+  "id": "exit-car",
+  "label": "离开车辆",
+  "category": "专项",
+  "description": "从车辆中出来并站稳",
+  "defaultDurationSec": 2.2,
+  "moving": true,
+  "suggestedDistance": 1.5
+ }
+]

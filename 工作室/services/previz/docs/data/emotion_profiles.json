@@ -1,0 +1,30 @@
+{
+ "neutral": {
+  "label": "自然",
+  "amplitude": 1
+ },
+ "tender": {
+  "label": "温柔",
+  "amplitude": 0.72
+ },
+ "intimate": {
+  "label": "亲密",
+  "amplitude": 0.62
+ },
+ "tense": {
+  "label": "紧张",
+  "amplitude": 1.15
+ },
+ "joyful": {
+  "label": "喜悦",
+  "amplitude": 1.22
+ },
+ "grief": {
+  "label": "悲伤",
+  "amplitude": 0.6
+ },
+ "menacing": {
+  "label": "威压",
+  "amplitude": 1.3
+ }
+}

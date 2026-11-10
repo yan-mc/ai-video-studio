@@ -1,0 +1,90 @@
+# ===== 资源与运行时（体积大，绝不入库） =====
+
+# AI 运行时（156 GB）：模型权重 + ComfyUI + Python venv
+ai-runtime/
+
+# 拆解产物（4 GB）：反编译的闭源软件资产，版权风险
+功能拆解/
+
+# 外挂资产包（有版权，可能含闭源资产）
+资产包/
+
+# 第三方二进制工具（314 MB ffmpeg）
+工作室/tools/
+
+# 终端工具与依赖
+终端相关/
+
+# ===== 运行时数据与中间产物 =====
+工作室/data/*
+!工作室/data/.gitkeep
+!工作室/data/config.example.json
+!工作室/data/workflows/
+
+# 运行时目录（首次启动自动创建）
+工作室/data/assets/
+工作室/data/characters/
+工作室/data/frames/
+工作室/data/outputs/
+工作室/data/post/
+工作室/data/previz/
+工作室/data/previz-port/
+工作室/data/projects/
+工作室/data/prompts/
+工作室/data/refs/
+工作室/data/shots/
+工作室/data/jobs.json
+工作室/data/projects.json
+工作室/data/mounts.json
+工作室/data/config.json
+
+# 占位媒体
+工作室/assets/
+
+# ===== 备份与临时文件 =====
+*.before-*
+*.bak
+*.old
+*~
+*.tmp
+*.pre-*
+_*.txt
+_*.json
+
+# ===== 截图（中间产物） =====
+工作室/docs/**/*.png
+工作室/services/**/*.png
+工作室/docs/harness/client.js
+
+# ===== Node =====
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+.npm
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ===== 编辑器与系统 =====
+.vscode/settings.json
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== 日志 =====
+*.log
+logs/
+
+# ===== 本地密钥 =====
+*.key
+*.pem
+.env
+.env.*
+!.env.example

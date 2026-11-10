@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI 视频工作室 UI harness</title>
+<style>
+  :root{
+    --dsw-alias-bg-base:#ffffff; --dsw-alias-bg-layer-1:#f6f7f9; --dsw-alias-bg-layer-2:#eceef2;
+    --dsw-alias-bg-overlay:#ffffff; --dsw-alias-border-l1:#dfe2e7; --dsw-alias-border-l2:#c8ccd3;
+    --dsw-alias-brand-primary:#2b6cf6; --dsw-alias-label-primary:#14161a; --dsw-alias-label-secondary:#5c6270;
+    --dsw-alias-state-error-primary:#d64545; --dsw-alias-state-idle-primary:#98a0ad;
+    --dsw-alias-state-success-primary:#2f9e5f; --dsw-alias-state-warn-primary:#c9820a;
+    --dsw-specific-sidebar-fill:#f1f3f6;
+  }
+  html,body{margin:0;height:100%;background:var(--dsw-alias-bg-base)}
+  #host{width:100%;height:100%;display:flex;flex-direction:column}
+  #host > div{flex:1;min-height:0}
+  html.__w600__ #host{width:600px}
+  html.__w326__ #host{width:326px}
+  html.__w900__ #host{width:900px}
+</style>
+<script src="./react.js"></script>
+<script src="./react-dom.js"></script>
+<script>
+// URL 参数控制模拟宽度：?w=326 模拟 175% DPI 笔记本下的真实面板宽度
+(function(){
+  var m = location.search.match(/[?&]w=(\d+)/);
+  if (m) document.documentElement.classList.add('__w' + m[1] + '__');
+  var nm = location.search.match(/[?&]narrow=(\d+)/);
+  if (nm && document.documentElement.classList.contains('__w' + (nm[1]==='0'?'900':(nm[1]==='1'?'600':'326')) + '__')) {}
+})();
+</script>
+</head>
+<body>
+<div id="host"></div>
+<script>
+// DSH 客户端运行时打桩：__ModuleLoader__ / require('react')
+window.__ModuleLoader__ = {
+  load(def) {
+    const modules = { react: window.React };
+    const requireFn = (name) => {
+      if (!modules[name]) throw new Error('module not available: ' + name);
+      return modules[name];
+    };
+    window.__STUDIO_API__ = def.factory(requireFn);
+  },
+};
+
+// harness 服务器已把 /ai-video-studio/api/* 同源反向代理到真实插件 API，
+// 因此保持原样 fetch 即可（跨源重写会触发 CORS 失败）。
+
+// 记录渲染错误供验证读取
+window.__ERRORS__ = [];
+window.addEventListener('error', (e) => window.__ERRORS__.push('error: ' + (e.message || e.type)));
+window.addEventListener('unhandledrejection', (e) => window.__ERRORS__.push('rejection: ' + String(e.reason && (e.reason.message || e.reason))));
+const origErr = console.error;
+console.error = function () {
+  window.__ERRORS__.push('console.error: ' + Array.prototype.map.call(arguments, String).join(' '));
+  return origErr.apply(console, arguments);
+};
+const origWarn = console.warn;
+console.warn = function () {
+  window.__ERRORS__.push('console.warn: ' + Array.prototype.map.call(arguments, String).join(' '));
+  return origWarn.apply(console, arguments);
+};
+</script>
+<script src="./client.js"></script>
+<script>
+(function boot() {
+  const svg = window.__STUDIO_API__;
+  if (!svg || typeof svg.apply !== 'function') {
+    document.getElementById('host').textContent = 'FACTORY_FAILED';
+    window.__BOOT__ = 'factory-failed';
+    return;
+  }
+  const registered = {};
+  const ctx = {
+    slots: {
+      inject(name, fn) { registered[name] = fn; },
+      register(options, component) {
+        // 还原运行时行为：owner 把 props 传给组件
+        return { options: options, component: component };
+      },
+    },
+    effect(fn) { try { const d = fn(); return d; } catch (e) { window.__ERRORS__.push('effect: ' + e.message); } },
+    on() {}, emit() {},
+  };
+  try {
+    svg.apply(ctx);
+  } catch (e) {
+    document.getElementById('host').textContent = 'APPLY_FAILED: ' + e.message;
+    window.__BOOT__ = 'apply-failed';
+    return;
+  }
+  window.__REGISTERED__ = Object.keys(registered);
+  const reg = registered['main'];
+  if (typeof reg !== 'function') {
+    document.getElementById('host').textContent = 'NO_MAIN_SLOT';
+    window.__BOOT__ = 'no-main';
+    return;
+  }
+  const entry = reg();
+  const App = entry && entry.component;
+  if (typeof App !== 'function') {
+    document.getElementById('host').textContent = 'NO_APP_COMPONENT';
+    window.__BOOT__ = 'no-component';
+    return;
+  }
+  // 模拟 DSH owner 提供给 main 槽位的标准 props
+  const noop = () => false;
+  const props = {
+    useRemoteAccess: noop, useResource: () => ({}), useContextMenu: () => ({}),
+    useWorkspaces: () => ({}), usePanelInfo: () => ({}), useSessions: () => ({}),
+    useSessionStatus: () => ({}), useSessionRetainInfo: () => ({}),
+    useSessionAccess: noop, useWorkspaceAccess: noop,
+  };
+  ReactDOM.createRoot(document.getElementById('host')).render(
+    React.createElement(App, props)
+  );
+  window.__BOOT__ = 'ok';
+})();
+</script>
+<script>
+/* __WCTL__ 按 URL ?w= 限制 host 宽度，模拟 DSH 面板真实可用宽度 */
+(function(){
+  var m = location.search.match(/[?&]w=(\d+)/);
+  if (!m) return;
+  var w = parseInt(m[1], 10);
+  var st = document.createElement('style');
+  st.textContent = '#host{width:' + w + 'px !important;max-width:' + w + 'px !important}';
+  document.head.appendChild(st);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+[
+ {
+  "id": "person",
+  "label": "标准人物",
+  "description": "成年人白模",
+  "kind": "person"
+ },
+ {
+  "id": "tall-person",
+  "label": "高个人物",
+  "description": "较高体型，用于形成身高差",
+  "kind": "person"
+ },
+ {
+  "id": "child",
+  "label": "儿童人物",
+  "description": "较矮的人物比例",
+  "kind": "person"
+ },
+ {
+  "id": "quadruped",
+  "label": "四足动物",
+  "description": "中型动物走位白模",
+  "kind": "animal"
+ },
+ {
+  "id": "small-animal",
+  "label": "小型动物",
+  "description": "小型动物走位白模",
+  "kind": "animal"
+ },
+ {
+  "id": "crowd-3",
+  "label": "小型群众",
+  "description": "3 x 3 群众阵列",
+  "kind": "crowd"
+ },
+ {
+  "id": "crowd-5",
+  "label": "大型群众",
+  "description": "4 x 5 群众阵列",
+  "kind": "crowd"
+ }
+]
