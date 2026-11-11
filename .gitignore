@@ -1,12 +1,12 @@
 # ===== 资源与运行时（体积大，绝不入库） =====
 
-# AI 运行时（156 GB）：模型权重 + ComfyUI + Python venv
+# AI 运行时（79.5 GB）：模型权重 + ComfyUI + Python venv
 ai-runtime/
 
 # 拆解产物（4 GB）：反编译的闭源软件资产，版权风险
 功能拆解/
 
-# 外挂资产包（有版权，可能含闭源资产）
+# 外挂资产包（有版权）
 资产包/
 
 # 第三方二进制工具（314 MB ffmpeg）
@@ -38,8 +38,10 @@ ai-runtime/
 工作室/data/mounts.json
 工作室/data/config.json
 
-# 占位媒体
-工作室/assets/
+# ===== 构建中间产物（app-dist 进仓库，但 node_modules 不进） =====
+工作室/dsh-ai-video-studio/app-src/node_modules/
+工作室/dsh-ai-video-studio/app-src/.vite/
+**/dist/**/*.map
 
 # ===== 备份与临时文件 =====
 *.before-*
@@ -50,6 +52,10 @@ ai-runtime/
 *.pre-*
 _*.txt
 _*.json
+_*.mjs
+_*.py
+
+# 但保留教程资料里的脚本例外（如有）
 
 # ===== 截图（中间产物） =====
 工作室/docs/**/*.png
@@ -62,6 +68,7 @@ npm-debug.log*
 pnpm-debug.log*
 yarn-error.log*
 .npm
+.pnpm-store/
 
 # ===== Python =====
 __pycache__/

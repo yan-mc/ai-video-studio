@@ -1,7 +1,11 @@
 # AI 视频工作室
 
-> 基于 [DeepSeek Harness](https://github.com/deepseek-ai) 的本地 AI 视频制作工作台。
+> 基于 [DeepSeek​ Harness](https://github.com/deepseek-ai) 的本地 AI 视频制作工作台。
 > 从镜头卡到成片的全链路：**提示词编译 → 3D 预演 → 本地 MiniMax H3 生成 → 后处理 → 质检**。
+
+**当前状态**：本地生成链路已跑通；前端待重构为浏览器 SPA（方案已敲定）。
+
+👉 **接手请先读 [交接文档.md](交接文档.md)**
 
 ---
 
@@ -10,32 +14,34 @@
 一个 DSH 插件 + 本地服务的组合，把「用自然语言描述一个镜头」变成「得到带音频的视频文件」。
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  DSH 插件 @local/dsh-ai-video-studio                     │
-│  ├─ index.js   12 个 studio_* 工具 + Web API             │
-│  └─ client.js  导演台式 UI（三栏 + 时间轴）               │
-└─────────────────────────────────────────────────────────┘
-                          ↓
-┌─────────────────────────────────────────────────────────┐
-│  本地服务                                                 │
-│  ├─ ComfyUI 0.44.0 :8188    跑 MiniMax H3                │
-│  └─ 预演引擎      :4318     3D 导演台（three.js r184）    │
-└─────────────────────────────────────────────────────────┘
-                          ↓
-              ffmpeg 9.0.2（后处理 / 质检 / 抽帧）
+┌─────────────────────────────────────────────────┐
+│  DSH 插件 @local/dsh-ai-video-studio             │
+│  ├─ index.js   12 个 studio_* 工具 + REST API    │
+│  └─ client.js  面板 UI（待重构为启动器）           │
+└─────────────────────────────────────────────────┘
+                      ↓
+┌─────────────────────────────────────────────────┐
+│  本地服务                                         │
+│  ├─ ComfyUI 0.44.0 :8188    跑 MiniMax H3        │
+│  └─ 预演引擎      :4318     3D 导演台             │
+└─────────────────────────────────────────────────┘
+                      ↓
+          ffmpeg 9.x（后处理 / 质检 / 抽帧）
 ```
 
 ### 核心能力
 
-| 能力 | 说明 |
+| 能力 | 状态 |
 |---|---|
-| **镜头卡** | 标题/时长/比例/风格/描述/运镜/声音，一套结构化输入 |
-| **H3 提示词编译** | 自动编译成 MiniMax H3 要求的六段式格式（I2VA / T2VA） |
-| **3D 预演** | 内置预演引擎，摆位、排动作、设机位，导出首尾帧与控制视频 |
-| **本地生成** | MiniMax H3 全参数驱动（分辨率档位、时长网格、Turbo LoRA、音频 VAE） |
-| **角色卡** | 把「外观描述 + 参考图/音 + 画风」打包，避免每次重写提示词 |
-| **资产体系** | 外挂资产包（只读）与上传资产库（可写）分离 |
-| **后处理/质检** | ffmpeg 转码/缩放/拼接/混音 + ffprobe 质检 |
+| 镜头卡（标题/时长/比例/风格/描述/运镜/声音） | ✅ |
+| H3 提示词编译（六段式 I2VA / T2VA） | ✅ |
+| 3D 预演（58 动作 / 20+ 运镜 / 13 工具） | ✅ |
+| 本地 H3 生成（4 档分辨率 / 5-15 秒 / 带音频） | ✅ |
+| 角色卡（外观 + 参考图 + 画风） | ✅ |
+| 资产体系（外挂包只读 + 上传库可写） | ✅ |
+| 后处理 / 质检（ffmpeg + ffprobe） | ✅ |
+| **浏览器 SPA 工作台** | ⬜ 待重构 |
+| **画布节点系统（React Flow）** | ⬜ 待重构 |
 
 ---
 
@@ -46,12 +52,12 @@
 | **显卡** | NVIDIA，**12 GB 显存**可跑满全部官方档位（实测 RTX 4080 Laptop） |
 | **DSH** | 0.2.2-rc.1 或更高 |
 | **ComfyUI** | 0.44.0+ |
-| **ffmpeg** | 9.x（放在 `工作室/tools/ffmpeg`，或改 `ffmpegDir` 指向系统安装） |
+| **ffmpeg** | 9.x（放 `工作室/tools/ffmpeg`，或改 `ffmpegDir`） |
 | **Python** | 3.12（仅 ComfyUI 侧需要） |
 
 ### 模型（73.37 GB，需自行下载）
 
-放在 `ai-runtime/models/`：
+放 `ai-runtime/models/`：
 
 | 文件 | 大小 | 用途 |
 |---|---|---|
@@ -82,34 +88,22 @@
 
 ## 快速开始
 
-### 1. 安装插件
-
 ```bash
-# 复制到 DSH profile 的 node_modules
-cp -r 工作室/dsh-ai-video-studio ~/.dsh/profiles/desktop/node_modules/@local/
-```
+# 1. 安装插件：复制 工作室/dsh-ai-video-studio 到
+#    ~/.dsh/profiles/desktop/node_modules/@local/
+# 2. 在 DSH 里启用 @local/dsh-ai-video-studio
 
-在 DSH 里启用 `@local/dsh-ai-video-studio`。
+# 3. 配置
+cp 工作室/data/config.example.json 工作室/data/config.json
+# 按实际路径修改
 
-### 2. 配置
-
-复制 `工作室/data/config.example.json` 为 `config.json`，按实际路径修改。
-
-### 3. 起 ComfyUI
-
-```powershell
-# 项目自带启动脚本（幂等，自动等端口）
+# 4. 起 ComfyUI
 & 'ai-runtime\start-h3.ps1'
+
+# 5. 自检
+$base='http://127.0.0.1:{DSH端口}/ai-video-studio/api'
+curl "$base/selfcheck"     # 期望 12/13（seedance 缺 key 是预期）
 ```
-
-### 4. 自检
-
-```powershell
-$base='http://127.0.0.1:7560/ai-video-studio/api'   # 端口 = DSH Web GUI 端口
-curl "$base/selfcheck"
-```
-
-期望 **12/13**（`seedance` 缺 API Key 是预期的）。
 
 ---
 
@@ -129,19 +123,6 @@ studio_jobs(action='get', jobId)
 studio_qc(path='outputs/xxx.mp4')
 ```
 
-### 通过 UI
-
-DSH 侧栏 → 「视频工作室」→ 六个页签：
-
-| 页签 | 功能 |
-|---|---|
-| **分镜** | 主工作台（左栏镜头列表 / 中间舞台 / 右栏属性，底部时间轴） |
-| **任务** | 生成任务列表、质检、重试、取消 |
-| **资产包** | 三个子页签：资产库（上传）/ 资产包（外挂）/ 角色卡 |
-| **预演** | 预演服务控制、渲染、绑定 |
-| **后端** | mock / h3-local / seedance-cloud 健康检查 |
-| **设置** | 配置编辑、12 项自检、档位表 |
-
 ### 12 个工具
 
 `studio_config` `studio_project` `studio_shot` `studio_prompt` `studio_generate` `studio_jobs`
@@ -158,27 +139,21 @@ DSH 侧栏 → 「视频工作室」→ 六个页签：
 | **1056×608** | **211s** | ~11 G |
 | 1344×768 | 336s | ~11.5 G |
 
-长时长（608p）：10 秒 = 506s，15 秒（362 帧，H3 上限）= 836s。
-
+长时长（608p）：10 秒 506s，15 秒（362 帧上限）836s。
 同参数重复提交命中 ComfyUI 缓存约 **10 秒**。
 
 ---
 
 ## 踩过的坑（重要）
 
-1. **H3 不认识角色名。** 写 `Sakiko Togawa` 得到随机路人。必须写全外观：`pale blue hair, black hair ribbon, black dress, black gloves`。
+1. **H3 不认识角色名。** 写 `Sakiko Togawa` 得到随机路人。必须写全外观。
+2. **不要用预演灰模帧做条件帧。** 灰模被当风格参考，输出会出现灰色方块、描白边。
+3. **DSH 插件 UI 不能用 `@media`。** 侧栏吃掉 286 CSS px，用 `ResizeObserver` 实测。
+4. **Grid 折叠不能把列设 0px。** `0px 1fr 0px` 会让 `1fr` 算出 0。
+5. **`director_manage_shot` 参数是 `operation`**，无 `update`，时长用 `duration_frames`。
+6. **相机关键帧同帧号不覆盖。** 必须先删旧帧。
 
-2. **不要用预演灰模帧做 H3 条件帧。** 灰模会被当作风格参考，导致画面出现灰色方块、角色描白边。预演只用来设计站位和运镜，把结果**转成文字**。
-
-3. **UI 不能用 `@media`。** DSH 侧栏吃掉 286 CSS px，面板实际只剩 ~326 px。用 `ResizeObserver` 实测宽度分档。
-
-4. **Grid 折叠不能把列设 0px。** `grid-template-columns: 0px 1fr 0px` 会让 `1fr` 算出 **0**。折叠时整体替换列定义，且不渲染该列 DOM。
-
-5. **`director_manage_shot` 参数是 `operation`**，只支持 `add/duplicate/rename/reorder/delete`（无 update），时长用 `duration_frames`。
-
-6. **相机关键帧同帧号不覆盖。** 必须先删除旧帧。
-
-完整清单见 [SKILL.md](工作室/docs/SKILL.md)。
+完整清单见 [交接文档.md](交接文档.md) 与 [工作室/docs/SKILL.md](工作室/docs/SKILL.md)。
 
 ---
 
@@ -186,21 +161,25 @@ DSH 侧栏 → 「视频工作室」→ 六个页签：
 
 ```
 F:\AI视频\
+├── 交接文档.md                   ★ 接手先读
 ├── 工作室/
-│   ├── dsh-ai-video-studio/     ← DSH 插件（index.js + client.js）
-│   ├── services/previz/         ← 预演引擎（engine.mjs + server.mjs + web/）
-│   ├── data/
-│   │   ├── workflows/h3.json    ← ComfyUI 工作流模板
-│   │   └── config.example.json
-│   ├── docs/                    ← 设计与审计文档 + SKILL.md
-│   └── tools/ffmpeg/            ← ffmpeg（不入库，需自行安装）
-├── ai-runtime/                  ← ComfyUI + 模型 + venv（不入库，156 GB）
-├── 资产包/                       ← 外挂资产包（不入库）
-├── 功能拆解/                     ← 拆解产物（不入库）
-├── 研究资料/                     ← 调研原始资料
-├── 数据表/                       ← 模型与平台对比表
-├── 模板/                         ← H3 输入包 schema / 提示词模板
-└── 存档-旧方案/                  ← 历史方案
+│   ├── dsh-ai-video-studio/     DSH 插件
+│   ├── services/previz/         预演引擎
+│   ├── studio-apps/director/    ★ 解包导演台（可用）
+│   ├── data/                    运行数据
+│   ├── docs/                    设计文档 + SKILL.md
+│   └── tools/ffmpeg/            （不入库）
+├── 教程资料/                     ★ 对标与方案
+│   ├── 技术方案.md              重构方案（已敲定）
+│   ├── 官方文档/                21 篇教程 PDF + 文本
+│   └── 功能清单/                产品总览、对标清单、拆解报告
+├── 资料归档/                    有价值的旧方案 6 份
+├── 研究资料/                    调研原始资料
+├── 数据表/                      模型与平台对比表
+├── 模板/                        H3 输入包 schema
+├── ai-runtime/                  （不入库，79.5 GB）
+├── 功能拆解/                    （不入库，4 GB）
+└── 资产包/                      （不入库）
 ```
 
 ---
@@ -209,15 +188,16 @@ F:\AI视频\
 
 | 文档 | 内容 |
 |---|---|
-| [工作室/docs/SKILL.md](工作室/docs/SKILL.md) | **项目技能手册**：约束、陷阱、操作、代码地图 |
-| [方案总览.md](方案总览.md) | 目标/范围/架构/剩余阶段 |
-| [插件实现与接口规范.md](插件实现与接口规范.md) | 工具/API/数据模型/错误码 |
-| [P0验收报告与剩余工作.md](P0验收报告与剩余工作.md) | 验收清单与剩余工作 |
+| [交接文档.md](交接文档.md) | **★ 接手必读**：状态、环境、坑、下一步 |
+| [教程资料/技术方案.md](教程资料/技术方案.md) | 重构方案（已敲定） |
+| [教程资料/功能清单/功能对标清单.md](教程资料/功能清单/功能对标清单.md) | 11 模块逐步对标 |
+| [教程资料/官方文档/README.md](教程资料/官方文档/README.md) | 21 篇教程索引 |
+| [工作室/docs/SKILL.md](工作室/docs/SKILL.md) | 项目技能手册 |
 | [工作室/docs/project-status-review.md](工作室/docs/project-status-review.md) | 项目现状审查 |
 | [工作室/docs/impl-audit.md](工作室/docs/impl-audit.md) | 逐函数实现审计 |
-| [工作室/docs/plan-vs-actual.md](工作室/docs/plan-vs-actual.md) | 计划 vs 实际对照 |
+| [工作室/docs/plan-vs-actual.md](工作室/docs/plan-vs-actual.md) | 计划 vs 实际 |
 | [工作室/docs/assets-and-characters.md](工作室/docs/assets-and-characters.md) | 资产体系与角色卡 |
-| [工作室/docs/cbm-research.md](工作室/docs/cbm-research.md) | CBM（概念瓶颈模型）调研 |
+| [工作室/docs/cbm-research.md](工作室/docs/cbm-research.md) | CBM 调研 |
 | [工作室/docs/fix-previz.md](工作室/docs/fix-previz.md) | 预演链路修复记录 |
 | [工作室/docs/fix-reliability.md](工作室/docs/fix-reliability.md) | 可靠性修复记录 |
 | [工作室/docs/ui-verification.md](工作室/docs/ui-verification.md) | UI 验证记录 |
@@ -227,6 +207,6 @@ F:\AI视频\
 ## 许可与来源
 
 - 本项目代码：仅供学习研究
-- **不包含任何第三方资产包、拆解产物或模型权重** —— 这些需自行获取
-- 预演引擎基于对某闭源预演软件的行为学习重建，代码为独立实现
-- three.js r184、React 等第三方库遵循各自许可，详见 [工作室/vendor/PROVENANCE.md](工作室/vendor/PROVENANCE.md)
+- **不包含任何第三方资产包、拆解产物或模型权重** —— 需自行获取
+- 预演引擎基于对某闭源软件的行为学习重建，代码为独立实现
+- three.js、React、React Flow 等遵循各自许可
