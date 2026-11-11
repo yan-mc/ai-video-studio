@@ -44,6 +44,104 @@ function sendJson(res, code, value) {
   res.end(JSON.stringify(value));
 }
 
+/* ------------------------------------------------- 二进制/流 辅助 */
+
+const MIME_BY_EXT = {
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp', '.gif': 'image/gif', '.svg': 'image/svg+xml',
+  '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
+  '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4',
+  '.glb': 'model/gltf-binary', '.gltf': 'model/gltf+json',
+  '.json': 'application/json', '.txt': 'text/plain; charset=utf-8',
+};
+
+function readRawBody(req, limit = 256 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) { reject(new Error('BODY_TOO_LARGE')); req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+/** 极简 multipart/form-data 解析（够用：文件 + 文本字段） */
+function parseMultipart(buf, contentType) {
+  const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType);
+  const boundary = (m?.[1] || m?.[2] || '').trim();
+  if (!boundary) return [];
+  const delim = Buffer.from(`--${boundary}`);
+  const parts = [];
+  let start = buf.indexOf(delim);
+  if (start < 0) return [];
+  start += delim.length;
+
+  for (;;) {
+    // 结束标记 --
+    if (buf[start] === 0x2d && buf[start + 1] === 0x2d) break;
+    // 跳过 CRLF
+    if (buf[start] === 0x0d && buf[start + 1] === 0x0a) start += 2;
+
+    const nextDelim = buf.indexOf(delim, start);
+    if (nextDelim < 0) break;
+    const headEnd = buf.indexOf('\r\n\r\n', start);
+    if (headEnd < 0 || headEnd > nextDelim) { start = nextDelim + delim.length; continue; }
+
+    const headers = buf.toString('utf8', start, headEnd);
+    const bodyStart = headEnd + 4;
+    // 去掉尾部的 CRLF
+    let bodyEnd = nextDelim;
+    if (buf[bodyEnd - 2] === 0x0d && buf[bodyEnd - 1] === 0x0a) bodyEnd -= 2;
+
+    const nameM = /name="([^"]*)"/i.exec(headers);
+    const fileM = /filename="([^"]*)"/i.exec(headers);
+    parts.push({
+      name: nameM?.[1] || '',
+      filename: fileM?.[1] || null,
+      data: buf.subarray(bodyStart, bodyEnd),
+    });
+
+    start = nextDelim + delim.length;
+    if (start >= buf.length) break;
+  }
+  return parts;
+}
+
+function parseRangeHeader(header, size) {
+  if (!header) return null;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(String(header).trim());
+  if (!m) return null;
+  if (m[1] === '' && m[2] === '') return null;
+  let start; let end;
+  if (m[1] === '') {
+    const suffix = Number(m[2]);
+    if (!Number.isFinite(suffix) || suffix <= 0) return { invalid: true };
+    start = Math.max(0, size - suffix); end = size - 1;
+  } else {
+    start = Number(m[1]); end = m[2] === '' ? size - 1 : Number(m[2]);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return { invalid: true };
+  }
+  if (start > end || start >= size) return { invalid: true };
+  return { start, end: Math.min(end, size - 1) };
+}
+
+function pipeStream(res, abs, range) {
+  const stream = fs.createReadStream(abs, range ? { start: range.start, end: range.end } : {});
+  stream.on('error', () => {
+    if (!res.headersSent) {
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ error: 'READ_FAILED' }));
+    } else {
+      try { res.destroy(); } catch { /* ignore */ }
+    }
+  });
+  stream.pipe(res);
+}
+
 /* ---------------------------------------------------------------- 路由 */
 
 /**
@@ -262,7 +360,74 @@ export async function handleApi(req, res) {
       return sendJson(res, 200, await ctx.assets.list({ type, projectId }));
     }
     if (req.method === 'POST' && route === '/assets/upload') {
-      return sendJson(res, 400, { error: 'USE_MULTIPART', detail: '请用 POST /assets/upload 的 multipart 形式' });
+      const ct = String(req.headers['content-type'] || '');
+      let parts;
+      if (ct.includes('multipart/form-data')) {
+        const raw = await readRawBody(req, 256 * 1024 * 1024);
+        parts = parseMultipart(raw, ct);
+      } else {
+        return sendJson(res, 400, { error: 'USE_MULTIPART', detail: '请用 multipart/form-data 上传' });
+      }
+      const fields = {};
+      const files = [];
+      for (const p of parts) {
+        if (p.filename) files.push(p);
+        else fields[p.name] = p.data.toString('utf8');
+      }
+      if (!files.length) return sendJson(res, 400, { error: 'UPLOAD_EMPTY' });
+
+      // 支持字段名 file / files 或任意（取第一个文件）
+      const saved = [];
+      for (const f of files) {
+        try {
+          saved.push(await ctx.assets.saveUploaded(f.data, {
+            filename: f.filename,
+            type: fields.type,
+            name: fields.name || f.filename,
+            projectId: fields.projectId,
+            tag: fields.tag,
+            note: fields.note,
+          }));
+        } catch (e) {
+          return sendJson(res, 400, { error: String(e.message || e), file: f.filename });
+        }
+      }
+      return sendJson(res, 200, { ok: true, saved, count: saved.length, fields });
+    }
+    if ((req.method === 'GET' || req.method === 'HEAD') && route === '/assets/item') {
+      const id = url.searchParams.get('id');
+      try {
+        const abs = await ctx.assets.resolveFile(id);
+        const stat = fs.statSync(abs);
+        const ext = path.extname(abs).toLowerCase();
+        const mime = MIME_BY_EXT[ext] || 'application/octet-stream';
+        const range = parseRangeHeader(req.headers.range, stat.size);
+        if (range && range.invalid) {
+          res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+          return res.end();
+        }
+        if (range) {
+          const len = range.end - range.start + 1;
+          res.writeHead(206, {
+            'Content-Type': mime, 'Accept-Ranges': 'bytes',
+            'Content-Range': `bytes ${range.start}-${range.end}/${stat.size}`,
+            'Content-Length': len, 'Cache-Control': 'no-store',
+          });
+          return pipeStream(res, abs, range);
+        }
+        res.writeHead(200, {
+          'Content-Type': mime, 'Content-Length': stat.size,
+          'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store',
+        });
+        if (req.method === 'HEAD') return res.end();
+        return pipeStream(res, abs);
+      } catch (e) {
+        return sendJson(res, 404, { error: String(e.message || e) });
+      }
+    }
+    if (req.method === 'POST' && route === '/assets/delete') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, await ctx.assets.remove(body.id));
     }
 
     /* ---------------- 后处理 ---------------- */
@@ -399,6 +564,45 @@ function resolvePrevizArtifacts(ctx, shot) {
   return out;
 }
 
+/**
+ * 解析镜头的参考图绝对路径。
+ * 来源优先级：shot.refs.images（资产 id 或绝对路径）→ shot.characterRefs。
+ * 最多 9 张（H3 ref_images 上限）。
+ */
+function resolveRefImages(ctx, shot) {
+  const cfg = loadConfig();
+  const out = [];
+  const toAbs = (ref) => {
+    if (!ref) return '';
+    if (typeof ref === 'string') {
+      if (path.isAbsolute(ref)) return fs.existsSync(ref) ? ref : '';
+      try {
+        // 可能是 dataDir 相对路径（如 assets/asset_xxx.png）
+        const a = safeJoin(cfg.dataDir, ref);
+        if (fs.existsSync(a)) return a;
+      } catch { /* ignore */ }
+      return '';
+    }
+    if (ref && typeof ref === 'object') {
+      if (ref.absPath && fs.existsSync(ref.absPath)) return ref.absPath;
+      if (ref.rel) {
+        try {
+          const a = safeJoin(cfg.dataDir, ref.rel);
+          if (fs.existsSync(a)) return a;
+        } catch { /* ignore */ }
+      }
+    }
+    return '';
+  };
+
+  for (const ref of (shot.refs?.images || [])) {
+    const a = toAbs(ref);
+    if (a) out.push({ key: `{{REF_${out.length + 1}}}`, abs: a });
+    if (out.length >= 9) break;
+  }
+  return out;
+}
+
 async function executeBackend(job, shot, ctx, cfg) {
   const prompt = job.prompt || compilePrompt(shot);
   const outputsDir = path.join(cfg.dataDir, 'outputs');
@@ -408,49 +612,61 @@ async function executeBackend(job, shot, ctx, cfg) {
     if (!wf) throw new Error('WORKFLOW_MISSING: 缺少 data/workflows/h3.json');
     const res = resolutionFor(shot.profile, shot.ratio);
     const prof = PROFILES[shot.profile] || PROFILES['P12-draft'];
+
+    // 参考图：从镜头卡的 refs.images 取，暂存进 ComfyUI input
+    const refList = resolveRefImages(ctx, shot);
+    const staged = comfy.stageToComfyInput(
+      cfg,
+      Object.fromEntries(refList.map((r) => [r.key, r.abs])),
+      job.id,
+    );
+
     const map = {
       '{{PROMPT}}': prompt,
       '{{WIDTH}}': res.width,
       '{{HEIGHT}}': res.height,
       '{{LENGTH}}': h3Length(shot.durationSec),
       '{{STEPS}}': prof.steps,
-      '{{CFG}}': prof.cfg,
       '{{FPS}}': 24,
       '{{SEED}}': job.params?.seed ?? 1101,
-      // 模型选择：ref2v 用 Ref2VA，其余用 FL2VA（两模型不通用）
-      '{{UNET_NAME}}': shot.mode === 'ref2v'
+      '{{REF_IMAGE_SIZE}}': 'match',
+      // 有参考图走 ReferenceToVideo（Ref2VA），否则文生视频（FL2VA）
+      '{{UNET_NAME}}': refList.length
         ? 'minimax_h3_ref2va_pruned_fp8_scaled.safetensors'
         : 'minimax_h3_fl2va_pruned_fp8_scaled.safetensors',
       '{{CLIP_NAME}}': 'qwen3vl_32b_minimax_h3_int8_convrot.safetensors',
       '{{VAE_NAME}}': 'minimax_h3_video_vae_fp16.safetensors',
-      '{{LORA_NAME}}': shot.mode === 'ref2v'
+      '{{LORA_NAME}}': refList.length
         ? 'minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors'
         : 'minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors',
       '{{LORA_STRENGTH}}': Number(prof.steps) <= 8 ? 1.0 : 0.0,
     };
 
-    // 首尾帧：有产物才接线，没有就整节点剔除（否则 ComfyUI 会因空字符串报错）
-    const previzAbs = resolvePrevizArtifacts(ctx, shot);
-    const staged = comfy.stageToComfyInput(cfg, previzAbs, job.id);
-    const merged = { ...previzAbs, ...staged };
-    const hasFirst = Boolean(merged['{{FIRST_FRAME}}']);
-    const hasLast = Boolean(merged['{{LAST_FRAME}}']);
-    if (hasFirst) map['{{FIRST_FRAME}}'] = merged['{{FIRST_FRAME}}'];
-    if (hasLast) map['{{LAST_FRAME}}'] = merged['{{LAST_FRAME}}'];
+    // 参考图转成 staged 文件名（LoadImage 只认 input 目录内文件名）
+    const names = refList.map((r) => staged[r.key]).filter(Boolean);
+    if (names[0]) map['{{REF_IMAGE_1}}'] = names[0];
+    if (names[1]) map['{{REF_IMAGE_2}}'] = names[1];
 
     const wfCopy = structuredClone(wf);
-    if (hasFirst) {
-      const node6 = wfCopy.nodes.find((n) => n.id === 6);
-      if (node6) (node6.inputs ||= []).push({ name: 'first_frame', type: 'IMAGE', link: null });
-    } else {
-      wfCopy.nodes = wfCopy.nodes.filter((n) => n.id !== 20);
+
+    // 把 ref_images 接到 ReferenceToVideo 节点上（AUTOGROW 用数组形式）
+    const refNode = wfCopy['9'];
+    if (refNode?.class_type === 'MiniMaxH3ReferenceToVideo') {
+      if (names.length === 0) {
+        // 没有参考图 → 退回文生视频节点
+        wfCopy['9'] = {
+          class_type: 'MiniMaxH3ImageToVideo',
+          inputs: {
+            clip: ['2', 0], vae: ['3', 0], prompt: '{{PROMPT}}',
+            width: '{{WIDTH}}', height: '{{HEIGHT}}', length: '{{LENGTH}}',
+          },
+        };
+      } else {
+        refNode.inputs.ref_images = names.map((_, i) => [String(20 + i), 0]);
+      }
     }
-    if (hasLast) {
-      const node6 = wfCopy.nodes.find((n) => n.id === 6);
-      if (node6) (node6.inputs ||= []).push({ name: 'last_frame', type: 'IMAGE', link: null });
-    } else {
-      wfCopy.nodes = wfCopy.nodes.filter((n) => n.id !== 21);
-    }
+    // 多余的 LoadImage 节点要删掉（未接线会报错）
+    for (let i = names.length; i < 2; i++) delete wfCopy[String(20 + i)];
 
     return comfy.runWorkflow({ cfg, workflow: wfCopy, map, job, outputsDir });
   }
@@ -461,4 +677,5 @@ async function executeBackend(job, shot, ctx, cfg) {
 
   return seedance.runMock({ cfg, job, shot, prompt });
 }
+
 

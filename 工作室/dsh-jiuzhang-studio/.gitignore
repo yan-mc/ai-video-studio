@@ -5,6 +5,7 @@ data/outputs/
 data/previz/
 data/post/
 data/assets/
+data/shots/
 data/selftest-*/
 
 # 仓库里只保留工作流模板

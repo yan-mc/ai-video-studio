@@ -146,16 +146,19 @@ export function runProcess(exe, args, timeoutMs = 600000) {
   return new Promise((resolve, reject) => {
     const child = spawn(exe, args, { windowsHide: true });
     let stderr = '';
+    let stdout = '';
     const timer = setTimeout(() => {
       try { child.kill('SIGKILL'); } catch { /* ignore */ }
       reject(new Error(`PROCESS_TIMEOUT: ${exe}`));
     }, timeoutMs);
+    // ffprobe 的 JSON 走 stdout，必须一并收集（否则 QC 解析不到）
+    child.stdout.on('data', (d) => { stdout += d.toString(); if (stdout.length > 4 * 1024 * 1024) stdout = stdout.slice(-4 * 1024 * 1024); });
     child.stderr.on('data', (d) => { stderr += d.toString(); if (stderr.length > 20000) stderr = stderr.slice(-20000); });
     child.on('error', (e) => { clearTimeout(timer); reject(new Error(`PROCESS_SPAWN_FAILED: ${e.message}`)); });
     child.on('close', (code) => {
       clearTimeout(timer);
-      if (code === 0) resolve({ code, stderr });
-      else reject(new Error(`PROCESS_EXIT_${code}: ${stderr.slice(-800)}`));
+      if (code === 0) resolve({ code, stdout, stderr });
+      else reject(new Error(`PROCESS_EXIT_${code}: ${(stderr || stdout).slice(-800)}`));
     });
   });
 }
