@@ -6,6 +6,19 @@ ai-runtime/
 # 拆解产物（4 GB）：反编译的闭源软件资产，版权风险
 功能拆解/
 
+# ===== 闭源商业软件拆解产物 / 派生件（合规：distribution forbidden）=====
+# 依据 工作室/vendor/PROVENANCE.md：这些是洛书灵枢的闭源资产及其派生，
+# 仅允许本地自用，绝不入库、绝不随分发包。
+# 保留在本地磁盘供研究，但 git 必须完全忽略。
+工作室/services/previz/engine.mjs
+工作室/services/previz/src/previs-src/
+工作室/services/previz/web/assets/
+工作室/services/previz/web/index.html
+工作室/services/previz/web/render.html
+工作室/services/previz/docs/director-web-render-extract.txt
+工作室/services/previz/docs/rea-director-web-analysis.json
+工作室/studio-apps/
+
 # 外挂资产包（有版权）
 资产包/
 

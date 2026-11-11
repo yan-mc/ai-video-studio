@@ -1,0 +1,14 @@
+# 运行时数据（首次启动自动创建，不入库）
+data/config.json
+data/*.json
+data/outputs/
+data/previz/
+data/post/
+data/assets/
+data/selftest-*/
+
+# 仓库里只保留工作流模板
+!data/workflows/
+
+# 自检脚本的临时产物
+*.tmp

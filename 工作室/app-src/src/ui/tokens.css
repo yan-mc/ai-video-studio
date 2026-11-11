@@ -1,0 +1,268 @@
+/**
+ * 设计令牌 —— 双主题（墨夜 / 宣纸）+ 四强调色（朱砂 / 黛青 / 鎏金 / 松绿）。
+ *
+ * 规则：组件里禁止写死颜色，只能引用这里的 var(--jz-*)。
+ * 主题通过 <html data-theme="inknight|xuanpaper" data-accent="cinnabar|indigo|gold|pine">
+ * 切换，由 src/ui/theme.tsx 负责施加。
+ */
+
+/* ===================================================================== */
+/* 一、结构化变量（与主题无关）：间距 / 圆角 / 字号 / 动效 / 层级            */
+/* ===================================================================== */
+:root {
+  /* 间距刻度 4 的倍数 */
+  --jz-sp-1: 4px;
+  --jz-sp-2: 8px;
+  --jz-sp-3: 12px;
+  --jz-sp-4: 16px;
+  --jz-sp-5: 20px;
+  --jz-sp-6: 24px;
+  --jz-sp-8: 32px;
+  --jz-sp-10: 40px;
+
+  /* 圆角 */
+  --jz-r-sm: 6px;
+  --jz-r-md: 9px;
+  --jz-r-lg: 14px;
+  --jz-r-pill: 999px;
+
+  /* 字号 */
+  --jz-fs-xs: 11px;
+  --jz-fs-sm: 12px;
+  --jz-fs-md: 13px;
+  --jz-fs-lg: 15px;
+  --jz-fs-xl: 18px;
+  --jz-fs-2xl: 23px;
+
+  /* 字号/行高组合 */
+  --jz-lh-tight: 1.25;
+  --jz-lh-normal: 1.55;
+
+  /* 字体：标题偏衬线（宣纸气质），正文系统无衬线；不引外部字体，离线可用 */
+  --jz-font-ui: system-ui, -apple-system, 'Segoe UI', 'Microsoft YaHei UI',
+    'Microsoft YaHei', 'PingFang SC', 'Hiragino Sans GB', sans-serif;
+  --jz-font-title: 'Songti SC', 'Source Han Serif SC', 'Noto Serif SC', 'SimSun',
+    var(--jz-font-ui);
+  --jz-font-mono: 'Cascadia Mono', 'JetBrains Mono', Consolas, 'SFMono-Regular',
+    Menlo, monospace;
+
+  /* 动效 */
+  --jz-ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --jz-dur-fast: 110ms;
+  --jz-dur: 170ms;
+
+  /* 层级 */
+  --jz-z-nav: 20;
+  --jz-z-topbar: 30;
+  --jz-z-overlay: 60;
+  --jz-z-toast: 80;
+
+  /* 界面密度（compact 时覆盖） */
+  --jz-density: 1;
+  --jz-control-h: 32px;
+
+  /* 强调色色板值 —— 仅用于"选色器色块"本身：
+     色块必须显示该强调色的**原始色**，不能跟随当前 accent 变量，
+     所以单独给一份常量，避免组件里写死 hex。 */
+  --jz-swatch-cinnabar: #c8564a;
+  --jz-swatch-indigo: #3e5c6b;
+  --jz-swatch-gold: #b8912f;
+  --jz-swatch-pine: #4a6b52;
+
+  color-scheme: dark;
+}
+
+/* ===================================================================== */
+/* 二、墨夜（深色，默认）                                                  */
+/* ===================================================================== */
+:root,
+html[data-theme='inknight'] {
+  color-scheme: dark;
+
+  /* 底色：正文 #111316 为基色，层级往上抬亮 */
+  --jz-bg-base: #111316;
+  --jz-bg-sunken: #0c0e10;
+  --jz-bg-layer-1: #16191d;
+  --jz-bg-layer-2: #1b1f24;
+  --jz-bg-layer-3: #21262c;
+  --jz-bg-hover: rgba(232, 228, 220, 0.055);
+  --jz-bg-active: rgba(232, 228, 220, 0.09);
+  --jz-bg-inverse: #e8e4dc;
+
+  /* 文本 */
+  --jz-text-primary: #e8e4dc;
+  --jz-text-secondary: rgba(232, 228, 220, 0.74);
+  --jz-text-muted: rgba(232, 228, 220, 0.5);
+  --jz-text-faint: rgba(232, 228, 220, 0.36);
+  --jz-text-inverse: #111316;
+
+  /* 描边 */
+  --jz-border: rgba(232, 228, 220, 0.11);
+  --jz-border-strong: rgba(232, 228, 220, 0.2);
+  --jz-border-focus: var(--jz-accent);
+
+  /* 语义色（与强调色解耦） */
+  --jz-ok: #4a6b52;
+  --jz-ok-text: #93b89b;
+  --jz-warn: #b8912f;
+  --jz-warn-text: #e0bf63;
+  --jz-danger: #c8564a;
+  --jz-danger-text: #e5857a;
+  --jz-info: #3e5c6b;
+  --jz-info-text: #8fb3c6;
+
+  /* 阴影 */
+  --jz-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --jz-shadow-md: 0 4px 14px rgba(0, 0, 0, 0.42);
+  --jz-shadow-lg: 0 14px 40px rgba(0, 0, 0, 0.5);
+
+  /* 画布网格与选区 */
+  --jz-grid-dot: rgba(232, 228, 220, 0.09);
+  --jz-scrim: rgba(6, 7, 8, 0.62);
+}
+
+/* ===================================================================== */
+/* 三、宣纸（浅色）                                                        */
+/* ===================================================================== */
+html[data-theme='xuanpaper'] {
+  color-scheme: light;
+
+  --jz-bg-base: #f5f1e8;
+  --jz-bg-sunken: #ece6d8;
+  --jz-bg-layer-1: #faf7f0;
+  --jz-bg-layer-2: #fffdf8;
+  --jz-bg-layer-3: #f2ecdf;
+  --jz-bg-hover: rgba(28, 30, 32, 0.05);
+  --jz-bg-active: rgba(28, 30, 32, 0.09);
+  --jz-bg-inverse: #1c1e20;
+
+  --jz-text-primary: #22262a;
+  --jz-text-secondary: rgba(34, 38, 42, 0.76);
+  --jz-text-muted: rgba(34, 38, 42, 0.55);
+  --jz-text-faint: rgba(34, 38, 42, 0.4);
+  --jz-text-inverse: #f5f1e8;
+
+  --jz-border: rgba(34, 38, 42, 0.13);
+  --jz-border-strong: rgba(34, 38, 42, 0.24);
+  --jz-border-focus: var(--jz-accent);
+
+  --jz-ok: #4a6b52;
+  --jz-ok-text: #38513e;
+  --jz-warn: #b8912f;
+  --jz-warn-text: #7d601a;
+  --jz-danger: #c8564a;
+  --jz-danger-text: #9c3d34;
+  --jz-info: #3e5c6b;
+  --jz-info-text: #2d4753;
+
+  --jz-shadow-sm: 0 1px 2px rgba(60, 52, 36, 0.12);
+  --jz-shadow-md: 0 4px 14px rgba(60, 52, 36, 0.14);
+  --jz-shadow-lg: 0 14px 40px rgba(60, 52, 36, 0.2);
+
+  --jz-grid-dot: rgba(34, 38, 42, 0.12);
+  --jz-scrim: rgba(120, 108, 84, 0.4);
+}
+
+/* ===================================================================== */
+/* 四、四强调色                                                            */
+/*                                                                        */
+/* 每个强调色给出三档：                                                    */
+/*   --jz-accent       实体填充（按钮底色 / 选中态）                         */
+/*   --jz-accent-hover 悬停                                                  */
+/*   --jz-accent-text  文本/图标色（深色主题需提亮，浅色主题需压暗）          */
+/*   --jz-accent-soft  淡底（选中行背景 / 标签底）                           */
+/*   --jz-accent-line  描边                                                   */
+/*   --jz-on-accent    强调色上的文字色                                     */
+/* ===================================================================== */
+
+/* 朱砂 */
+html[data-accent='cinnabar'] {
+  --jz-accent: #c8564a;
+  --jz-accent-hover: #d5655a;
+  --jz-accent-text: #e5857a;
+  --jz-accent-soft: rgba(200, 86, 74, 0.14);
+  --jz-accent-line: rgba(200, 86, 74, 0.42);
+  --jz-on-accent: #fff5f2;
+}
+html[data-theme='xuanpaper'][data-accent='cinnabar'] {
+  --jz-accent-text: #a84237;
+  --jz-accent-soft: rgba(200, 86, 74, 0.12);
+  --jz-accent-line: rgba(200, 86, 74, 0.34);
+  --jz-on-accent: #fff8f5;
+}
+
+/* 黛青 */
+html[data-accent='indigo'] {
+  --jz-accent: #3e5c6b;
+  --jz-accent-hover: #4a6d7f;
+  --jz-accent-text: #8fb3c6;
+  --jz-accent-soft: rgba(62, 92, 107, 0.26);
+  --jz-accent-line: rgba(62, 92, 107, 0.55);
+  --jz-on-accent: #f2f8fa;
+}
+html[data-theme='xuanpaper'][data-accent='indigo'] {
+  --jz-accent: #44626f;
+  --jz-accent-hover: #3a5561;
+  --jz-accent-text: #2d4753;
+  --jz-accent-soft: rgba(62, 92, 107, 0.13);
+  --jz-accent-line: rgba(62, 92, 107, 0.34);
+  --jz-on-accent: #f5fafc;
+}
+
+/* 鎏金 */
+html[data-accent='gold'] {
+  --jz-accent: #b8912f;
+  --jz-accent-hover: #c8a13d;
+  --jz-accent-text: #e0bf63;
+  --jz-accent-soft: rgba(184, 145, 47, 0.18);
+  --jz-accent-line: rgba(184, 145, 47, 0.46);
+  --jz-on-accent: #1b1508;
+}
+html[data-theme='xuanpaper'][data-accent='gold'] {
+  --jz-accent: #a8821f;
+  --jz-accent-hover: #96731b;
+  --jz-accent-text: #7d601a;
+  --jz-accent-soft: rgba(184, 145, 47, 0.16);
+  --jz-accent-line: rgba(184, 145, 47, 0.4);
+  --jz-on-accent: #fffaf0;
+}
+
+/* 松绿 */
+html[data-accent='pine'] {
+  --jz-accent: #4a6b52;
+  --jz-accent-hover: #567c5f;
+  --jz-accent-text: #93b89b;
+  --jz-accent-soft: rgba(74, 107, 82, 0.24);
+  --jz-accent-line: rgba(74, 107, 82, 0.52);
+  --jz-on-accent: #f2f8f3;
+}
+html[data-theme='xuanpaper'][data-accent='pine'] {
+  --jz-accent: #4c6e54;
+  --jz-accent-hover: #41613f;
+  --jz-accent-text: #35553c;
+  --jz-accent-soft: rgba(74, 107, 82, 0.13);
+  --jz-accent-line: rgba(74, 107, 82, 0.36);
+  --jz-on-accent: #f6fbf7;
+}
+
+/* 兜底：万一 data-accent 未设置 */
+html {
+  --jz-accent: #c8564a;
+  --jz-accent-hover: #d5655a;
+  --jz-accent-text: #e5857a;
+  --jz-accent-soft: rgba(200, 86, 74, 0.14);
+  --jz-accent-line: rgba(200, 86, 74, 0.42);
+  --jz-on-accent: #fff5f2;
+}
+
+/* ===================================================================== */
+/* 五、密度                                                                */
+/* ===================================================================== */
+html[data-density='compact'] {
+  --jz-density: 0.82;
+  --jz-control-h: 28px;
+  --jz-sp-3: 10px;
+  --jz-sp-4: 13px;
+  --jz-sp-5: 16px;
+  --jz-sp-6: 20px;
+}
