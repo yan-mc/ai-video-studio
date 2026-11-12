@@ -62,6 +62,7 @@ export function SettingsPage() {
       comfyInputDir: config.comfyInputDir ?? '',
       seedanceEndpoint: config.seedanceEndpoint ?? '',
       seedanceModel: config.seedanceModel ?? '',
+      seedanceApiKey: '',                       // 后端只回掩码，这里留空表示"不修改"
       seedanceMock: config.seedanceMock ?? true,
       defaultBackend: config.defaultBackend ?? 'h3-local',
       defaultProfile: config.defaultProfile ?? 'P12-draft',
@@ -73,7 +74,7 @@ export function SettingsPage() {
   async function handleSave() {
     setBusy(true);
     try {
-      await saveConfig({
+      const patch: Record<string, unknown> = {
         comfyUrl: String(draft['comfyUrl'] ?? ''),
         comfyInputDir: String(draft['comfyInputDir'] ?? ''),
         seedanceEndpoint: String(draft['seedanceEndpoint'] ?? ''),
@@ -85,7 +86,11 @@ export function SettingsPage() {
         previzAutoStart: Boolean(draft['previzAutoStart']),
         theme,
         accent,
-      });
+      };
+      // 只有用户真的输入了新 key 才提交（空 = 保持不变）
+      const newKey = String(draft['seedanceApiKey'] ?? '').trim();
+      if (newKey && newKey !== '***') patch['seedanceApiKey'] = newKey;
+      await saveConfig(patch);
       setSavedAt(Date.now());
       toast.ok(t('settings.configSaved'));
       void refreshHealth();
@@ -172,9 +177,9 @@ export function SettingsPage() {
                 </Field>
                 <Field label={t('settings.seedanceApiKey')} hint={t('settings.seedanceApiKeyHint')}>
                   <Input
-                    value="***"
-                    readOnly
-                    disabled
+                    value={String(draft['seedanceApiKey'] ?? '')}
+                    onChange={(e) => set('seedanceApiKey', e.target.value)}
+                    placeholder="粘贴新的 API Key（留空保持不变）"
                     mono
                     title={t('settings.tokenHint')}
                   />

@@ -7,10 +7,11 @@ import { loadConfig, saveConfig, maskConfig, sanitizeConfigPatch, resetConfigCac
 import { projects, assets, newProject, newShot, PROFILES, resolutionFor, h3Length, NODE_TYPES, NODE_LABELS, ASSET_TYPES, ASSET_TYPE_LABELS, PROJECT_CATEGORY_LABELS, H3_MODEL_SLOTS } from './store/models.js';
 import { jobs as jobsStore, newJob } from './services/job-store.js';
 import { runJob, cancelJob, runtimeStats } from './services/job-runner.js';
-import { compilePrompt, listShots, upsertShot } from './api/index.js';
+import { compilePrompt, listShots, upsertShot, writeShots } from './api/index.js';
 import * as comfy from './services/comfy-client.js';
 import * as seedanceClient from './services/seedance-client.js';
 import { extractAssets, segmentScript } from './services/h3-workshop.js';
+import { runH3Local } from './services/generator.js';
 import { getRuntime } from './runtime.js';
 
 function ok(value) {
@@ -148,8 +149,14 @@ export function registerTools(ctx) {
         case 'create': return (upsertShot(pid, newShot(args.shot || {})));
         case 'save': return (upsertShot(pid, args.shot || {}));
         case 'delete': {
-          const all = listShots(pid).filter((s) => s.id !== args.shotId);
-          return { ok: true, remaining: all.length };
+          // 修复 G5：原先只算 remaining 不落盘
+          const before = listShots(pid);
+          const after = before.filter((s) => s.id !== args.shotId);
+          if (after.length === before.length) {
+            return { ok: false, error: 'SHOT_NOT_FOUND', remaining: before.length };
+          }
+          writeShots(pid, after);
+          return { ok: true, removed: args.shotId, remaining: after.length };
         }
         default: throw new Error('UNKNOWN_ACTION');
       }
@@ -212,22 +219,14 @@ export function registerTools(ctx) {
 
       runJob(job, async (running) => {
         if (backendId === 'h3-local') {
-          const wf = z.h3.loadWorkflow();
-          if (!wf) throw new Error('WORKFLOW_MISSING');
-          const res = resolutionFor(shot.profile, shot.ratio);
-          const prof = PROFILES[shot.profile] || PROFILES['P12-draft'];
-          return comfy.runWorkflow({
-            cfg,
-            workflow: wf,
-            map: {
-              '{{PROMPT}}': running.prompt,
-              '{{WIDTH}}': res.width, '{{HEIGHT}}': res.height,
-              '{{LENGTH}}': h3Length(shot.durationSec),
-              '{{STEPS}}': prof.steps, '{{CFG}}': prof.cfg,
-              '{{FPS}}': 24, '{{SEED}}': running.params?.seed ?? 1101,
-            },
+          // 统一走 services/generator.js —— 与 REST 路径共用同一实现，
+          // 杜绝"工具漏填占位符"这类漂移（审查 G7）
+          return runH3Local({
+            workflow: z.h3.loadWorkflow(),
             job: running,
-            outputsDir: `${cfg.dataDir}/outputs`,
+            shot,
+            prompt: running.prompt,
+            cfg,
           });
         }
         if (backendId === 'seedance-cloud') return seedanceClient.runSeedance({ cfg, job: running, shot, prompt: running.prompt });
@@ -350,6 +349,7 @@ export function registerTools(ctx) {
 }
 
 export default registerTools;
+
 
 
 

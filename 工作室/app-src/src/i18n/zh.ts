@@ -53,6 +53,7 @@ export const zh = {
     h3: 'H3 工坊',
     settings: '设置',
     jobs: '任务',
+    previz: '预演',
     collapse: '收起侧栏',
     expand: '展开侧栏',
     theme: '切换主题',

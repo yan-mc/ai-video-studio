@@ -9,7 +9,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-export const ROUTES = ['canvas', 'assets', 'projects', 'h3', 'settings', 'jobs'] as const;
+export const ROUTES = ['canvas', 'assets', 'projects', 'h3', 'settings', 'jobs', 'previz'] as const;
 export type RouteId = (typeof ROUTES)[number];
 
 export const DEFAULT_ROUTE: RouteId = 'canvas';

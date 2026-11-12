@@ -1,13 +1,13 @@
 /**
- * 素材库页 —— 14 类资产列表、按类型/项目筛选、空态与失败态。
+ * 素材库页 —— 14 类资产列表、按类型/项目筛选、上传、空态与失败态。
  *
- * 上传能力取决于后端是否暴露 multipart 路由；当前 host/api/index.js 的
- * POST /assets/upload 明确返回 USE_MULTIPART 占位，故这里只做列表与筛选，
- * 上传按钮在有真实 multipart 路由前保持禁用并给出说明。
+ * 上传走 POST /luoshu/api/assets/upload（multipart）。
+ * 后端已实现完整 multipart 解析（host/api/index.js），支持多文件与字段。
  */
 import { useEffect, useMemo, useState } from 'react';
 
 import { useProjectStore } from '../store';
+import { uploadAsset, describeError } from '../api/client';
 import {
   Alert,
   Badge,
@@ -40,6 +40,37 @@ export function AssetsPage() {
   const selectProject = useProjectStore((s) => s.selectProject);
 
   const [type, setType] = useState<FilterValue>('all');
+  const [uploading, setUploading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState('');
+
+  /** 上传文件（支持多选）：逐个 POST /assets/upload，再刷新列表 */
+  async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = '';                       // 允许重复选同一文件
+    if (!files.length) return;
+    setUploading(true);
+    setUploadMsg('');
+    let ok = 0;
+    const fails: string[] = [];
+    for (const f of files) {
+      try {
+        await uploadAsset(f, {
+          type: type !== 'all' ? String(type) : undefined,
+          projectId: currentProjectId ?? undefined,
+          name: f.name,
+        });
+        ok += 1;
+      } catch (err) {
+        fails.push(`${f.name}: ${describeError(err)}`);
+      }
+    }
+    setUploading(false);
+    setUploadMsg(ok ? `已上传 ${ok} 个${fails.length ? `，失败 ${fails.length} 个` : ''}` : `上传失败：${fails[0] ?? ''}`);
+    await loadAssets({
+      ...(type !== 'all' ? { type } : {}),
+      ...(currentProjectId ? { projectId: currentProjectId } : {}),
+    });
+  }
 
   useEffect(() => {
     void loadAssets({
@@ -82,9 +113,17 @@ export function AssetsPage() {
           <Button icon={<Icon name="refresh" size={15} />} onClick={() => void loadAssets()}>
             {t('app.refresh')}
           </Button>
-          <Button variant="primary" icon={<Icon name="upload" size={15} />} disabled title={t('assets.uploadHint')}>
-            {t('assets.upload')}
-          </Button>
+          <label className="jz-btn jz-btn--primary" style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <Icon name="upload" size={15} />
+            <span>{uploading ? '上传中…' : t('assets.upload')}</span>
+            <input
+              type="file"
+              multiple
+              hidden
+              accept="image/*,video/*,audio/*,.glb,.gltf,.fbx,.obj,.json,.txt,.md"
+              onChange={(e) => void handleUpload(e)}
+            />
+          </label>
         </>
       }
     >
@@ -117,6 +156,7 @@ export function AssetsPage() {
         />
 
         {error ? <Alert tone="danger">{`${t('assets.loadFailed')} · ${error}`}</Alert> : null}
+        {uploadMsg ? <Alert tone={uploadMsg.startsWith('上传失败') ? 'danger' : 'ok'}>{uploadMsg}</Alert> : null}
 
         {loading && assets.length === 0 ? (
           <Loading text={t('app.loading')} />

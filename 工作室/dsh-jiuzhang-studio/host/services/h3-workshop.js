@@ -13,7 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { runProcess, resolveFfmpeg, resolveFfprobe } from './seedance-client.js';
-import { h3Length, resolutionFor } from '../store/models.js';
+import { h3Length, resolutionFor, assets as assetStore } from '../store/models.js';
 
 /* ------------------------------------------------------- 分段规则引擎 */
 
@@ -230,25 +230,43 @@ export function createH3Workshop({ root, cfg }) {
     return w;
   }
 
-  /** 导入资产库（把 analyze 的结果落成资产条目） */
+  /** 导入资产库（把 analyze 的结果**真正落盘**到 assets-index） */
   async function importAssets(body = {}) {
     const projectId = body.projectId;
     if (!projectId) throw new Error('noProject');
     const analysis = body.analysis || (await analyze(body));
     const created = [];
 
-    const push = (type, name, data) => created.push({ type, name, dataJson: JSON.stringify(data) });
+    // 修复 G6：原先只 push 内存数组不落盘，summary.created 是幻觉数字
+    const persist = async (type, name, data) => {
+      const item = await assetStore.upsert({
+        projectId,
+        type,
+        name,
+        kind: 'text',
+        rel: null,
+        bytes: 0,
+        tag: `h3-ep${analysis.episode}`,
+        note: data.prompt ? String(data.prompt).slice(0, 200) : '',
+        dataJson: JSON.stringify(data),
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      created.push({ id: item.id, type, name });
+      return item;
+    };
 
-    for (const c of analysis.assets?.characters || []) push('character', c.name, { prompt: c.prompt, figures: [] });
-    for (const s of analysis.assets?.scenes || []) push('scene', s.name, { prompt: s.prompt });
-    for (const p of analysis.assets?.props || []) push('item', p.name, { prompt: p.prompt });
-    for (const v of analysis.assets?.voices || []) push('voice_tone', v.name, { prompt: v.prompt, generatedVoices: [] });
-    for (const s of analysis.shotPrompts || []) push('shot', `第${analysis.episode}集-镜${s.index}`, s);
+    for (const c of analysis.assets?.characters || []) await persist('character', c.name, { prompt: c.prompt, figures: [] });
+    for (const s of analysis.assets?.scenes || []) await persist('scene', s.name, { prompt: s.prompt });
+    for (const p of analysis.assets?.props || []) await persist('item', p.name, { prompt: p.prompt });
+    for (const v of analysis.assets?.voices || []) await persist('voice_tone', v.name, { prompt: v.prompt, generatedVoices: [] });
+    for (const s of analysis.shotPrompts || []) await persist('shot', `第${analysis.episode}集-镜${s.index}`, s);
 
     return {
       ok: true,
       projectId,
       episode: analysis.episode,
+      persisted: true,
       summary: {
         created: created.length,
         characters: analysis.assets?.characters?.length || 0,

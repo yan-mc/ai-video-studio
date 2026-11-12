@@ -191,6 +191,36 @@ async function request<T>(
 
 /* -------------------------------------------------------------- 具体接口 */
 
+/**
+ * multipart 上传（不能走 request()，因为要 FormData + 不设 Content-Type）。
+ * 后端要求写操作带 X-JZ-Token。
+ */
+export async function uploadAsset(
+  file: File,
+  opts: { type?: string; name?: string; projectId?: string; tag?: string; note?: string } = {},
+): Promise<{ ok: boolean; saved: Asset[]; count: number }> {
+  const token = await ensureToken();
+  const form = new FormData();
+  form.append('file', file, file.name);
+  if (opts.type) form.append('type', opts.type);
+  form.append('name', opts.name || file.name);
+  if (opts.projectId) form.append('projectId', opts.projectId);
+  if (opts.tag) form.append('tag', opts.tag);
+  if (opts.note) form.append('note', opts.note);
+
+  const res = await fetch(`${API_BASE}/assets/upload`, {
+    method: 'POST',
+    headers: { 'X-JZ-Token': token },
+    body: form,
+  });
+  const payload = await safeJson(res);
+  if (!res.ok) {
+    const obj = (payload ?? {}) as { error?: string; detail?: string };
+    throw new ApiHttpError(res.status, obj.error || `HTTP_${res.status}`, obj.detail);
+  }
+  return payload as { ok: boolean; saved: Asset[]; count: number };
+}
+
 export const api = {
   /* 令牌 / 元信息 / 健康 */
   token: () => ensureToken(true),

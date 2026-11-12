@@ -954,8 +954,19 @@ function CanvasInner() {
       if (!node) return;
       const type = node.type ?? '';
       const label = displayTitle(node);
-      // 独立工作台在 SPA 的路由里尚未落地，这里给出明确的可达反馈，不静默失败。
-      toast.info(`「${label}」的独立工作台入口待接入（${type}）`);
+      // 3D 类节点（导演台/白模预演/姿势台/全景）→ 打开预演导演台页面
+      // 预演引擎已就绪（services/previz + 5 条 API 路由），SPA 只需一个宿主页
+      const STUDIO_TYPES = new Set([
+        'blueprintNode', 'previzNode', 'poseStudioNode',
+        'vr360PanoramaNode', 'panoramaViewerBNode', 'panoramaNode',
+        'exportVideoNode',
+      ]);
+      if (STUDIO_TYPES.has(type)) {
+        // 用 hash 路由跳转；openStudio 在画布内，直接改 hash 即可
+        window.location.hash = '#/previz';
+        return;
+      }
+      toast.info(`「${label}」没有独立工作台（${type}）`);
     },
     [toast],
   );

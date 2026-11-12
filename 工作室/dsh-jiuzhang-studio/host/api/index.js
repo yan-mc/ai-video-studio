@@ -13,6 +13,7 @@ import * as comfy from '../services/comfy-client.js';
 import * as seedance from '../services/seedance-client.js';
 import { runJob, cancelJob, runtimeStats, markCancelled, CancelledError } from '../services/job-runner.js';
 import { newJob, jobs as jobsStore } from '../services/job-store.js';
+import { runH3Local } from '../services/generator.js';
 import { getRuntime } from '../runtime.js';
 
 /* ------------------------------------------------------------- 工具函数 */
@@ -486,6 +487,16 @@ export function listShots(projectId) {
   } catch { return []; }
 }
 
+/** 整体写回镜头表（原子写） */
+export function writeShots(projectId, list) {
+  const f = shotsFile(projectId);
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  const tmp = `${f}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(list, null, 2), 'utf8');
+  fs.renameSync(tmp, f);
+  return list;
+}
+
 export function upsertShot(projectId, shot) {
   const f = shotsFile(projectId);
   fs.mkdirSync(path.dirname(f), { recursive: true });
@@ -545,130 +556,17 @@ async function previzHealth(ctx) {
 
 /* --------------------------------------------------- 后端执行分发 */
 
-/** 从镜头卡的 previz 绑定里解析出首尾帧/控制视频的绝对路径 */
-function resolvePrevizArtifacts(ctx, shot) {
-  const out = {};
-  const p = shot?.previz;
-  if (!p) return out;
-  const base = loadConfig().dataDir;
-  const abs = (rel) => {
-    if (!rel) return '';
-    try {
-      const a = path.isAbsolute(rel) ? rel : safeJoin(base, rel);
-      return fs.existsSync(a) ? a : '';
-    } catch { return ''; }
-  };
-  if (p.firstFramePath) out['{{FIRST_FRAME}}'] = abs(p.firstFramePath);
-  if (p.lastFramePath) out['{{LAST_FRAME}}'] = abs(p.lastFramePath);
-  if (p.controlVideoPath) out['{{CONTROL_VIDEO}}'] = abs(p.controlVideoPath);
-  return out;
-}
-
-/**
- * 解析镜头的参考图绝对路径。
- * 来源优先级：shot.refs.images（资产 id 或绝对路径）→ shot.characterRefs。
- * 最多 9 张（H3 ref_images 上限）。
- */
-function resolveRefImages(ctx, shot) {
-  const cfg = loadConfig();
-  const out = [];
-  const toAbs = (ref) => {
-    if (!ref) return '';
-    if (typeof ref === 'string') {
-      if (path.isAbsolute(ref)) return fs.existsSync(ref) ? ref : '';
-      try {
-        // 可能是 dataDir 相对路径（如 assets/asset_xxx.png）
-        const a = safeJoin(cfg.dataDir, ref);
-        if (fs.existsSync(a)) return a;
-      } catch { /* ignore */ }
-      return '';
-    }
-    if (ref && typeof ref === 'object') {
-      if (ref.absPath && fs.existsSync(ref.absPath)) return ref.absPath;
-      if (ref.rel) {
-        try {
-          const a = safeJoin(cfg.dataDir, ref.rel);
-          if (fs.existsSync(a)) return a;
-        } catch { /* ignore */ }
-      }
-    }
-    return '';
-  };
-
-  for (const ref of (shot.refs?.images || [])) {
-    const a = toAbs(ref);
-    if (a) out.push({ key: `{{REF_${out.length + 1}}}`, abs: a });
-    if (out.length >= 9) break;
-  }
-  return out;
-}
 
 async function executeBackend(job, shot, ctx, cfg) {
   const prompt = job.prompt || compilePrompt(shot);
   const outputsDir = path.join(cfg.dataDir, 'outputs');
 
   if (job.backendId === 'h3-local') {
-    const wf = ctx.h3.loadWorkflow();
-    if (!wf) throw new Error('WORKFLOW_MISSING: 缺少 data/workflows/h3.json');
-    const res = resolutionFor(shot.profile, shot.ratio);
-    const prof = PROFILES[shot.profile] || PROFILES['P12-draft'];
-
-    // 参考图：从镜头卡的 refs.images 取，暂存进 ComfyUI input
-    const refList = resolveRefImages(ctx, shot);
-    const staged = comfy.stageToComfyInput(
-      cfg,
-      Object.fromEntries(refList.map((r) => [r.key, r.abs])),
-      job.id,
-    );
-
-    const map = {
-      '{{PROMPT}}': prompt,
-      '{{WIDTH}}': res.width,
-      '{{HEIGHT}}': res.height,
-      '{{LENGTH}}': h3Length(shot.durationSec),
-      '{{STEPS}}': prof.steps,
-      '{{FPS}}': 24,
-      '{{SEED}}': job.params?.seed ?? 1101,
-      '{{REF_IMAGE_SIZE}}': 'match',
-      // 有参考图走 ReferenceToVideo（Ref2VA），否则文生视频（FL2VA）
-      '{{UNET_NAME}}': refList.length
-        ? 'minimax_h3_ref2va_pruned_fp8_scaled.safetensors'
-        : 'minimax_h3_fl2va_pruned_fp8_scaled.safetensors',
-      '{{CLIP_NAME}}': 'qwen3vl_32b_minimax_h3_int8_convrot.safetensors',
-      '{{VAE_NAME}}': 'minimax_h3_video_vae_fp16.safetensors',
-      '{{LORA_NAME}}': refList.length
-        ? 'minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors'
-        : 'minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors',
-      '{{LORA_STRENGTH}}': Number(prof.steps) <= 8 ? 1.0 : 0.0,
-    };
-
-    // 参考图转成 staged 文件名（LoadImage 只认 input 目录内文件名）
-    const names = refList.map((r) => staged[r.key]).filter(Boolean);
-    if (names[0]) map['{{REF_IMAGE_1}}'] = names[0];
-    if (names[1]) map['{{REF_IMAGE_2}}'] = names[1];
-
-    const wfCopy = structuredClone(wf);
-
-    // 把 ref_images 接到 ReferenceToVideo 节点上（AUTOGROW 用数组形式）
-    const refNode = wfCopy['9'];
-    if (refNode?.class_type === 'MiniMaxH3ReferenceToVideo') {
-      if (names.length === 0) {
-        // 没有参考图 → 退回文生视频节点
-        wfCopy['9'] = {
-          class_type: 'MiniMaxH3ImageToVideo',
-          inputs: {
-            clip: ['2', 0], vae: ['3', 0], prompt: '{{PROMPT}}',
-            width: '{{WIDTH}}', height: '{{HEIGHT}}', length: '{{LENGTH}}',
-          },
-        };
-      } else {
-        refNode.inputs.ref_images = names.map((_, i) => [String(20 + i), 0]);
-      }
-    }
-    // 多余的 LoadImage 节点要删掉（未接线会报错）
-    for (let i = names.length; i < 2; i++) delete wfCopy[String(20 + i)];
-
-    return comfy.runWorkflow({ cfg, workflow: wfCopy, map, job, outputsDir });
+    // 统一走 services/generator.js（与 Agent 工具共用同一实现）
+    return runH3Local({
+      workflow: ctx.h3.loadWorkflow(),
+      job, shot, prompt, cfg,
+    });
   }
 
   if (job.backendId === 'seedance-cloud') {
@@ -677,5 +575,6 @@ async function executeBackend(job, shot, ctx, cfg) {
 
   return seedance.runMock({ cfg, job, shot, prompt });
 }
+
 
 
