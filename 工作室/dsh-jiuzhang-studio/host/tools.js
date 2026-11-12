@@ -13,6 +13,7 @@ import * as seedanceClient from './services/seedance-client.js';
 import { extractAssets, segmentScript } from './services/h3-workshop.js';
 import { runH3Local } from './services/generator.js';
 import { SCRIPT_GENRES, SCRIPT_STAGES, checkConsistency } from './services/script-service.js';
+import { DIRECTOR_COMMANDS, CAMERA_MOVES, DIRECTOR_FPS } from './services/director3d.js';
 import { getRuntime } from './runtime.js';
 
 function ok(value) {
@@ -433,10 +434,60 @@ export function registerTools(ctx) {
     },
   )));
 
+  /* ---------------------------------------------------------- 3D 导演台 */
+  disposers.push(reg(tool(
+    'studio_director',
+    '3D 导演台：58 动作 / 28 运镜 / 7 人物 / 10 道具。action=meta 取能力；state 读工程；command 执行导演命令；build 从镜头卡建工程；cameraPrompt 把机位转运镜提示词；validate 校验。',
+    {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['meta', 'state', 'command', 'build', 'cameraPrompt', 'validate', 'start', 'stop'],
+        },
+        name: { type: 'string', description: 'director_* 命令名（action=command 时）' },
+        args: { type: 'object', description: '命令参数' },
+        projectId: { type: 'string' },
+        shotId: { type: 'string' },
+        shot: { type: 'object', description: '镜头卡（action=build 时可直接给）' },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+    async (a) => {
+      switch (a.action) {
+        case 'meta': {
+          const [health, catalog] = await Promise.all([
+            z.director.health(),
+            z.director.catalog().catch(() => ({})),
+          ]);
+          return { health, commands: DIRECTOR_COMMANDS, cameraMoves: CAMERA_MOVES, fps: DIRECTOR_FPS, catalog };
+        }
+        case 'state': return await z.director.getState();
+        case 'command': {
+          const name = String(a.name || '');
+          if (!/^director_[a-z_]+$/.test(name)) throw new Error('INVALID_COMMAND');
+          return await z.director.command(name, a.args ?? {});
+        }
+        case 'build': {
+          const shot = a.shot ?? listShots(a.projectId || '').find((s) => s.id === a.shotId);
+          if (!shot) throw new Error('SHOT_NOT_FOUND');
+          return await z.director.buildFromShot(shot, a);
+        }
+        case 'cameraPrompt': return await z.director.toCameraPrompt(a.shotId);
+        case 'validate': return await z.director.validate();
+        case 'start': return await z.director.start();
+        case 'stop': return await z.director.stop();
+        default: throw new Error('UNKNOWN_ACTION');
+      }
+    },
+  )));
+
   return () => disposers.forEach((d) => d && d());
 }
 
 export default registerTools;
+
 
 
 

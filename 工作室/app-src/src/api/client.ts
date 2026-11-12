@@ -340,6 +340,19 @@ export const api = {
   mwUpsertFigure: (figure: Record<string, unknown>) =>
     request<unknown>('POST', '/mw/figure/upsert', { figure }),
 
+  /* 3D 导演台 */
+  directorMeta: () => request<unknown>('GET', '/director/meta'),
+  directorState: () => request<unknown>('GET', '/director/state'),
+  directorShots: () => request<unknown>('GET', '/director/shots'),
+  directorCommand: (input: { name: string; arguments?: Record<string, unknown> }) =>
+    request<{ ok: boolean; result: unknown }>('POST', '/director/command', input),
+  directorBuild: (input: Record<string, unknown>) => request<unknown>('POST', '/director/build', input),
+  directorCameraPrompt: (input: Record<string, unknown>) =>
+    request<unknown>('POST', '/director/camera-prompt', input),
+  directorValidate: () => request<unknown>('POST', '/director/validate'),
+  directorStart: () => request<unknown>('POST', '/director/start'),
+  directorStop: () => request<unknown>('POST', '/director/stop'),
+
   /* 后处理 */
   transcode: (input: TranscodeInput) => request<unknown>('POST', '/post/transcode', input),
   qc: (path: string) => request<QcResult>('POST', '/post/qc', { path }),

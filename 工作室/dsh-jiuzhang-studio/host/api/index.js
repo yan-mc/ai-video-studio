@@ -17,6 +17,7 @@ import { runH3Local } from '../services/generator.js';
 import { packGraph, unpackGraph, IMG_REF_PREFIX } from '../store/image-pool.js';
 import { SCRIPT_GENRES, SCRIPT_STAGES, checkConsistency } from '../services/script-service.js';
 import { COMIC_TEMPLATES, COMIC_STATIONS } from '../services/comic-service.js';
+import { DIRECTOR_COMMANDS, CAMERA_MOVES, DIRECTOR_FPS } from '../services/director3d.js';
 import { getRuntime } from '../runtime.js';
 
 /* ------------------------------------------------------------- 工具函数 */
@@ -427,6 +428,54 @@ export async function handleApi(req, res) {
       return sendJson(res, 200, ctx.comic.exportAllSvg(pid, body.options ?? {}));
     }
 
+    /* ---------------- 3D 导演台 ---------------- */
+    if (req.method === 'GET' && route === '/director/meta') {
+      const [health, catalog] = await Promise.all([
+        ctx.director.health(),
+        ctx.director.catalog().catch(() => ({})),
+      ]);
+      return sendJson(res, 200, {
+        health,
+        commands: DIRECTOR_COMMANDS,
+        cameraMoves: CAMERA_MOVES,
+        fps: DIRECTOR_FPS,
+        catalog,
+      });
+    }
+    if (req.method === 'GET' && route === '/director/shots') {
+      return sendJson(res, 200, await ctx.director.listShots());
+    }
+    if (req.method === 'GET' && route === '/director/state') {
+      return sendJson(res, 200, await ctx.director.getState());
+    }
+    if (req.method === 'POST' && route === '/director/command') {
+      const body = await readJsonBody(req);
+      const name = String(body.name || '');
+      if (!/^director_[a-z_]+$/.test(name)) {
+        return sendJson(res, 400, { error: 'INVALID_COMMAND', name });
+      }
+      return sendJson(res, 200, { ok: true, result: await ctx.director.command(name, body.arguments ?? {}) });
+    }
+    if (req.method === 'POST' && route === '/director/build') {
+      const body = await readJsonBody(req);
+      const shot = body.shot ?? listShots(body.projectId || '').find((s) => s.id === body.shotId);
+      if (!shot) return sendJson(res, 404, { error: 'SHOT_NOT_FOUND' });
+      return sendJson(res, 200, await ctx.director.buildFromShot(shot, body));
+    }
+    if (req.method === 'POST' && route === '/director/camera-prompt') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, await ctx.director.toCameraPrompt(body.shotId));
+    }
+    if (req.method === 'POST' && route === '/director/validate') {
+      return sendJson(res, 200, await ctx.director.validate());
+    }
+    if (req.method === 'POST' && route === '/director/start') {
+      return sendJson(res, 200, await ctx.director.start());
+    }
+    if (req.method === 'POST' && route === '/director/stop') {
+      return sendJson(res, 200, await ctx.director.stop());
+    }
+
     /* ---------------- 模特工作台 ---------------- */
     if (req.method === 'GET' && route === '/mw/meta') {
       return sendJson(res, 200, ctx.mw.meta());
@@ -790,6 +839,8 @@ async function executeBackend(job, shot, ctx, cfg) {
 
   return seedance.runMock({ cfg, job, shot, prompt });
 }
+
+
 
 
 

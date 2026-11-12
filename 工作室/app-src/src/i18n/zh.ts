@@ -57,6 +57,7 @@ export const zh = {
     script: '剧本',
     comic: '漫画',
     mw: '模特',
+    director: '3D 导演台',
     collapse: '收起侧栏',
     expand: '展开侧栏',
     theme: '切换主题',
@@ -298,5 +299,6 @@ export type Zh = typeof zh;
 export type LocaleDict = Zh;
 
 export default zh;
+
 
 
