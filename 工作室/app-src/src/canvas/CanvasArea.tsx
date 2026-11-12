@@ -978,9 +978,9 @@ function CanvasInner() {
       }
 
       if (!isBackendSupported(node.type ?? '')) {
-        // 26 节点里大部分还没有后端能力 —— 如实告知，不假装成功
+        // 部分节点还没有后端能力 —— 如实告知，不假装成功
         markState({ status: 'idle', progress: 0, error: undefined });
-        toast.info(`「${displayTitle(node)}」的后端生成尚未接入（当前仅 AI 视频节点可生成）`);
+        toast.info(`「${displayTitle(node)}」暂不支持生成（可生成：AI 视频 / AI 图片 / 分镜生成 / 全景）`);
         return;
       }
 
@@ -1802,6 +1802,7 @@ export default function CanvasArea() {
 
 /** 供测试/调试：注册表 type 列表与端口矩阵的快速导出 */
 export { NODE_TYPE_KEYS, CATEGORY_ORDER };
+
 
 
 

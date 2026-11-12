@@ -19,14 +19,31 @@ import type { CanvasNodeData } from './types';
 import type { CanvasFlowNode } from './types';
 
 /** 能真正触发后端生成的节点类型 → 后端能力映射 */
+// 注意：值只表示"这类节点走哪条生成路线"，不表示具体后端。
+// 具体后端在 runNodeGeneration 里按节点类型分发：
+//   - realtime  → 走 /image/generate（H3-Image 文生图）
+//   - imageEdit → 走 /breakdown/generate（参考图编辑）
+//   - video     → 走 /generate（H3 / Seedance / mock）
 export const GENERATIVE_NODE_MAP = Object.freeze({
-  videoGeneratorNode: 'h3-local',   // 视频生成（H3 / Seedance / mock 由参数决定）
+  videoGeneratorNode: 'video',
+  imageNode: 'image',            // AI 图片生成
+  storyboardGenNode: 'image',    // 分镜生成（逐格出图）
+  panoramaNode: 'image',         // 全景生成
+  vr360PanoramaNode: 'image',    // 全景 A
+  panoramaViewerBNode: 'image',  // 全景 B
+  backgroundMusicNode: 'audio',  // 背景音乐（暂无后端，会明确提示）
 } as const);
 
 export type GenerativeNodeType = keyof typeof GENERATIVE_NODE_MAP;
+export type GenerativeRoute = (typeof GENERATIVE_NODE_MAP)[GenerativeNodeType];
 
 export function isBackendSupported(nodeType: string): nodeType is GenerativeNodeType {
   return nodeType in GENERATIVE_NODE_MAP;
+}
+
+/** 这个节点走哪条生成路线 */
+export function routeFor(nodeType: string): GenerativeRoute | null {
+  return (GENERATIVE_NODE_MAP as Record<string, GenerativeRoute>)[nodeType] ?? null;
 }
 
 /** 从节点参数里安全取数字 */
@@ -113,6 +130,39 @@ export interface RunResult {
   error?: string;
 }
 
+/** 轮询任务直到终态（图像/视频共用） */
+async function waitJob(
+  jobId: string,
+  onProgress?: (pct: number, note?: string) => void,
+  opts?: { pollMs?: number; timeoutMs?: number },
+): Promise<{ status: string; outputs?: { role?: string; path?: string; bytes?: number }[]; error?: string }> {
+  const pollMs = opts?.pollMs ?? 2500;
+  const timeoutAt = Date.now() + (opts?.timeoutMs ?? 40 * 60 * 1000);
+  let last: string = 'queued';
+
+  while (Date.now() < timeoutAt) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    let jobs: unknown;
+    try {
+      jobs = await api.listJobs();
+    } catch {
+      continue;
+    }
+    const cur = (jobs as { id: string; status: string; outputs?: { role?: string; path?: string; bytes?: number }[]; error?: string }[])
+      .find((j) => j.id === jobId);
+    if (!cur) continue;
+    last = cur.status;
+
+    if (cur.status === 'running') onProgress?.(60, '生成中');
+    if (cur.status === 'queued') onProgress?.(40, '排队中');
+
+    if (['completed', 'failed', 'cancelled', 'interrupted'].includes(cur.status)) {
+      return { status: cur.status === 'interrupted' ? 'cancelled' : cur.status, outputs: cur.outputs, error: cur.error };
+    }
+  }
+  throw new Error(`GENERATE_TIMEOUT: 超时（最后状态 ${last}）`);
+}
+
 /**
  * 执行一次节点生成。
  * @throws 当节点类型不支持 / 后端拒绝 / 超时
@@ -125,11 +175,44 @@ export async function runNodeGeneration(opts: RunOptions): Promise<RunResult> {
     throw new Error(`NODE_NOT_GENERATIVE: 「${type}」没有后端生成能力`);
   }
 
+  const route = routeFor(type);
   onProgress?.(5, '准备输入');
 
   // 1) 收集上游参考图
   const images = collectUpstreamImages(node, allNodes, edges);
 
+  /* ---------------- 图像路线：走 H3-Image ---------------- */
+  if (route === 'image') {
+    const p = (node.data?.params ?? {}) as Record<string, unknown>;
+    const prompt = str(p['prompt'] ?? p['description'], '') || str(node.data?.title, '未命名图片');
+    const sizeId = str(p['sizeId'], 'sq-2048');
+
+    onProgress?.(25, '提交图像生成');
+    const job = await api.imageGenerate({
+      prompt,
+      sizeId,
+      ...(p['seed'] ? { seed: Number(p['seed']) } : {}),
+      ...(images.length ? { refImages: images } : {}),
+      projectId,
+    }) as { id?: string; status?: string };
+    if (!job?.id) throw new Error('IMAGE_JOB_FAILED: 后端没有返回任务号');
+
+    onProgress?.(40, '出图中');
+    const final = await waitJob(job.id, onProgress, opts);
+    if (final.status !== 'completed') {
+      return { jobId: job.id, status: final.status as never, outputs: [], error: final.error };
+    }
+    const outs = (final.outputs ?? []).map((o) => ({ ...o, url: assetUrlFromPath(o.path) }));
+    onProgress?.(100, '完成');
+    return { jobId: job.id, status: 'completed', outputs: outs };
+  }
+
+  /* ---------------- 音频路线：暂无后端 ---------------- */
+  if (route === 'audio') {
+    throw new Error('AUDIO_BACKEND_MISSING: 音频生成后端尚未接入');
+  }
+
+  /* ---------------- 视频路线 ---------------- */
   // 2) 组装 shot
   const shotInput = nodeToShot(node, projectId);
   shotInput.refs.images = images;
