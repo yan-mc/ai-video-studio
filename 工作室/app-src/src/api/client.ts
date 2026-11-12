@@ -305,6 +305,10 @@ export const api = {
     request<unknown>('POST', `/post/${op}`, input),
   postFonts: () => request<{ fonts: string[] }>('GET', '/post/fonts'),
 
+  /* 资产删除 */
+  deleteAsset: (id: string) =>
+    request<{ ok: boolean; removed: string }>('POST', '/assets/delete', { id }),
+
   /* 后处理 */
   transcode: (input: TranscodeInput) => request<unknown>('POST', '/post/transcode', input),
   qc: (path: string) => request<QcResult>('POST', '/post/qc', { path }),

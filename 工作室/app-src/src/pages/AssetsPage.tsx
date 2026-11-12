@@ -7,10 +7,14 @@
 import { useEffect, useMemo, useState } from 'react';
 
 import { useProjectStore } from '../store';
-import { uploadAsset, describeError } from '../api/client';
+import { api, uploadAsset, describeError } from '../api/client';
 import {
   Alert,
   Badge,
+  IconButton,
+  KeyValue,
+  Field,
+  Input,
   Button,
   EmptyState,
   Icon,
@@ -42,6 +46,24 @@ export function AssetsPage() {
   const [type, setType] = useState<FilterValue>('all');
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
+  const [detail, setDetail] = useState<Asset | null>(null);
+
+  /** 删除资产（带确认） */
+  async function handleDelete(e: React.MouseEvent, a: Asset) {
+    e.stopPropagation();
+    if (!window.confirm(`确定删除「${a.name}」？此操作不可恢复。`)) return;
+    try {
+      await api.deleteAsset(a.id);
+      setDetail((d) => (d?.id === a.id ? null : d));
+      setUploadMsg(`已删除「${a.name}」`);
+      await loadAssets({
+        ...(type !== 'all' ? { type } : {}),
+        ...(currentProjectId ? { projectId: currentProjectId } : {}),
+      });
+    } catch (err) {
+      setUploadMsg(`删除失败：${describeError(err)}`);
+    }
+  }
 
   /** 上传文件（支持多选）：逐个 POST /assets/upload，再刷新列表 */
   async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
@@ -177,25 +199,36 @@ export function AssetsPage() {
               <table className="jz-table">
                 <thead>
                   <tr>
-                    <th>{t('assets.name')}</th>
-                    <th>{t('assets.type')}</th>
-                    <th>{t('assets.kind')}</th>
-                    <th style={{ textAlign: 'right' }}>{t('assets.size')}</th>
-                    <th>{t('assets.createdAt')}</th>
+                    <th style={{ width: 56 }}>{t('assets.name')}</th>
+                    <th></th>
+                    <th style={{ width: 110 }}>{t('assets.type')}</th>
+                    <th style={{ width: 80 }}>{t('assets.kind')}</th>
+                    <th style={{ width: 90, textAlign: 'right' }}>{t('assets.size')}</th>
+                    <th style={{ width: 100 }}>{t('assets.createdAt')}</th>
+                    <th style={{ width: 76 }}></th>
                   </tr>
                 </thead>
                 <tbody>
                   {assets.map((a) => (
-                    <tr key={a.id}>
+                    <tr key={a.id} onClick={() => setDetail(a)} style={{ cursor: 'pointer' }}>
                       <td>
-                        <span className="jz-row" style={{ gap: 8 }}>
-                          <span style={{ color: 'var(--jz-accent-text)', display: 'inline-flex' }}>
-                            <Icon name={kindIcon(a)} size={15} />
+                        {/* 缩略图：图片类显示预览，其他显示类型图标 */}
+                        {a.kind === 'image' && a.rel ? (
+                          <img
+                            src={`/luoshu/api/assets/item?id=${encodeURIComponent(a.id)}`}
+                            alt={a.name}
+                            style={{ width: 40, height: 40, objectFit: 'cover', borderRadius: 6, display: 'block', background: 'var(--jz-bg-sunken)' }}
+                            loading="lazy"
+                            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                          />
+                        ) : (
+                          <span style={{ display: 'inline-flex', width: 40, height: 40, alignItems: 'center', justifyContent: 'center', borderRadius: 6, background: 'var(--jz-bg-sunken)', color: 'var(--jz-accent-text)' }}>
+                            <Icon name={kindIcon(a)} size={18} />
                           </span>
-                          <span className="jz-truncate" title={a.name}>
-                            {a.name}
-                          </span>
-                        </span>
+                        )}
+                      </td>
+                      <td>
+                        <span className="jz-truncate" title={a.name}>{a.name}</span>
                       </td>
                       <td>
                         <Badge>{typeLabel(a.type)}</Badge>
@@ -205,6 +238,25 @@ export function AssetsPage() {
                         {formatBytes(a.bytes)}
                       </td>
                       <td className="jz-xs jz-muted">{formatRelativeTime(a.createdAt)}</td>
+                      <td>
+                        <div className="jz-row" style={{ gap: 4 }}>
+                          {a.rel ? (
+                            <IconButton
+                              label="下载"
+                              title="下载"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                window.open(`/luoshu/api/assets/item?id=${encodeURIComponent(a.id)}`, '_blank');
+                              }}
+                            ><Icon name="download" size={14} /></IconButton>
+                          ) : null}
+                          <IconButton
+                            label="删除"
+                            title="删除"
+                            onClick={(e) => void handleDelete(e, a)}
+                          ><Icon name="trash" size={14} /></IconButton>
+                        </div>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -212,6 +264,45 @@ export function AssetsPage() {
             </div>
           </Panel>
         )}
+
+        {/* 详情抽屉 */}
+        {detail ? (
+          <Panel
+            title={`资产详情 · ${detail.name}`}
+            actions={<Button onClick={() => setDetail(null)}>关闭</Button>}
+          >
+            <div className="jz-col" style={{ gap: 8 }}>
+              {detail.kind === 'image' && detail.rel ? (
+                <img
+                  src={`/luoshu/api/assets/item?id=${encodeURIComponent(detail.id)}`}
+                  alt={detail.name}
+                  style={{ maxWidth: '100%', maxHeight: 320, borderRadius: 8, objectFit: 'contain', background: 'var(--jz-bg-sunken)' }}
+                />
+              ) : null}
+              {detail.kind === 'video' && detail.rel ? (
+                <video
+                  src={`/luoshu/api/assets/item?id=${encodeURIComponent(detail.id)}`}
+                  controls
+                  style={{ maxWidth: '100%', maxHeight: 320, borderRadius: 8 }}
+                />
+              ) : null}
+              <KeyValue
+                rows={[
+                  { key: 'ID', value: <code className="jz-mono jz-xs">{detail.id}</code> },
+                  { key: '类型', value: typeLabel(detail.type) },
+                  { key: 'kind', value: detail.kind },
+                  { key: '原始文件名', value: detail.originalName ?? '—' },
+                  { key: '大小', value: formatBytes(detail.bytes) },
+                  { key: '路径', value: <code className="jz-mono jz-xs">{detail.rel ?? '—'}</code> },
+                  { key: '创建时间', value: formatRelativeTime(detail.createdAt) },
+                ]}
+              />
+              <Field label="备注（只读）">
+                <Input value={String((detail as unknown as { note?: string }).note ?? '')} readOnly />
+              </Field>
+            </div>
+          </Panel>
+        ) : null}
       </div>
     </Page>
   );
@@ -222,3 +313,5 @@ export function AssetsPage() {
 }
 
 export default AssetsPage;
+
+
