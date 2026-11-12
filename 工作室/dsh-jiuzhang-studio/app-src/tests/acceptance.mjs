@@ -18,7 +18,7 @@ import path from 'node:path';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
-const DIST = path.resolve(ROOT, '../dsh-jiuzhang-studio/app-dist');
+const DIST = path.resolve(ROOT, '../app-dist');
 
 const results = [];
 function check(name, fn) {
