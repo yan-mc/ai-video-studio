@@ -16,6 +16,7 @@ import { newJob, jobs as jobsStore } from '../services/job-store.js';
 import { runH3Local } from '../services/generator.js';
 import { packGraph, unpackGraph, IMG_REF_PREFIX } from '../store/image-pool.js';
 import { SCRIPT_GENRES, SCRIPT_STAGES, checkConsistency } from '../services/script-service.js';
+import { COMIC_TEMPLATES, COMIC_STATIONS } from '../services/comic-service.js';
 import { getRuntime } from '../runtime.js';
 
 /* ------------------------------------------------------------- 工具函数 */
@@ -390,6 +391,42 @@ export async function handleApi(req, res) {
       return sendJson(res, 200, ctx.script.save(pid, body.doc ?? {}));
     }
 
+    /* ---------------- 漫画工作台 ---------------- */
+    if (req.method === 'GET' && route === '/comic/meta') {
+      return sendJson(res, 200, { templates: COMIC_TEMPLATES, stations: COMIC_STATIONS });
+    }
+    if (req.method === 'GET' && route === '/comic') {
+      const pid = safeId(url.searchParams.get('projectId') || '');
+      return sendJson(res, 200, ctx.comic.load(pid));
+    }
+    if (req.method === 'POST' && route === '/comic/extract') {
+      const body = await readJsonBody(req);
+      const pid = safeId(body.projectId || '');
+      return sendJson(res, 200, await ctx.comic.extract(pid, body));
+    }
+    if (req.method === 'POST' && route === '/comic/relayout') {
+      const body = await readJsonBody(req);
+      const pid = safeId(body.projectId || '');
+      return sendJson(res, 200, await ctx.comic.relayoutPage(pid, Number(body.pageIndex) || 1, String(body.template)));
+    }
+    if (req.method === 'POST' && route === '/comic/preflight') {
+      const body = await readJsonBody(req);
+      const pid = safeId(body.projectId || '');
+      return sendJson(res, 200, ctx.comic.runPreflight(pid));
+    }
+    if (req.method === 'POST' && route === '/comic/export/page') {
+      const body = await readJsonBody(req);
+      const pid = safeId(body.projectId || '');
+      const r = ctx.comic.exportPageSvg(pid, Number(body.pageIndex) || 1, body.options ?? {});
+      // 不把 SVG 正文塞进 JSON（可能很大），只回元信息 + 可通过 /file 取
+      return sendJson(res, 200, { ok: r.ok, path: r.path, rel: r.rel, bytes: r.bytes });
+    }
+    if (req.method === 'POST' && route === '/comic/export/all') {
+      const body = await readJsonBody(req);
+      const pid = safeId(body.projectId || '');
+      return sendJson(res, 200, ctx.comic.exportAllSvg(pid, body.options ?? {}));
+    }
+
     /* ---------------- 资产 ---------------- */
     if (req.method === 'GET' && route === '/assets') {
       const type = url.searchParams.get('type') || undefined;
@@ -703,6 +740,7 @@ async function executeBackend(job, shot, ctx, cfg) {
 
   return seedance.runMock({ cfg, job, shot, prompt });
 }
+
 
 
 

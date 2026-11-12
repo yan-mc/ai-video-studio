@@ -309,6 +309,21 @@ export const api = {
   deleteAsset: (id: string) =>
     request<{ ok: boolean; removed: string }>('POST', '/assets/delete', { id }),
 
+  /* 漫画工作台 */
+  comicMeta: () => request<unknown>('GET', '/comic/meta'),
+  getComic: (projectId: string) =>
+    request<unknown>('GET', `/comic?projectId=${encodeURIComponent(projectId)}`),
+  comicExtract: (input: Record<string, unknown>) =>
+    request<unknown>('POST', '/comic/extract', input),
+  comicRelayout: (input: Record<string, unknown>) =>
+    request<unknown>('POST', '/comic/relayout', input),
+  comicPreflight: (projectId: string) =>
+    request<unknown>('POST', '/comic/preflight', { projectId }),
+  comicExportPage: (input: Record<string, unknown>) =>
+    request<unknown>('POST', '/comic/export/page', input),
+  comicExportAll: (input: Record<string, unknown>) =>
+    request<unknown>('POST', '/comic/export/all', input),
+
   /* 后处理 */
   transcode: (input: TranscodeInput) => request<unknown>('POST', '/post/transcode', input),
   qc: (path: string) => request<QcResult>('POST', '/post/qc', { path }),

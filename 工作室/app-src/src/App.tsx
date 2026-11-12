@@ -15,6 +15,7 @@ import { SettingsPage } from './pages/SettingsPage';
 import { JobsPage } from './pages/JobsPage';
 import { PrevizPage } from './pages/PrevizPage';
 import { ScriptPage } from './pages/ScriptPage';
+import { ComicPage } from './pages/ComicPage';
 
 import { useRouter } from './router';
 import type { RouteId } from './router';
@@ -37,6 +38,7 @@ const NAV: ReadonlyArray<NavEntry> = [
   { key: 'projects', icon: 'projects', labelKey: 'nav.projects' },
   { key: 'h3', icon: 'h3', labelKey: 'nav.h3' },
   { key: 'script', icon: 'text', labelKey: 'nav.script' },
+  { key: 'comic', icon: 'image', labelKey: 'nav.comic' },
   { key: 'previz', icon: 'cube', labelKey: 'nav.previz' },
   { key: 'jobs', icon: 'jobs', labelKey: 'nav.jobs' },
   { key: 'settings', icon: 'settings', labelKey: 'nav.settings' },
@@ -217,6 +219,8 @@ function RouteView({ route }: { route: RouteId }) {
       return <PrevizPage />;
     case 'script':
       return <ScriptPage />;
+    case 'comic':
+      return <ComicPage />;
     case 'canvas':
     default:
       return <CanvasPage />;
@@ -283,4 +287,5 @@ export default function App() {
     </ThemeProvider>
   );
 }
+
 

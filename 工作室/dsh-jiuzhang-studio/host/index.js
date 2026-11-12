@@ -23,6 +23,7 @@ import { createPrevizController } from './services/previz-controller.js';
 import { createPostService } from './services/post.js';
 import { createAssetService } from './services/asset-service.js';
 import { createScriptService } from './services/script-service.js';
+import { createComicService } from './services/comic-service.js';
 import { initRuntime, attachControllers, disposeRuntime } from './runtime.js';
 
 export const inject = ['tools', 'webServer'];
@@ -45,7 +46,8 @@ export function apply(ctx) {
   const post = createPostService({ cfg });
   const assets = createAssetService({ cfg });
   const script = createScriptService({ cfg });
-  attachControllers({ previz, h3, post, assets, script });
+  const comic = createComicService({ cfg });
+  attachControllers({ previz, h3, post, assets, script, comic });
 
   /* ---------------------------- HTTP 路由 ---------------------------- */
 
@@ -114,3 +116,4 @@ export function apply(ctx) {
     + `后端=${cfg.defaultBackend} 并发=${cfg.maxConcurrentLocal} 运行统计=${JSON.stringify(runtimeStats())}`,
   );
 }
+
