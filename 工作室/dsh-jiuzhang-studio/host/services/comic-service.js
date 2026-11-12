@@ -281,7 +281,21 @@ export function createComicService({ cfg }) {
     if (!cur) throw new Error('COMIC_NOT_FOUND');
     const page = (cur.pages ?? []).find((p) => p.index === pageIndex);
     if (!page) throw new Error('PAGE_NOT_FOUND');
-    const svg = renderPageSvg(page, opts);
+    // 把已出的格图内嵌成 data URI，让 SVG 自包含
+    const images = {};
+    for (const pn of page.panels ?? []) {
+      if (!pn.imageRel) continue;
+      try {
+        const abs = path.join(cfg.dataDir, pn.imageRel);
+        if (fs.existsSync(abs)) {
+          const buf = fs.readFileSync(abs);
+          const ext = path.extname(abs).toLowerCase();
+          const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+          images[pn.imageRel] = `data:${mime};base64,${buf.toString('base64')}`;
+        }
+      } catch { /* ignore */ }
+    }
+    const svg = renderPageSvg(page, { ...opts, images });
     const outDir = path.join(cfg.dataDir, 'comic', 'export');
     fs.mkdirSync(outDir, { recursive: true });
     const out = path.join(outDir, `page_${pageIndex}_${Date.now().toString(36)}.svg`);
@@ -303,7 +317,21 @@ export function createComicService({ cfg }) {
     fs.mkdirSync(outDir, { recursive: true });
     const files = [];
     for (const page of cur.pages ?? []) {
-      const svg = renderPageSvg(page, opts);
+      // 内嵌已出的格图
+      const images = {};
+      for (const pn of page.panels ?? []) {
+        if (!pn.imageRel) continue;
+        try {
+          const abs = path.join(cfg.dataDir, pn.imageRel);
+          if (fs.existsSync(abs)) {
+            const buf = fs.readFileSync(abs);
+            const ext = path.extname(abs).toLowerCase();
+            const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+            images[pn.imageRel] = `data:${mime};base64,${buf.toString('base64')}`;
+          }
+        } catch { /* ignore */ }
+      }
+      const svg = renderPageSvg(page, { ...opts, images });
       const out = path.join(outDir, `page_${page.index}_${Date.now().toString(36)}.svg`);
       fs.writeFileSync(out, svg, 'utf8');
       files.push({ page: page.index, path: out, rel: path.relative(cfg.dataDir, out).replace(/\\/g, '/'), bytes: Buffer.byteLength(svg, 'utf8') });
@@ -318,7 +346,105 @@ export function createComicService({ cfg }) {
     return preflight(cur);
   }
 
-  return { load, save, extract, relayoutPage, exportPageSvg, exportAllSvg, runPreflight, dir, file };
+  /* ------------------------------------------------ 提示词计划（零费用） */
+
+  /**
+   * 逐格拼装提示词。
+   * 洛书 `prompt` 站：本地运算，零费用。
+   * 把「画风 + 角色 + 场景 + 每格内容」拼成一致的出图提示词。
+   */
+  async function planPrompts(projectId, body = {}) {
+    const cur = load(projectId);
+    if (!cur) throw new Error('COMIC_NOT_FOUND');
+
+    const styleText = String(body.style ?? cur.style ?? '2D 动画风格，干净线条，赛璐珞上色');
+    const charDesc = (cur.characters ?? body.characters ?? []).map((c) =>
+      typeof c === 'string' ? c : `${c.name ?? ''}${c.desc ? `（${c.desc}）` : ''}`,
+    ).filter(Boolean).join('；');
+    const sceneDesc = String(body.scene ?? cur.scene ?? '');
+
+    const plans = [];
+    for (const page of cur.pages ?? []) {
+      for (const pn of page.panels ?? []) {
+        const parts = [];
+        // 画风（英文优先，模型对英文画风响应更准）
+        parts.push(styleText);
+        // 角色
+        if (charDesc) parts.push(`角色：${charDesc}`);
+        // 场景
+        if (sceneDesc) parts.push(`场景：${sceneDesc}`);
+        // 本格内容
+        if (pn.text) parts.push(`画面内容：${pn.text}`);
+        // 构图
+        parts.push(`构图：单格漫画分镜，${pn.geometry ? '横向构图' : '方形构图'}，主体居中，留出对白空间`);
+        // 台词提示（不要求模型写字，只提示氛围）
+        if (pn.bubble) parts.push(`情绪氛围：角色正在说话，${pn.bubble}`);
+        // 质量
+        parts.push('高质量，细节清晰，线条干净');
+
+        plans.push({
+          pageIndex: page.index,
+          panelIndex: pn.index,
+          key: `p${page.index}_${pn.index}`,
+          prompt: parts.join('。'),
+          chars: parts.join('。').length,
+        });
+      }
+    }
+
+    const next = { ...cur, planParts: plans, style: styleText };
+    save(projectId, next);
+    return { ok: true, count: plans.length, plans, style: styleText };
+  }
+
+  /** 取某一格的提示词（出图时用） */
+  function panelPrompt(projectId, pageIndex, panelIndex) {
+    const cur = load(projectId);
+    if (!cur) throw new Error('COMIC_NOT_FOUND');
+    const hit = (cur.planParts ?? []).find((p) => p.pageIndex === pageIndex && p.panelIndex === panelIndex);
+    if (!hit) throw new Error('PLAN_NOT_FOUND: 请先执行「提示词计划」');
+    return hit.prompt;
+  }
+
+  /** 记录某格出图结果 */
+  function setPanelImage(projectId, pageIndex, panelIndex, result) {
+    const cur = load(projectId);
+    if (!cur) throw new Error('COMIC_NOT_FOUND');
+    const pages = (cur.pages ?? []).map((pg) =>
+      pg.index === pageIndex
+        ? {
+          ...pg,
+          panels: pg.panels.map((pn) =>
+            pn.index === panelIndex ? { ...pn, imageRel: result.rel, imagePath: result.path, imageAt: Date.now() } : pn,
+          ),
+        }
+        : pg,
+    );
+    const next = { ...cur, pages };
+    next.preflight = preflight(next);
+    save(projectId, next);
+    return next;
+  }
+
+  /** 统计出图进度 */
+  function imageProgress(projectId) {
+    const cur = load(projectId) ?? {};
+    let total = 0;
+    let done = 0;
+    for (const pg of cur.pages ?? []) {
+      for (const pn of pg.panels ?? []) {
+        total += 1;
+        if (pn.imageRel) done += 1;
+      }
+    }
+    return { total, done, pending: total - done, percent: total ? Math.round((done / total) * 100) : 0 };
+  }
+
+  return {
+    load, save, extract, relayoutPage, exportPageSvg, exportAllSvg, runPreflight, dir, file,
+    planPrompts, panelPrompt, setPanelImage, imageProgress,
+  };
 }
 
 export { LAYOUT_TEMPLATES as COMIC_TEMPLATES, STATIONS as COMIC_STATIONS };
+

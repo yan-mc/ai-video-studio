@@ -17,7 +17,7 @@ import {
 
 interface Template { id: string; name: string; rows: number; cols: number }
 interface Station { id: string; name: string; cost: string; desc: string }
-interface Panel { index: number; text: string; bubble: string; speaker: string; geometry: { x: number; y: number; w: number; h: number }; imageRel: string | null }
+interface Panel { index: number; text: string; bubble: string; speaker: string; geometry: { x: number; y: number; w: number; h: number }; imageRel: string | null; imagePath?: string }
 interface PageDoc { index: number; template: string; panels: Panel[] }
 interface Check { id: string; name: string; ok: boolean; detail: string }
 
@@ -52,6 +52,7 @@ export function ComicPage() {
   const [text, setText] = useState('');
   const [pages, setPages] = useState('1');
   const [template, setTemplate] = useState('grid_2x2');
+  const [sceneLayout, setSceneLayout] = useState('');
   const [previewUrl, setPreviewUrl] = useState('');
 
   const load = useCallback(async () => {
@@ -132,6 +133,65 @@ export function ComicPage() {
   const freeCount = useMemo(() => stations.filter((s) => s.cost === 'free').length, [stations]);
   const pf = doc?.preflight;
 
+  /* ------------------------------ 出图相关 ------------------------------ */
+  const [planCount, setPlanCount] = useState(0);
+  const [progress, setProgress] = useState<{ total: number; done: number; percent: number } | null>(null);
+  const [rendering, setRendering] = useState(false);
+
+  /** 1) 生成提示词计划（零费用） */
+  async function handlePlan() {
+    if (!projectId) { toast.error('请先选项目'); return; }
+    setBusy(true);
+    try {
+      const r = await api.comicPlanPrompts({
+        projectId,
+        style: '2D 动画风格，干净线条，赛璐珞上色，高质量',
+        scene: sceneLayout || undefined,
+      }) as { count: number };
+      setPlanCount(r.count);
+      toast.ok(`已拼装 ${r.count} 格的提示词（零费用）`);
+    } catch (e) {
+      toast.error(String((e as Error)?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** 2) 逐格出图（调 H3-Image） */
+  async function handleRender(pageIndex?: number) {
+    if (!projectId) { toast.error('请先选项目'); return; }
+    setRendering(true);
+    try {
+      const r = await api.comicRenderPanels({
+        projectId,
+        ...(pageIndex ? { pageIndex } : {}),
+        sizeId: 'sq-2048',
+      }) as { queued: number; total: number };
+      toast.ok(`已提交 ${r.queued} 格出图（每格约 1-2 分钟）`);
+      // 开始轮询进度
+      void pollProgress();
+    } catch (e) {
+      toast.error(String((e as Error)?.message ?? e));
+    } finally {
+      setRendering(false);
+    }
+  }
+
+  async function pollProgress() {
+    if (!projectId) return;
+    for (let i = 0; i < 120; i++) {
+      await new Promise((r) => setTimeout(r, 8000));
+      try {
+        const p = await api.comicImageProgress(projectId) as { total: number; done: number; percent: number };
+        setProgress(p);
+        if (p.done >= p.total && p.total > 0) {
+          await load();
+          toast.ok('全部格图完成');
+          return;
+        }
+      } catch { /* ignore */ }
+    }
+  }
   if (loading) return <Page title="漫画工作台"><Loading text="载入中" /></Page>;
 
   return (
@@ -141,6 +201,16 @@ export function ComicPage() {
       actions={
         <>
           <Button icon={<Icon name="refresh" size={15} />} onClick={() => void load()} disabled={busy}>刷新</Button>
+          <Button onClick={() => void handlePlan()} disabled={busy || !projectId || !doc?.pages?.length}>
+            提示词计划{planCount ? `（${planCount}）` : ''}
+          </Button>
+          <Button
+            onClick={() => void handleRender()}
+            disabled={busy || rendering || !projectId || !planCount}
+            title={!planCount ? '请先执行「提示词计划」' : ''}
+          >
+            {rendering ? '提交中…' : '逐格出图'}
+          </Button>
           <Button variant="primary" icon={<Icon name="image" size={15} />} onClick={() => void handleExtract()} disabled={busy || !projectId}>
             {busy ? '处理中…' : '分镜抽取'}
           </Button>
@@ -150,6 +220,11 @@ export function ComicPage() {
       <div className="jz-col" style={{ gap: 'var(--jz-sp-4)' }}>
         {err ? <Alert tone="danger">{err}</Alert> : null}
         {!projectId ? <Alert tone="warn">请先在「项目」页选择一个项目</Alert> : null}
+        {progress && progress.total > 0 ? (
+          <Alert tone={progress.done >= progress.total ? 'ok' : 'info'}>
+            出图进度 {progress.done}/{progress.total}（{progress.percent}%）
+          </Alert>
+        ) : null}
 
         <Panel title="分镜文本">
           <Textarea
@@ -170,6 +245,13 @@ export function ComicPage() {
               />
             </Field>
           </div>
+          <Field label="场景描述（出图时用，可留空）">
+            <Input
+              value={sceneLayout}
+              onChange={(e) => setSceneLayout(e.target.value)}
+              placeholder="如：雨夜街头，霓虹倒映在积水里"
+            />
+          </Field>
         </Panel>
 
         <Panel title="流水线（15 站）">
@@ -250,7 +332,16 @@ export function ComicPage() {
                           color: '#555',
                         }}
                       >
-                        {pn.text.slice(0, 40)}
+                        {pn.imageRel ? (
+                          <img
+                            src={`/luoshu/api/file?path=${encodeURIComponent(pn.imageRel)}`}
+                            alt={`格 ${pn.index}`}
+                            style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+                            loading="lazy"
+                          />
+                        ) : (
+                          <span style={{ color: '#555' }}>{pn.text.slice(0, 40)}</span>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -272,3 +363,4 @@ export function ComicPage() {
 }
 
 export default ComicPage;
+

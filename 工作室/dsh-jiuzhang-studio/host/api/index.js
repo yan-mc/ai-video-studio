@@ -432,6 +432,84 @@ export async function handleApi(req, res) {
       return sendJson(res, 200, ctx.comic.exportAllSvg(pid, body.options ?? {}));
     }
 
+    /* ---------------- 漫画出图 ---------------- */
+    if (req.method === 'POST' && route === '/comic/plan-prompts') {
+      const body = await readJsonBody(req);
+      const pid = safeId(body.projectId || '');
+      return sendJson(res, 200, await ctx.comic.planPrompts(pid, body));
+    }
+    if (req.method === 'GET' && route === '/comic/image-progress') {
+      const pid = safeId(url.searchParams.get('projectId') || '');
+      return sendJson(res, 200, ctx.comic.imageProgress(pid));
+    }
+    if (req.method === 'POST' && route === '/comic/render-panels') {
+      const body = await readJsonBody(req);
+      const pid = safeId(body.projectId || '');
+      const doc = ctx.comic.load(pid);
+      if (!doc) return sendJson(res, 404, { error: 'COMIC_NOT_FOUND' });
+      if (!doc.planParts?.length) {
+        return sendJson(res, 400, { error: 'PLAN_REQUIRED', detail: '请先执行「提示词计划」' });
+      }
+
+      const wf = loadImageWorkflow();
+      if (!wf) return sendJson(res, 500, { error: 'WORKFLOW_MISSING' });
+      const models = checkImageModels(cfg);
+      if (!models.ready) return sendJson(res, 400, { error: 'IMAGE_MODEL_MISSING', missing: models.missing });
+
+      // 只渲染指定页（默认全部）
+      const onlyPage = body.pageIndex ? Number(body.pageIndex) : null;
+      const targets = doc.planParts.filter((p) => !onlyPage || p.pageIndex === onlyPage);
+      const limit = Math.max(1, Math.min(50, Number(body.limit) || targets.length));
+      const todo = targets.slice(0, limit);
+
+      // 异步跑
+      void (async () => {
+        for (const plan of todo) {
+          try {
+            const j = newJob({
+              projectId: pid,
+              shotId: null,
+              backendId: 'h3-image',
+              prompt: plan.prompt,
+              params: {
+                kind: 'image',
+                imageSizeId: body.sizeId ?? 'sq-2048',
+                seed: body.seed ?? Math.floor(Math.random() * 2147483647),
+              },
+              mode: 't2i',
+            });
+            j.kind = 'image';
+            await jobsStore().upsert(j);
+
+            const r = await runH3ImageLocal({
+              workflow: wf,
+              job: j,
+              prompt: plan.prompt,
+              shot: { refs: { images: [] }, imageSizeId: body.sizeId ?? 'sq-2048' },
+              cfg,
+            });
+            const out = r.outputs?.[0];
+            if (out?.path) {
+              // 复制到 assets 目录，便于 SVG 内嵌引用
+              const rel = `comic/panels/${pid}_p${plan.pageIndex}_${plan.panelIndex}.png`;
+              const abs = path.join(cfg.dataDir, rel);
+              fs.mkdirSync(path.dirname(abs), { recursive: true });
+              try { fs.copyFileSync(out.path, abs); } catch { /* ignore */ }
+              ctx.comic.setPanelImage(pid, plan.pageIndex, plan.panelIndex, {
+                rel, path: abs, bytes: out.bytes,
+              });
+            }
+            await jobsStore().upsert({ ...j, status: 'completed', outputs: r.outputs ?? [], finishedAt: Date.now() });
+          } catch (e) {
+            // 单格失败不中断整批
+            ctx.extras?.appendLog?.({ level: 'error', msg: `漫画出图失败 p${plan.pageIndex}-${plan.panelIndex}: ${String(e?.message ?? e)}` });
+          }
+        }
+      })();
+
+      return sendJson(res, 200, { ok: true, queued: todo.length, total: targets.length });
+    }
+
     /* ---------------- 拆解图 / 人设卡 ---------------- */
     if (req.method === 'GET' && route === '/breakdown/meta') {
       return sendJson(res, 200, {
