@@ -157,3 +157,29 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
 }
 
 export const H3_MODEL_NAMES = { UNET_REF, UNET_FL2V, CLIP_NAME, VAE_NAME, LORA_REF, LORA_FL2V };
+
+/* ============================================================ 图像生成 */
+
+/**
+ * 执行一次 H3-Image 生成（文生图 / 参考图编辑）。
+ * 与视频共用 Qwen3-VL 编码器，只换扩散模型 + 图像 VAE。
+ */
+export async function runH3ImageLocal({ workflow, job, prompt, shot, cfg = loadConfig() }) {
+  const { runH3Image } = await import('./h3-image.js');
+  const params = job.params ?? {};
+  return runH3Image({
+    workflow,
+    job,
+    prompt,
+    cfg,
+    sizeId: params.imageSizeId ?? shot?.imageSizeId ?? 'auto',
+    width: params.width,
+    height: params.height,
+    refImages: resolveRefImages(shot ?? {}, cfg).map((r) => r.abs),
+  });
+}
+
+/** 判断一个 job 是图像还是视频任务 */
+export function jobKind(job) {
+  return job?.kind === 'image' || job?.params?.kind === 'image' ? 'image' : 'video';
+}

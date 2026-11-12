@@ -20,6 +20,7 @@ import { ModelWorkbenchPage } from './pages/ModelWorkbenchPage';
 import { DirectorPage } from './pages/DirectorPage';
 import { PromptPage } from './pages/PromptPage';
 import { ToolboxPage } from './pages/ToolboxPage';
+import { ImagePage } from './pages/ImagePage';
 
 import { useRouter } from './router';
 import type { RouteId } from './router';
@@ -47,6 +48,7 @@ const NAV: ReadonlyArray<NavEntry> = [
   { key: 'director', icon: 'video', labelKey: 'nav.director' },
   { key: 'prompt', icon: 'text', labelKey: 'nav.prompt' },
   { key: 'toolbox', icon: 'folder', labelKey: 'nav.toolbox' },
+  { key: 'image', icon: 'image', labelKey: 'nav.image' },
   { key: 'previz', icon: 'cube', labelKey: 'nav.previz' },
   { key: 'jobs', icon: 'jobs', labelKey: 'nav.jobs' },
   { key: 'settings', icon: 'settings', labelKey: 'nav.settings' },
@@ -237,6 +239,8 @@ function RouteView({ route }: { route: RouteId }) {
       return <PromptPage />;
     case 'toolbox':
       return <ToolboxPage />;
+    case 'image':
+      return <ImagePage />;
     case 'canvas':
     default:
       return <CanvasPage />;
@@ -303,6 +307,7 @@ export default function App() {
     </ThemeProvider>
   );
 }
+
 
 
 

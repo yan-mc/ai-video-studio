@@ -60,6 +60,7 @@ export const zh = {
     director: '3D 导演台',
     prompt: '提示词',
     toolbox: '工具箱',
+    image: '图像',
     collapse: '收起侧栏',
     expand: '展开侧栏',
     theme: '切换主题',
@@ -258,6 +259,7 @@ export const zh = {
     status: '状态',
     prompt: '提示词',
     toolbox: '工具箱',
+    image: '图像',
     duration: '时长',
     error: '错误',
     outputs: '产物',
@@ -302,6 +304,7 @@ export type Zh = typeof zh;
 export type LocaleDict = Zh;
 
 export default zh;
+
 
 
 

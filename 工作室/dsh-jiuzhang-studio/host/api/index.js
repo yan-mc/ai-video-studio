@@ -13,12 +13,13 @@ import * as comfy from '../services/comfy-client.js';
 import * as seedance from '../services/seedance-client.js';
 import { runJob, cancelJob, runtimeStats, markCancelled, CancelledError } from '../services/job-runner.js';
 import { newJob, jobs as jobsStore } from '../services/job-store.js';
-import { runH3Local } from '../services/generator.js';
+import { runH3Local, runH3ImageLocal, jobKind } from '../services/generator.js';
 import { packGraph, unpackGraph, IMG_REF_PREFIX } from '../store/image-pool.js';
 import { SCRIPT_GENRES, SCRIPT_STAGES, checkConsistency } from '../services/script-service.js';
 import { COMIC_TEMPLATES, COMIC_STATIONS } from '../services/comic-service.js';
 import { DIRECTOR_COMMANDS, CAMERA_MOVES, DIRECTOR_FPS } from '../services/director3d.js';
 import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, H3_MODES, H3_LIMITS } from '../services/h3-prompt.js';
+import { H3_IMAGE_MODELS, H3_IMAGE_SIZES, IMAGE_VAE, IMAGE_CLIP, IMAGE_SAMPLING, checkImageModels } from '../services/h3-image.js';
 import { createCanvasAgent } from '../services/canvas-agent.js';
 import { getRuntime } from '../runtime.js';
 
@@ -428,6 +429,53 @@ export async function handleApi(req, res) {
       const body = await readJsonBody(req);
       const pid = safeId(body.projectId || '');
       return sendJson(res, 200, ctx.comic.exportAllSvg(pid, body.options ?? {}));
+    }
+
+    /* ---------------- 图像生成（H3-Image） ---------------- */
+    if (req.method === 'GET' && route === '/image/meta') {
+      return sendJson(res, 200, {
+        models: H3_IMAGE_MODELS,
+        vae: IMAGE_VAE,
+        clip: IMAGE_CLIP,
+        sampling: IMAGE_SAMPLING,
+        sizes: H3_IMAGE_SIZES,
+        status: checkImageModels(cfg),
+      });
+    }
+    if (req.method === 'POST' && route === '/image/generate') {
+      const body = await readJsonBody(req);
+      const wf = loadImageWorkflow();
+      if (!wf) return sendJson(res, 500, { error: 'WORKFLOW_MISSING' });
+
+      const job = newJob({
+        projectId: body.projectId ? safeId(String(body.projectId)) : null,
+        shotId: body.shotId ?? null,
+        backendId: 'h3-image',
+        prompt: String(body.prompt ?? ''),
+        params: {
+          kind: 'image',
+          imageSizeId: body.sizeId ?? cfg.imageSizeId ?? 'auto',
+          width: body.width,
+          height: body.height,
+          seed: body.seed ?? Math.floor(Math.random() * 2147483647),
+        },
+        mode: 't2i',
+      });
+      job.kind = 'image';
+      await jobsStore().upsert(job);
+
+      runJob(job, async (running) => runH3ImageLocal({
+        workflow: wf,
+        job: running,
+        prompt: String(body.prompt ?? ''),
+        shot: {
+          refs: { images: Array.isArray(body.refImages) ? body.refImages : [] },
+          imageSizeId: body.sizeId,
+        },
+        cfg,
+      })).catch(() => {});
+
+      return sendJson(res, 200, job);
     }
 
     /* ---------------- 3D 导演台 ---------------- */
@@ -1002,12 +1050,33 @@ async function executeBackend(job, shot, ctx, cfg) {
     });
   }
 
+  // 图像生成（H3-Image）：与视频共用编码器，只换扩散模型 + 图像 VAE
+  if (job.backendId === 'h3-image' || jobKind(job) === 'image') {
+    const wf = loadImageWorkflow();
+    if (!wf) throw new Error('WORKFLOW_MISSING: 缺少 data/workflows/h3-image.json');
+    return runH3ImageLocal({ workflow: wf, job, shot, prompt, cfg });
+  }
+
   if (job.backendId === 'seedance-cloud') {
     return seedance.runSeedance({ cfg, job, shot, prompt });
   }
 
   return seedance.runMock({ cfg, job, shot, prompt });
 }
+
+/** 加载图像生成工作流（带缓存） */
+let _imgWf = null;
+function loadImageWorkflow() {
+  if (_imgWf) return _imgWf;
+  try {
+    const f = path.join(dirs().root, 'workflows', 'h3-image.json');
+    if (!fs.existsSync(f)) return null;
+    _imgWf = JSON.parse(fs.readFileSync(f, 'utf8'));
+    return _imgWf;
+  } catch { return null; }
+}
+
+
 
 
 

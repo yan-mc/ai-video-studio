@@ -393,6 +393,10 @@ export const api = {
   toolboxLogs: (limit = 100) => request<unknown>('GET', `/logs?limit=${limit}`),
   toolboxBatchProgress: () => request<unknown>('GET', '/jobs/batch-progress'),
 
+  /* 图像生成（H3-Image） */
+  imageMeta: () => request<unknown>('GET', '/image/meta'),
+  imageGenerate: (input: Record<string, unknown>) => request<unknown>('POST', '/image/generate', input),
+
   /* 后处理 */
   transcode: (input: TranscodeInput) => request<unknown>('POST', '/post/transcode', input),
   qc: (path: string) => request<QcResult>('POST', '/post/qc', { path }),
@@ -430,4 +434,5 @@ export function describeError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return '发生未知错误';
 }
+
 

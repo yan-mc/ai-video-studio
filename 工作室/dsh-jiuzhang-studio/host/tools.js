@@ -3,8 +3,9 @@
  *
  * 命名沿用 studio_（与旧插件兼容），但全部走新实现。
  */
+import fs from 'node:fs';
 import { loadConfig, saveConfig, maskConfig, sanitizeConfigPatch, resetConfigCache } from './config.js';
-import { projects, assets, newProject, newShot, PROFILES, resolutionFor, h3Length, NODE_TYPES, NODE_LABELS, ASSET_TYPES, ASSET_TYPE_LABELS, PROJECT_CATEGORY_LABELS, H3_MODEL_SLOTS } from './store/models.js';
+import { projects, assets, newProject, newShot, PROFILES, resolutionFor, h3Length, NODE_TYPES, NODE_LABELS, ASSET_TYPES, ASSET_TYPE_LABELS, PROJECT_CATEGORY_LABELS, H3_MODEL_SLOTS, dirs } from './store/models.js';
 import { jobs as jobsStore, newJob } from './services/job-store.js';
 import { runJob, cancelJob, runtimeStats } from './services/job-runner.js';
 import { compilePrompt, listShots, upsertShot, writeShots } from './api/index.js';
@@ -15,6 +16,15 @@ import { runH3Local } from './services/generator.js';
 import { SCRIPT_GENRES, SCRIPT_STAGES, checkConsistency } from './services/script-service.js';
 import { DIRECTOR_COMMANDS, CAMERA_MOVES, DIRECTOR_FPS } from './services/director3d.js';
 import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, H3_MODES, H3_LIMITS } from './services/h3-prompt.js';
+import {
+  IMAGE_MODELS as IMAGE_MODELS_MAP,
+  IMAGE_VAE as IMAGE_VAE_NAME,
+  IMAGE_CLIP as IMAGE_CLIP_NAME,
+  IMAGE_SAMPLING as IMAGE_SAMPLING_PARAMS,
+  IMAGE_SIZES as IMAGE_SIZES_LIST,
+  checkImageModels,
+} from './services/h3-image.js';
+import { runH3ImageLocal } from './services/generator.js';
 import { getRuntime } from './runtime.js';
 
 function ok(value) {
@@ -613,10 +623,90 @@ export function registerTools(ctx) {
     },
   )));
 
+/** 加载图像工作流（带缓存） */
+  let _imgWf = null;
+  function imageWorkflow() {
+    if (_imgWf) return _imgWf;
+    try {
+      const f = `${dirs().root}/workflows/h3-image.json`;
+      if (!fs.existsSync(f)) return null;
+      _imgWf = JSON.parse(fs.readFileSync(f, 'utf8'));
+      return _imgWf;
+    } catch { return null; }
+  }
+
+  /* ---------------------------------------------------------- 图像生成 */
+  disposers.push(reg(tool(
+    'studio_image',
+    'H3-Image 图像生成：文生图 / 参考图编辑。6 步固定采样，guidance 1.0，无负面提示词。action=meta 查模型状态与尺寸表；generate 出图。',
+    {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['meta', 'generate'] },
+        prompt: { type: 'string', description: '提示词（最长 4096 token，建议详细完整）' },
+        sizeId: { type: 'string', description: '尺寸 id（见 meta.sizes），默认 auto=2048²' },
+        width: { type: 'number', description: '显式宽（32 倍数）' },
+        height: { type: 'number', description: '显式高（32 倍数）' },
+        seed: { type: 'number' },
+        refImages: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '参考图绝对路径（接上即进入编辑模式，最多 16 张）',
+        },
+        projectId: { type: 'string' },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+    async (a) => {
+      if (a.action === 'meta') {
+        return {
+          models: IMAGE_MODELS_MAP,
+          vae: IMAGE_VAE_NAME,
+          clip: IMAGE_CLIP_NAME,
+          sampling: IMAGE_SAMPLING_PARAMS,
+          sizes: IMAGE_SIZES_LIST,
+          status: checkImageModels(loadConfig()),
+        };
+      }
+      const cfg = loadConfig();
+      const wf = imageWorkflow();
+      if (!wf) throw new Error('WORKFLOW_MISSING: data/workflows/h3-image.json');
+      const job = newJob({
+        projectId: a.projectId ?? null,
+        shotId: null,
+        backendId: 'h3-image',
+        prompt: String(a.prompt ?? ''),
+        params: {
+          kind: 'image',
+          imageSizeId: a.sizeId ?? cfg.imageSizeId ?? 'auto',
+          width: a.width,
+          height: a.height,
+          seed: a.seed ?? Math.floor(Math.random() * 2147483647),
+        },
+        mode: 't2i',
+      });
+      job.kind = 'image';
+      await jobsStore().upsert(job);
+
+      runJob(job, async (running) => runH3ImageLocal({
+        workflow: wf,
+        job: running,
+        prompt: String(a.prompt ?? ''),
+        shot: { refs: { images: a.refImages ?? [] }, imageSizeId: a.sizeId },
+        cfg,
+      })).catch(() => {});
+
+      return { ok: true, jobId: job.id, status: job.status, note: '用 studio_jobs 查进度' };
+    },
+  )));
+
   return () => disposers.forEach((d) => d && d());
 }
 
 export default registerTools;
+
+
 
 
 

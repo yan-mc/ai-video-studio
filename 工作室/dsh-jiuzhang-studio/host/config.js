@@ -44,6 +44,11 @@ const DEFAULTS = Object.freeze({
   theme: 'inknight',            // 墨夜
   accent: 'cinnabar',           // 朱砂红
   locale: 'zh',
+  // 图像生成（H3-Image）
+  imageBackend: 'h3-image-local',   // 'h3-image-local' | 'none'
+  imageModelRoot: '',               // 空 = 自动推导为 comfyInputDir 的兄弟目录 models
+  imageSizeId: 'auto',              // auto = 2048x2048
+  imageSteps: 6,                    // checkpoint 蒸馏固定 6 步
 });
 
 /** 允许通过 API 修改的字段（白名单）。可执行路径类字段刻意不在其中。 */
@@ -52,6 +57,8 @@ export const WRITABLE_CONFIG_KEYS = Object.freeze([
   'seedanceEndpoint', 'seedanceModel', 'seedanceApiKey', 'seedanceMock',
   'defaultBackend', 'defaultProfile', 'maxConcurrentLocal',
   'previzPort', 'previzAutoStart', 'theme', 'accent', 'locale',
+  // 图像生成（H3-Image）
+  'imageBackend', 'imageModelRoot', 'imageSizeId', 'imageSteps',
 ]);
 
 let cache = null;
