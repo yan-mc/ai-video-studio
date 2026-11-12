@@ -14,6 +14,7 @@ import * as seedance from '../services/seedance-client.js';
 import { runJob, cancelJob, runtimeStats, markCancelled, CancelledError } from '../services/job-runner.js';
 import { newJob, jobs as jobsStore } from '../services/job-store.js';
 import { runH3Local } from '../services/generator.js';
+import { packGraph, unpackGraph, IMG_REF_PREFIX } from '../store/image-pool.js';
 import { getRuntime } from '../runtime.js';
 
 /* ------------------------------------------------------------- 工具函数 */
@@ -224,15 +225,18 @@ export async function handleApi(req, res) {
         if (req.method === 'GET') {
           const p = await projects.get(id);
           if (!p) return sendJson(res, 404, { error: 'PROJECT_NOT_FOUND' });
-          return sendJson(res, 200, p);
+          // 读盘时把 __img_ref__ 还原成图片本体（对前端透明）
+          return sendJson(res, 200, unpackProject(p));
         }
         if (req.method === 'POST') {
           const body = await readJsonBody(req);
           const p = await projects.get(id);
           if (!p) return sendJson(res, 404, { error: 'PROJECT_NOT_FOUND' });
-          const next = { ...p, ...allowedProjectPatch(body), updatedAt: Date.now() };
-          await projects.upsert(next);
-          return sendJson(res, 200, projectSummary(next));
+          const merged = { ...p, ...allowedProjectPatch(body), updatedAt: Date.now() };
+          // 写盘前把内联图片抽进 imagePool（否则项目 JSON 会膨胀百倍）
+          const packed = packProject(merged, p.imagePool);
+          await projects.upsert(packed);
+          return sendJson(res, 200, projectSummary(packed));
         }
         if (req.method === 'DELETE') {
           await projects.remove(id);
@@ -431,6 +435,44 @@ export async function handleApi(req, res) {
       return sendJson(res, 200, await ctx.assets.remove(body.id));
     }
 
+    /* ---------------- 文件服务（产物/资产，带 Range） ---------------- */
+    if ((req.method === 'GET' || req.method === 'HEAD') && route === '/file') {
+      const rel = url.searchParams.get('path');
+      if (!rel) return sendJson(res, 400, { error: 'PATH_REQUIRED' });
+      let abs;
+      try {
+        abs = safeJoin(cfg.dataDir, rel);      // 只允许 dataDir 内
+      } catch {
+        return sendJson(res, 403, { error: 'FORBIDDEN_PATH', path: rel });
+      }
+      if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
+        return sendJson(res, 404, { error: 'NOT_FOUND', path: rel });
+      }
+      const stat = fs.statSync(abs);
+      const ext = path.extname(abs).toLowerCase();
+      const mime = MIME_BY_EXT[ext] || 'application/octet-stream';
+      const range = parseRangeHeader(req.headers.range, stat.size);
+      if (range && range.invalid) {
+        res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+        return res.end();
+      }
+      if (range) {
+        const len = range.end - range.start + 1;
+        res.writeHead(206, {
+          'Content-Type': mime, 'Accept-Ranges': 'bytes',
+          'Content-Range': `bytes ${range.start}-${range.end}/${stat.size}`,
+          'Content-Length': len, 'Cache-Control': 'no-cache',
+        });
+        return pipeStream(res, abs, range);
+      }
+      res.writeHead(200, {
+        'Content-Type': mime, 'Content-Length': stat.size,
+        'Accept-Ranges': 'bytes', 'Cache-Control': 'no-cache',
+      });
+      if (req.method === 'HEAD') return res.end();
+      return pipeStream(res, abs);
+    }
+
     /* ---------------- 后处理 ---------------- */
     if (req.method === 'POST' && route === '/post/transcode') {
       const body = await readJsonBody(req);
@@ -472,6 +514,26 @@ function allowedProjectPatch(body) {
     if (body && k in body) out[k] = body[k];
   }
   return out;
+}
+
+/** 写盘前：把图里的内联图片抽进 imagePool，节点里只留 __img_ref__:<n> */
+function packProject(project, existingPool) {
+  // 只对可能含图片的字段做打包，其余原样（避免无谓遍历）
+  const { graph: nodes, pool: p1 } = packGraph(project.nodes ?? [], existingPool);
+  const { graph: history, pool: p2 } = packGraph(project.history ?? {}, p1);
+  return { ...project, nodes, history, imagePool: p2 };
+}
+
+/** 读盘后：把 __img_ref__:<n> 还原成图片本体 */
+function unpackProject(project) {
+  if (!project) return project;
+  const pool = project.imagePool ?? [];
+  if (!pool.length && !JSON.stringify(project).includes(IMG_REF_PREFIX)) return project;
+  return {
+    ...project,
+    nodes: unpackGraph(project.nodes ?? [], pool),
+    history: unpackGraph(project.history ?? {}, pool),
+  };
 }
 
 function shotsFile(projectId) {
@@ -575,6 +637,7 @@ async function executeBackend(job, shot, ctx, cfg) {
 
   return seedance.runMock({ cfg, job, shot, prompt });
 }
+
 
 
 

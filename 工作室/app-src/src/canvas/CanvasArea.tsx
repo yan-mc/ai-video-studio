@@ -57,6 +57,7 @@ import {
   NODE_CATEGORY_LABELS,
 } from './nodeRegistry';
 import type { CanvasNodeData } from './types';
+import { runNodeGeneration, isBackendSupported } from './runner';
 import type { PortKind } from './portTypes';
 import { targetOptionsForHandle, targetNodeTypesForHandle, PORT_KIND_LABELS } from './portTypes';
 import { NodeActionsContext, type NodeActions, type FilePickKind } from './nodeActions';
@@ -891,7 +892,8 @@ function CanvasInner() {
         toast.info('这个节点不发起生成（本地节点或结果节点）');
         return;
       }
-      // 生成本身由任务中心/后端负责；画布这里只做状态流转 + 汇总上游输入
+
+      // 收集上游图片（参考图来源）
       const upstreamPatch: Partial<CanvasNodeData> = {};
       const upstreamIds = edgesRef.current.filter((e) => e.target === nodeId).map((e) => e.source);
       const upNodes = nodesRef.current.filter((n) => upstreamIds.includes(n.id));
@@ -899,25 +901,79 @@ function CanvasInner() {
       if (firstImg && node.type === 'videoGeneratorNode' && !node.data?.params?.firstFrameUrl) {
         upstreamPatch.params = { ...(node.data?.params ?? {}), firstFrameUrl: firstImg };
       }
-      const next = nodesRef.current.map((n) =>
-        n.id === nodeId
-          ? {
-              ...n,
-              data: {
-                ...n.data,
-                ...upstreamPatch,
-                status: 'running' as const,
-                progress: 0,
-                error: undefined,
+
+      // 先进入 running 态
+      const markState = (patch: Partial<CanvasNodeData>) => {
+        const next = nodesRef.current.map((n) =>
+          n.id === nodeId ? { ...n, data: { ...n.data, ...patch } } : n,
+        );
+        commitGraph(next, edgesRef.current, { skipHistory: true, label: 'run-node' });
+      };
+
+      markState({ ...upstreamPatch, status: 'running', progress: 0, error: undefined });
+
+      // 真正调后端
+      if (!projectId) {
+        markState({ status: 'failed' as const, error: '请先选择一个项目' });
+        toast.error('请先选择一个项目再生成');
+        return;
+      }
+
+      if (!isBackendSupported(node.type ?? '')) {
+        // 26 节点里大部分还没有后端能力 —— 如实告知，不假装成功
+        markState({ status: 'idle', progress: 0, error: undefined });
+        toast.info(`「${displayTitle(node)}」的后端生成尚未接入（当前仅 AI 视频节点可生成）`);
+        return;
+      }
+
+      void (async () => {
+        try {
+          const result = await runNodeGeneration({
+            projectId,
+            node,
+            allNodes: nodesRef.current,
+            edges: edgesRef.current,
+            onProgress: (pct, note) => {
+              markState({ progress: pct, ...(note ? { note } : {}) } as Partial<CanvasNodeData>);
+            },
+          });
+
+          if (result.status === 'completed') {
+            const first = result.outputs?.[0];
+            const isVideo = /\.(mp4|webm|mov)$/i.test(first?.path ?? '') || first?.role === 'video';
+            markState({
+              status: 'done',
+              progress: 100,
+              note: undefined,
+              error: undefined,
+              result: {
+                url: first?.url,
+                path: first?.path,
+                lastFrameUrl: result.outputs[1]?.url,
               },
-            }
-          : n,
-      );
-      // 状态流转不记历史（撤销一次运行状态没有意义，且会挤掉真正的操作）
-      commitGraph(next, edgesRef.current, { skipHistory: true, label: 'run-node' });
-      toast.info(`已提交「${displayTitle(node)}」的生成任务（任务中心可查进度）`);
+              resultKind: isVideo ? 'videoGeneratorOutput' : 'generic',
+            });
+            toast.ok(`「${displayTitle(node)}」生成完成`);
+          } else {
+            markState({
+              status: 'failed' as const,
+              progress: 0,
+              error: result.error || '生成失败',
+            });
+            toast.error(result.error || '生成失败');
+          }
+        } catch (err) {
+          const msg = describeError(err);
+          // 后端不支持的节点类型给更友好的文案
+          const friendly = /NODE_NOT_GENERATIVE/.test(String((err as Error)?.message))
+            ? '该节点的后端生成尚未接入'
+            : msg;
+          markState({ status: 'failed' as const, progress: 0, error: friendly });
+          toast.error(friendly);
+        }
+      })();
     },
-    [commitGraph, toast],
+    [commitGraph, toast, projectId],
   );
 
   const cancelNode = useCallback((nodeId: string) => {
@@ -1666,3 +1722,7 @@ export default function CanvasArea() {
 
 /** 供测试/调试：注册表 type 列表与端口矩阵的快速导出 */
 export { NODE_TYPE_KEYS, CATEGORY_ORDER };
+
+
+
+
