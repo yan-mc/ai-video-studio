@@ -21,6 +21,8 @@ import { DIRECTOR_COMMANDS, CAMERA_MOVES, DIRECTOR_FPS } from '../services/direc
 import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, H3_MODES, H3_LIMITS } from '../services/h3-prompt.js';
 import { H3_IMAGE_MODELS, H3_IMAGE_SIZES, IMAGE_VAE, IMAGE_CLIP, IMAGE_SAMPLING, checkImageModels } from '../services/h3-image.js';
 import { BREAKDOWN_LEVELS, BREAKDOWN_SIZES, buildBreakdownPrompt, breakdownLevel, breakdownSize } from '../services/breakdown.js';
+import { findBrowser, screenshotPreviz, cropWithFfmpeg, buildPrevizStylePrompt } from '../services/previz-shot.js';
+import { resolveFfmpeg } from '../services/seedance-client.js';
 import { createCanvasAgent } from '../services/canvas-agent.js';
 import { getRuntime } from '../runtime.js';
 
@@ -508,6 +510,93 @@ export async function handleApi(req, res) {
       })();
 
       return sendJson(res, 200, { ok: true, queued: todo.length, total: targets.length });
+    }
+
+    /* ---------------- 预演截图 → 出图 ---------------- */
+    if (req.method === 'GET' && route === '/previz-shot/meta') {
+      return sendJson(res, 200, {
+        browser: findBrowser(),
+        defaultUrl: `http://127.0.0.1:${cfg.previzPort || 4318}/`,
+        viewport: { width: 1600, height: 1000 },
+      });
+    }
+    if (req.method === 'POST' && route === '/previz-shot/capture') {
+      const body = await readJsonBody(req);
+      const shot = await screenshotPreviz({
+        cfg,
+        url: body.url || `http://127.0.0.1:${cfg.previzPort || 4318}/`,
+        width: Number(body.width) || 1600,
+        height: Number(body.height) || 1000,
+        waitMs: Number(body.waitMs) || 8000,
+      });
+      // 裁出 3D 视口
+      let cropped = null;
+      try {
+        const ffmpeg = resolveFfmpeg(cfg);
+        const dst = shot.path.replace(/\.png$/, '_crop.png');
+        cropped = await cropWithFfmpeg(ffmpeg, shot.path, dst, {
+          width: Number(body.width) || 1600,
+          height: Number(body.height) || 1000,
+        });
+      } catch { /* 裁剪失败就用原图 */ }
+      return sendJson(res, 200, { ...shot, cropped: cropped ?? null });
+    }
+    if (req.method === 'POST' && route === '/previz-shot/generate') {
+      const body = await readJsonBody(req);
+      const wf = loadImageWorkflow();
+      if (!wf) return sendJson(res, 500, { error: 'WORKFLOW_MISSING' });
+      const models = checkImageModels(cfg);
+      if (!models.ready) return sendJson(res, 400, { error: 'IMAGE_MODEL_MISSING', missing: models.missing });
+
+      // 参考图：优先用裁好的视口
+      let refAbs = null;
+      if (body.refPath) {
+        const p = path.isAbsolute(body.refPath)
+          ? body.refPath
+          : safeJoin(cfg.dataDir, String(body.refPath));
+        if (fs.existsSync(p)) refAbs = p;
+      }
+      if (!refAbs && body.autoCapture) {
+        const shot = await screenshotPreviz({ cfg, url: body.url });
+        try {
+          const ffmpeg = resolveFfmpeg(cfg);
+          const dst = shot.path.replace(/\.png$/, '_crop.png');
+          const c = await cropWithFfmpeg(ffmpeg, shot.path, dst);
+          refAbs = c.path;
+        } catch {
+          refAbs = shot.path;
+        }
+      }
+      if (!refAbs) return sendJson(res, 400, { error: 'REF_REQUIRED', detail: '需要预演截图' });
+
+      const prompt = buildPrevizStylePrompt(body.prompt ?? '', {
+        style: body.style ?? '电影感写实风格，柔和自然光，高细节',
+      });
+
+      const job = newJob({
+        projectId: body.projectId ? safeId(String(body.projectId)) : null,
+        shotId: null,
+        backendId: 'h3-image',
+        prompt,
+        params: {
+          kind: 'image',
+          imageSizeId: body.sizeId ?? 'h-16x9',
+          seed: body.seed ?? Math.floor(Math.random() * 2147483647),
+        },
+        mode: 'edit',
+      });
+      job.kind = 'image';
+      await jobsStore().upsert(job);
+
+      runJob(job, async (running) => runH3ImageLocal({
+        workflow: wf,
+        job: running,
+        prompt,
+        shot: { refs: { images: [refAbs] }, imageSizeId: body.sizeId },
+        cfg,
+      })).catch(() => {});
+
+      return sendJson(res, 200, { ...job, refPath: refAbs });
     }
 
     /* ---------------- 拆解图 / 人设卡 ---------------- */
@@ -1276,6 +1365,8 @@ function loadImageWorkflow() {
     return _imgWf;
   } catch { return null; }
 }
+
+
 
 
 
