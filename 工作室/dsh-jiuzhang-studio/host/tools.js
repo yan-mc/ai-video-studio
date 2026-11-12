@@ -547,6 +547,72 @@ export function registerTools(ctx) {
     },
   )));
 
+  /* ---------------------------------------------------------- 工具箱（剩余域） */
+  disposers.push(reg(tool(
+    'studio_toolbox',
+    '工具箱：promptTemplates 提示词模板 / wardrobe 服化道 / importScan 分镜目录导入 / orphans 孤儿清理 / motionShots 动态条 / logs 运行日志 / batchProgress 批量进度。',
+    {
+      type: 'object',
+      properties: {
+        domain: {
+          type: 'string',
+          enum: ['promptTemplates', 'wardrobe', 'importScan', 'orphans', 'motionShots', 'logs', 'batchProgress'],
+        },
+        action: { type: 'string', enum: ['list', 'upsert', 'delete', 'scan', 'preview', 'clean'] },
+        id: { type: 'string' },
+        item: { type: 'object' },
+        kind: { type: 'string' },
+        dir: { type: 'string' },
+        path: { type: 'string' },
+        confirm: { type: 'boolean' },
+        projectId: { type: 'string' },
+        limit: { type: 'number' },
+      },
+      required: ['domain', 'action'],
+      additionalProperties: false,
+    },
+    async (a) => {
+      const e = z.extras;
+      switch (a.domain) {
+        case 'promptTemplates':
+          if (a.action === 'list') return e.listTemplates();
+          if (a.action === 'upsert') return e.upsertTemplate(a.item ?? {});
+          if (a.action === 'delete') return e.deleteTemplate(String(a.id));
+          break;
+        case 'wardrobe':
+          if (a.action === 'list') return e.listWardrobe(a.kind ?? null);
+          if (a.action === 'upsert') return e.upsertWardrobe(a.item ?? {});
+          if (a.action === 'delete') return e.deleteWardrobe(String(a.id));
+          break;
+        case 'importScan':
+          if (a.action === 'scan') return e.scanImportDir(String(a.dir || ''));
+          if (a.action === 'preview') return e.previewImportFile(String(a.path || ''), a.limit ?? 2000);
+          break;
+        case 'orphans': {
+          const all = await z.assets.list({});
+          if (a.action === 'list') return e.findOrphans(all);
+          if (a.action === 'clean') return e.cleanOrphans(all, { confirm: Boolean(a.confirm) });
+          break;
+        }
+        case 'motionShots':
+          if (a.action === 'list') return e.listMotionShots(a.projectId ?? null);
+          if (a.action === 'upsert') return e.upsertMotionShot(a.item ?? {});
+          if (a.action === 'delete') return e.deleteMotionShot(String(a.id));
+          break;
+        case 'logs':
+          if (a.action === 'list') return e.listLogs(a.limit ?? 100);
+          if (a.action === 'upsert') return e.appendLog(a.item ?? {});
+          break;
+        case 'batchProgress': {
+          const jobs = await jobsStore().list();
+          return e.batchProgress(jobs);
+        }
+        default: throw new Error('UNKNOWN_DOMAIN');
+      }
+      throw new Error('UNKNOWN_ACTION');
+    },
+  )));
+
   return () => disposers.forEach((d) => d && d());
 }
 

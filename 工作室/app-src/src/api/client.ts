@@ -364,6 +364,35 @@ export const api = {
   canvasAgentExec: (input: Record<string, unknown>) =>
     request<unknown>('POST', '/canvas-agent/exec', input),
 
+  /* 工具箱（剩余域） */
+  toolboxTemplates: () => request<unknown>('GET', '/templates'),
+  toolboxTemplateUpsert: (item: Record<string, unknown>) =>
+    request<unknown>('POST', '/templates/upsert', item),
+  toolboxTemplateDelete: (id: string) => request<unknown>('POST', '/templates/delete', { id }),
+
+  toolboxWardrobe: (kind?: string) =>
+    request<unknown>('GET', `/wardrobe${kind ? `?kind=${encodeURIComponent(kind)}` : ''}`),
+  toolboxWardrobeUpsert: (item: Record<string, unknown>) =>
+    request<unknown>('POST', '/wardrobe/upsert', item),
+  toolboxWardrobeDelete: (id: string) => request<unknown>('POST', '/wardrobe/delete', { id }),
+
+  toolboxImportScan: (input: { dir: string }) => request<unknown>('POST', '/import/scan', input),
+  toolboxImportPreview: (input: { path: string; limit?: number }) =>
+    request<unknown>('POST', '/import/preview', input),
+
+  toolboxOrphans: () => request<unknown>('GET', '/resources/orphans'),
+  toolboxOrphansClean: (input: { confirm: boolean }) =>
+    request<unknown>('POST', '/resources/clean', input),
+
+  toolboxMotionShots: (projectId?: string) =>
+    request<unknown>('GET', `/motionshots${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
+  toolboxMotionUpsert: (item: Record<string, unknown>) =>
+    request<unknown>('POST', '/motionshots/upsert', item),
+  toolboxMotionDelete: (id: string) => request<unknown>('POST', '/motionshots/delete', { id }),
+
+  toolboxLogs: (limit = 100) => request<unknown>('GET', `/logs?limit=${limit}`),
+  toolboxBatchProgress: () => request<unknown>('GET', '/jobs/batch-progress'),
+
   /* 后处理 */
   transcode: (input: TranscodeInput) => request<unknown>('POST', '/post/transcode', input),
   qc: (path: string) => request<QcResult>('POST', '/post/qc', { path }),

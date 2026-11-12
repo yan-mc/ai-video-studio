@@ -510,6 +510,81 @@ export async function handleApi(req, res) {
       return sendJson(res, 200, compileH3Prompt(body));
     }
 
+    /* ---------------- 提示词模板 ---------------- */
+    if (req.method === 'GET' && route === '/templates') {
+      return sendJson(res, 200, ctx.extras.listTemplates());
+    }
+    if (req.method === 'POST' && route === '/templates/upsert') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.extras.upsertTemplate(body));
+    }
+    if (req.method === 'POST' && route === '/templates/delete') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.extras.deleteTemplate(String(body.id)));
+    }
+
+    /* ---------------- 服化道 ---------------- */
+    if (req.method === 'GET' && route === '/wardrobe') {
+      return sendJson(res, 200, ctx.extras.listWardrobe(url.searchParams.get('kind') || null));
+    }
+    if (req.method === 'POST' && route === '/wardrobe/upsert') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.extras.upsertWardrobe(body));
+    }
+    if (req.method === 'POST' && route === '/wardrobe/delete') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.extras.deleteWardrobe(String(body.id)));
+    }
+
+    /* ---------------- 分镜目录导入 ---------------- */
+    if (req.method === 'POST' && route === '/import/scan') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.extras.scanImportDir(String(body.dir || '')));
+    }
+    if (req.method === 'POST' && route === '/import/preview') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.extras.previewImportFile(String(body.path || ''), Number(body.limit) || 2000));
+    }
+
+    /* ---------------- 资源清理 ---------------- */
+    if (req.method === 'GET' && route === '/resources/orphans') {
+      const all = await ctx.assets.list({});
+      return sendJson(res, 200, ctx.extras.findOrphans(all));
+    }
+    if (req.method === 'POST' && route === '/resources/clean') {
+      const body = await readJsonBody(req);
+      const all = await ctx.assets.list({});
+      return sendJson(res, 200, ctx.extras.cleanOrphans(all, { confirm: Boolean(body.confirm) }));
+    }
+
+    /* ---------------- 动态提示词条 ---------------- */
+    if (req.method === 'GET' && route === '/motionshots') {
+      return sendJson(res, 200, ctx.extras.listMotionShots(url.searchParams.get('projectId') || null));
+    }
+    if (req.method === 'POST' && route === '/motionshots/upsert') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.extras.upsertMotionShot(body));
+    }
+    if (req.method === 'POST' && route === '/motionshots/delete') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.extras.deleteMotionShot(String(body.id)));
+    }
+
+    /* ---------------- 运行日志 ---------------- */
+    if (req.method === 'GET' && route === '/logs') {
+      return sendJson(res, 200, ctx.extras.listLogs(Number(url.searchParams.get('limit')) || 100));
+    }
+    if (req.method === 'POST' && route === '/logs') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.extras.appendLog(body));
+    }
+
+    /* ---------------- 批量进度 ---------------- */
+    if (req.method === 'GET' && route === '/jobs/batch-progress') {
+      const all = await jobsStore().list();
+      return sendJson(res, 200, ctx.extras.batchProgress(all));
+    }
+
     /* ---------------- 画布内置 Agent ---------------- */
     if (req.method === 'GET' && route === '/canvas-agent/meta') {
       return sendJson(res, 200, ctx.canvasAgent.meta());
