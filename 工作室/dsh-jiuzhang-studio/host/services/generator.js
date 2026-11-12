@@ -182,7 +182,17 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
       if (staged['{{LAST_FRAME}}']) inputs.last_frame = ['21', 0];
       wfCopy['9'] = { class_type: 'MiniMaxH3ImageToVideo', inputs };
     } else {
-      refNode.inputs.ref_images = names.map((_, i) => [String(20 + i), 0]);
+      // ⚠️ ref_images 是 AUTOGROW 输入，prefix = "ref_image_"
+      //    正确写法必须带点号：ref_images.ref_image_1 / ref_image_2 ...
+      //    错误写法 ref_images = [["20",0], ...] 会被静默忽略，参考图完全不生效
+      //    （实测确认：同一 prompt+seed，有无参考图输出哈希完全相同）
+      delete refNode.inputs.ref_images;
+      for (const k of Object.keys(refNode.inputs)) {
+        if (/^ref_image_\d+$/.test(k)) delete refNode.inputs[k];
+      }
+      for (let i = 0; i < names.length; i++) {
+        refNode.inputs[`ref_images.ref_image_${i + 1}`] = [String(20 + i), 0];
+      }
       // 参考图模式下 LoadImage 已被 ref_images 占用，首尾帧节点需另编号
     }
   }

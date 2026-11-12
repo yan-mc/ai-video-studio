@@ -109,6 +109,25 @@ const wfNodes = Object.values(wf);
 add('B-工作流', 'h3.json 可解析', wfNodes.length > 0 && wfNodes.every((n) => n && n.class_type));
 add('B-工作流', '含 H3 节点', wfNodes.some((n) => /MiniMaxH3/.test(n.class_type)));
 add('B-工作流', '含 LoadImage 参考图节点', wfNodes.filter((n) => n.class_type === 'LoadImage').length >= 1);
+
+// ⚠️ 回归：AUTOGROW 输入的接线写法必须带点号（images.image_1 / ref_images.ref_image_1）
+// 错误写法会被 ComfyUI 静默忽略 → 参考图完全不生效（实测输出哈希相同）
+add(
+  'B-工作流',
+  'h3-image 参考图接线用点号形式',
+  (() => {
+    const src = fs.readFileSync(path.join(ROOT, 'host/services/h3-image.js'), 'utf8');
+    return src.includes('images.image_') && src.includes('images.image_${i + 1}') && !/inputs\.images\s*=\s*refNames/.test(src);
+  })(),
+);
+add(
+  'B-工作流',
+  'h3 视频参考图接线用点号形式',
+  (() => {
+    const src = fs.readFileSync(path.join(ROOT, 'host/services/generator.js'), 'utf8');
+    return src.includes('ref_images.ref_image_') && src.includes('ref_images.ref_image_${i + 1}') && !/inputs\.ref_images\s*=\s*names\.map/.test(src);
+  })(),
+);
 add('B-工作流', '含 SaveVideo 输出', wfNodes.some((n) => n.class_type === 'SaveVideo'));
 const raw = fs.readFileSync(path.join(ROOT, 'data/workflows/h3.json'), 'utf8');
 // 新版工作流是 ReferenceToVideo 链路：参考图用 REF_IMAGE_*，不再有 CFG/首尾帧占位符
@@ -240,4 +259,5 @@ console.log(`TOTAL PASS=${totalPass} FAIL=${totalFail}`);
 
 fs.rmSync(tmp, { recursive: true, force: true });
 process.exit(totalFail ? 1 : 0);
+
 

@@ -231,17 +231,32 @@ export async function runH3Image({
     if (!/^\d+$/.test(k)) delete wf[k];
   }
 
-  // 参考图接线：node 4 的 images（AUTOGROW）
+  // 参考图接线
+  //
+  // ⚠️ 关键：`images` 是 AUTOGROW 输入，官方模板里的输入名是 **`images.image_1`**
+  //    （带点号的路径形式），不是 `images` 数组、也不是 `image_1`。
+  //    实测错误写法（静默失效，参考图完全不生效）：
+  //      inputs.images      = [["20", 0]]   ❌ 被当成普通数组忽略
+  //      inputs.image_1     = ["20", 0]     ❌ TypeError: unexpected keyword 'image_1'
+  //    正确写法：
+  //      inputs["images.image_1"] = ["20", 0]   ✅
+  //      inputs["images.image_2"] = ["21", 0]   ✅
   const refNames = refImages.map((_, i) => staged[`{{IMG_REF_${i + 1}}}`]).filter(Boolean);
   if (refNames.length) {
     const condNode = wf['4'];
     if (condNode?.class_type === 'MiniMaxH3ImageConditioning') {
-      condNode.inputs.images = refNames.map((_, i) => [String(20 + i), 0]);
+      // 清掉任何可能存在的旧形式，避免混淆
+      delete condNode.inputs.images;
+      for (const k of Object.keys(condNode.inputs)) {
+        if (/^image_\d+$/.test(k)) delete condNode.inputs[k];
+      }
       for (let i = 0; i < refNames.length; i++) {
-        wf[String(20 + i)] = {
+        const slot = String(20 + i);
+        wf[slot] = {
           class_type: 'LoadImage',
           inputs: { image: refNames[i] },
         };
+        condNode.inputs[`images.image_${i + 1}`] = [slot, 0];
       }
     }
   }
