@@ -397,6 +397,12 @@ export const api = {
   imageMeta: () => request<unknown>('GET', '/image/meta'),
   imageGenerate: (input: Record<string, unknown>) => request<unknown>('POST', '/image/generate', input),
 
+  /* 人设卡拆解 */
+  breakdownMeta: () => request<unknown>('GET', '/breakdown/meta'),
+  breakdownPreview: (input: Record<string, unknown>) => request<unknown>('POST', '/breakdown/preview', input),
+  breakdownGenerate: (input: Record<string, unknown>) => request<unknown>('POST', '/breakdown/generate', input),
+  mwGenerateJob: (input: Record<string, unknown>) => request<unknown>('POST', '/mw/job/generate', input),
+
   /* 后处理 */
   transcode: (input: TranscodeInput) => request<unknown>('POST', '/post/transcode', input),
   qc: (path: string) => request<QcResult>('POST', '/post/qc', { path }),
@@ -434,5 +440,6 @@ export function describeError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return '发生未知错误';
 }
+
 
 

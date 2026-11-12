@@ -20,6 +20,7 @@ import { COMIC_TEMPLATES, COMIC_STATIONS } from '../services/comic-service.js';
 import { DIRECTOR_COMMANDS, CAMERA_MOVES, DIRECTOR_FPS } from '../services/director3d.js';
 import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, H3_MODES, H3_LIMITS } from '../services/h3-prompt.js';
 import { H3_IMAGE_MODELS, H3_IMAGE_SIZES, IMAGE_VAE, IMAGE_CLIP, IMAGE_SAMPLING, checkImageModels } from '../services/h3-image.js';
+import { BREAKDOWN_LEVELS, BREAKDOWN_SIZES, buildBreakdownPrompt, breakdownLevel, breakdownSize } from '../services/breakdown.js';
 import { createCanvasAgent } from '../services/canvas-agent.js';
 import { getRuntime } from '../runtime.js';
 
@@ -431,6 +432,71 @@ export async function handleApi(req, res) {
       return sendJson(res, 200, ctx.comic.exportAllSvg(pid, body.options ?? {}));
     }
 
+    /* ---------------- 拆解图 / 人设卡 ---------------- */
+    if (req.method === 'GET' && route === '/breakdown/meta') {
+      return sendJson(res, 200, {
+        levels: BREAKDOWN_LEVELS,
+        sizes: BREAKDOWN_SIZES,
+      });
+    }
+    if (req.method === 'POST' && route === '/breakdown/preview') {
+      const body = await readJsonBody(req);
+      const lv = breakdownLevel(body.level ?? 'full');
+      return sendJson(res, 200, {
+        level: lv.id,
+        prompt: buildBreakdownPrompt(body, lv.id),
+        chars: buildBreakdownPrompt(body, lv.id).length,
+      });
+    }
+    if (req.method === 'POST' && route === '/breakdown/generate') {
+      const body = await readJsonBody(req);
+      if (!cfg) return sendJson(res, 500, { error: 'CONFIG_MISSING' });
+      const wf = loadImageWorkflow();
+      if (!wf) return sendJson(res, 500, { error: 'WORKFLOW_MISSING' });
+
+      const lv = breakdownLevel(body.level ?? 'full');
+      const size = breakdownSize(body.sizeId ?? 'square');
+      const prompt = buildBreakdownPrompt(body, lv.id);
+
+      // 参考图：绝对路径或 dataDir 相对路径
+      const refAbs = [];
+      for (const r of (body.refImages ?? [])) {
+        if (!r) continue;
+        if (path.isAbsolute(r) && fs.existsSync(r)) { refAbs.push(r); continue; }
+        try {
+          const a = safeJoin(cfg.dataDir, String(r));
+          if (fs.existsSync(a)) refAbs.push(a);
+        } catch { /* ignore */ }
+      }
+
+      const job = newJob({
+        projectId: body.projectId ? safeId(String(body.projectId)) : null,
+        shotId: null,
+        backendId: 'h3-image',
+        prompt,
+        params: {
+          kind: 'image',
+          imageSizeId: body.sizeId ?? 'square',
+          width: size.w,
+          height: size.h,
+          seed: body.seed ?? Math.floor(Math.random() * 2147483647),
+        },
+        mode: 'edit',
+      });
+      job.kind = 'image';
+      await jobsStore().upsert(job);
+
+      runJob(job, async (running) => runH3ImageLocal({
+        workflow: wf,
+        job: running,
+        prompt,
+        shot: { refs: { images: refAbs }, imageSizeId: body.sizeId },
+        cfg,
+      })).catch(() => {});
+
+      return sendJson(res, 200, { ...job, refCount: refAbs.length, level: lv.id });
+    }
+
     /* ---------------- 图像生成（H3-Image） ---------------- */
     if (req.method === 'GET' && route === '/image/meta') {
       return sendJson(res, 200, {
@@ -669,6 +735,63 @@ export async function handleApi(req, res) {
     if (req.method === 'POST' && route === '/mw/job/replan') {
       const body = await readJsonBody(req);
       return sendJson(res, 200, ctx.mw.replanJob(String(body.id)));
+    }
+    if (req.method === 'POST' && route === '/mw/job/generate') {
+      const body = await readJsonBody(req);
+      const jobId = String(body.id || '');
+      const job = ctx.mw.listJobs().find((j) => j.id === jobId);
+      if (!job) return sendJson(res, 404, { error: 'MW_JOB_NOT_FOUND' });
+
+      const wf = loadImageWorkflow();
+      if (!wf) return sendJson(res, 500, { error: 'WORKFLOW_MISSING' });
+      const models = checkImageModels(cfg);
+      if (!models.ready) {
+        return sendJson(res, 400, { error: 'IMAGE_MODEL_MISSING', missing: models.missing });
+      }
+
+      // 尺寸按用途映射
+      const sizeId = job.mode === 'film' ? 'p-3x4-film' : 'ecom-sq';
+      const seed = body.seed ?? Math.floor(Math.random() * 2147483647);
+
+      // 异步跑，立即返回
+      void (async () => {
+        try {
+          await ctx.mw.runGeneration(jobId, async (planItem) => {
+            const j = newJob({
+              projectId: job.projectId ?? null,
+              shotId: null,
+              backendId: 'h3-image',
+              prompt: planItem.prompt,
+              params: {
+                kind: 'image',
+                imageSizeId: sizeId,
+                seed: seed + planItem.index,
+              },
+              mode: 't2i',
+            });
+            j.kind = 'image';
+            await jobsStore().upsert(j);
+
+            const r = await runH3ImageLocal({
+              workflow: wf,
+              job: j,
+              prompt: planItem.prompt,
+              shot: { refs: { images: [] }, imageSizeId: sizeId },
+              cfg,
+            });
+            // 记进 jobs 表以便前端查询（upsert 会合并同 id）
+            await jobsStore().upsert({
+              ...j,
+              status: 'completed',
+              outputs: r.outputs ?? [],
+              finishedAt: Date.now(),
+            });
+            return r.outputs?.[0] ?? r;
+          });
+        } catch { /* runGeneration 内部已记录失败 */ }
+      })();
+
+      return sendJson(res, 200, { ok: true, jobId, total: job.count, message: '已开始出图' });
     }
     if (req.method === 'POST' && route === '/mw/job/delete') {
       const body = await readJsonBody(req);
@@ -1075,6 +1198,7 @@ function loadImageWorkflow() {
     return _imgWf;
   } catch { return null; }
 }
+
 
 
 

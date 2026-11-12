@@ -378,6 +378,97 @@ export function createModelWorkbench({ cfg }) {
     return { removed: before.length - after.length };
   }
 
+  /**
+   * 执行出图（洛书设计：主图先行 → 过检 → 并行其余）。
+   *
+   * 由于 12GB 显存 + 单 worker，这里用**串行**代替"并行"，
+   * 保证稳定性（并行会 OOM）。流程与语义保持一致：
+   *   1) 先出 stage=base 的那一张（主品/定妆）
+   *   2) 检查硬伤，不合格重出一次（最多 3 次）
+   *   3) 其余镜头依次出图
+   *
+   * @param {string} jobId
+   * @param {(payload:object)=>Promise<{path:string,rel:string,bytes:number}>} generate
+   *        由调用方注入：拿到 prompt 与 size，返回产物
+   * @param {{onProgress?:Function}} [opts]
+   */
+  async function runGeneration(jobId, generate, opts = {}) {
+    const arr = listJobs();
+    const at = arr.findIndex((j) => j.id === jobId);
+    if (at < 0) throw new Error('MW_JOB_NOT_FOUND');
+    const job = { ...arr[at] };
+    job.status = 'generating';
+    job.shots = (job.shots ?? []).map((s) => ({ ...s, status: 'queued', result: null, attempts: 0, check: null }));
+    arr[at] = job;
+    writeArr(jobsFile(), arr);
+
+    const plan = job.plan ?? planPrompts(job);
+    const baseShots = plan.filter((p) => p.stage === 'base');
+    const restShots = plan.filter((p) => p.stage !== 'base');
+    const ordered = [...baseShots, ...restShots];
+
+    const total = ordered.length;
+    let done = 0;
+
+    const saveShot = (key, patch) => {
+      const list = listJobs();
+      const i = list.findIndex((j) => j.id === jobId);
+      if (i < 0) return;
+      const cur = { ...list[i] };
+      cur.shots = cur.shots.map((s) => (s.key === key ? { ...s, ...patch } : s));
+      list[i] = { ...cur, updatedAt: Date.now() };
+      writeArr(jobsFile(), list);
+    };
+
+    for (const p of ordered) {
+      if (opts.isCancelled?.()) {
+        updateJob(jobId, { status: 'interrupted' });
+        return listJobs().find((j) => j.id === jobId);
+      }
+
+      saveShot(p.key, { status: 'running' });
+      opts.onProgress?.({ done, total, current: p.name });
+
+      let attempts = 0;
+      let ok = false;
+      let lastErr = null;
+
+      // 硬伤自动重出，最多 3 次（洛书 capReached: '已达 3 次上限'）
+      while (attempts < 3 && !ok) {
+        attempts += 1;
+        try {
+          const out = await generate(p);
+          const check = checkFlaws(out, { ratio: p.ratio });
+          saveShot(p.key, {
+            status: check.ok ? 'done' : 'flawed',
+            result: out,
+            attempts,
+            check,
+          });
+          if (check.ok) { ok = true; }
+          else if (attempts >= 3) { ok = true; }   // 已达上限，保留并标红
+        } catch (e) {
+          lastErr = String(e?.message ?? e);
+          saveShot(p.key, { status: 'failed', error: lastErr, attempts });
+          if (attempts >= 3) ok = true;
+        }
+      }
+
+      done += 1;
+      opts.onProgress?.({ done, total, current: p.name, ok });
+    }
+
+    const finalList = listJobs();
+    const cur = finalList.find((j) => j.id === jobId);
+    const failed = (cur?.shots ?? []).filter((s) => s.status === 'failed').length;
+    const flawed = (cur?.shots ?? []).filter((s) => s.status === 'flawed').length;
+    return updateJob(jobId, {
+      status: failed === total ? 'failed' : 'done',
+      finishedAt: Date.now(),
+      summary: { total, done, failed, flawed },
+    });
+  }
+
   /** 元信息 */
   function meta() {
     return {
@@ -398,7 +489,7 @@ export function createModelWorkbench({ cfg }) {
     meta, createJob, updateJob, deleteJobs, listJobs, replanJob,
     savePlan, applyPlan, deletePlan, listPlans,
     listFigureItems, upsertFigure, deleteFigure,
-    planPrompts, dir,
+    planPrompts, dir, runGeneration,
   };
 }
 
