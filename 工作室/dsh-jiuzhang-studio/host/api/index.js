@@ -19,6 +19,7 @@ import { SCRIPT_GENRES, SCRIPT_STAGES, checkConsistency } from '../services/scri
 import { COMIC_TEMPLATES, COMIC_STATIONS } from '../services/comic-service.js';
 import { DIRECTOR_COMMANDS, CAMERA_MOVES, DIRECTOR_FPS } from '../services/director3d.js';
 import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, H3_MODES, H3_LIMITS } from '../services/h3-prompt.js';
+import { createCanvasAgent } from '../services/canvas-agent.js';
 import { getRuntime } from '../runtime.js';
 
 /* ------------------------------------------------------------- 工具函数 */
@@ -509,6 +510,24 @@ export async function handleApi(req, res) {
       return sendJson(res, 200, compileH3Prompt(body));
     }
 
+    /* ---------------- 画布内置 Agent ---------------- */
+    if (req.method === 'GET' && route === '/canvas-agent/meta') {
+      return sendJson(res, 200, ctx.canvasAgent.meta());
+    }
+    if (req.method === 'POST' && route === '/canvas-agent/exec') {
+      const body = await readJsonBody(req);
+      const name = String(body.name || '');
+      const ctxIn = body.context ?? {};
+      // 项目 id 可选：给了才去后端补资产/镜头，否则用前端传的 context
+      const rawPid = body.projectId ? safeId(String(body.projectId)) : '';
+      const enriched = { ...ctxIn };
+      if (rawPid) {
+        if (!ctxIn.assets) enriched.assets = await ctx.assets.list({ projectId: rawPid });
+        if (!ctxIn.shots) enriched.shots = listShots(rawPid);
+      }
+      return sendJson(res, 200, await ctx.canvasAgent.exec(name, body.arguments ?? {}, enriched));
+    }
+
     /* ---------------- 模特工作台 ---------------- */
     if (req.method === 'GET' && route === '/mw/meta') {
       return sendJson(res, 200, ctx.mw.meta());
@@ -914,6 +933,7 @@ async function executeBackend(job, shot, ctx, cfg) {
 
   return seedance.runMock({ cfg, job, shot, prompt });
 }
+
 
 
 

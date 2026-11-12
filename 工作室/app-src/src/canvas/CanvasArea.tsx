@@ -58,6 +58,7 @@ import {
 } from './nodeRegistry';
 import type { CanvasNodeData } from './types';
 import { runNodeGeneration, isBackendSupported } from './runner';
+import { CanvasAgentPanel } from './CanvasAgentPanel';
 import type { PortKind } from './portTypes';
 import { targetOptionsForHandle, targetNodeTypesForHandle, PORT_KIND_LABELS } from './portTypes';
 import { NodeActionsContext, type NodeActions, type FilePickKind } from './nodeActions';
@@ -79,6 +80,18 @@ import {
   type ConnectionLike,
 } from './graph';
 import type { CanvasFlowNode } from './types';
+
+/** 画布 AI 助手返回的变更描述 */
+interface AgentDiffItem {
+  op: string;
+  nodeId?: string;
+  node?: unknown;
+  before?: unknown;
+  after?: unknown;
+  type?: string;
+  diffs?: AgentDiffItem[];
+}
+type AgentDiff = AgentDiffItem;
 
 import './canvas.css';
 
@@ -435,6 +448,7 @@ function CanvasInner() {
 
   const bumpHistory = useCallback(() => setHistoryTick((n) => n + 1), []);
 
+
   /* ------------------------------ autosave ------------------------------- */
   useEffect(() => {
     const saver = new Autosave<ReturnType<typeof buildPayload>>({
@@ -558,6 +572,7 @@ function CanvasInner() {
    * 所有 mutation 都走它，保证 refs/渲染/历史/存盘四者一致。
    */
   const commitGraph = useCallback(
+
     (
       nextNodes: CanvasFlowNode[],
       nextEdges: CanvasEdgeShape[],
@@ -574,6 +589,49 @@ function CanvasInner() {
     },
     [pushHistory, scheduleSave],
   );
+
+  /* --------------------------- 画布 AI 助手 ------------------------------ */
+  const [aiOpen, setAiOpen] = useState(false);
+
+  /**
+   * 应用后端返回的 diff 到画布。
+   * 支持的 op：update_node / insert_image / delete_node / batch。
+   */
+  const applyAgentDiff = useCallback((diff: AgentDiff) => {
+    if (!diff) return;
+    const list = diff.op === 'batch' ? (diff.diffs ?? []) : [diff];
+
+    let nextNodes = nodesRef.current.slice();
+    for (const d of list) {
+      if (d.op === 'update_node' && d.nodeId) {
+        nextNodes = nextNodes.map((n) =>
+          n.id === d.nodeId ? { ...n, data: { ...n.data, ...(d.after as object) } } : n,
+        );
+      } else if (d.op === 'insert_image' && d.node) {
+        const raw = d.node as { id: string; type: string; position?: { x: number; y: number }; data?: object };
+        nextNodes = [
+          ...nextNodes,
+          {
+            id: raw.id,
+            type: raw.type,
+            position: raw.position ?? { x: 120, y: 120 },
+            data: raw.data ?? {},
+          } as unknown as CanvasFlowNode,
+        ];
+      } else if (d.op === 'delete_node' && d.nodeId) {
+        nextNodes = nextNodes.filter((n) => n.id !== d.nodeId);
+      }
+    }
+
+    if (nextNodes.length === nodesRef.current.length && list.every((d) => d.op === 'update_node')) {
+      // 仅更新，不需要删边
+      commitGraph(nextNodes, edgesRef.current, { label: 'ai-edit' });
+    } else {
+      const ids = new Set(nextNodes.map((n) => n.id));
+      const nextEdges = edgesRef.current.filter((e) => ids.has(e.source) && ids.has(e.target));
+      commitGraph(nextNodes, nextEdges, { label: 'ai-edit' });
+    }
+  }, [commitGraph]);
 
   /* ------------------------------ 节点变更 ------------------------------- */
   const onNodesChange = useCallback(
@@ -1541,8 +1599,30 @@ function CanvasInner() {
                 <Panel position="top-right">
                   <div className="jz-canvas__zoom-panel">
                     {locked ? <Badge tone="warn">已锁定</Badge> : null}
+                    <Button
+                      size="sm"
+                      variant={aiOpen ? 'primary' : 'ghost'}
+                      onClick={() => setAiOpen((v) => !v)}
+                      title="画布 AI 助手"
+                    >
+                      AI
+                    </Button>
                   </div>
                 </Panel>
+                {aiOpen ? (
+                  <Panel position="bottom-left">
+                    <div className="jz-card" style={{ width: 340, height: 380, padding: 10, display: 'flex', flexDirection: 'column' }}>
+                      <CanvasAgentPanel
+                        projectId={projectId}
+                        getContext={() => ({
+                          nodes: nodesRef.current as unknown[],
+                          edges: edgesRef.current as unknown[],
+                        })}
+                        applyDiff={(diff) => applyAgentDiff(diff as AgentDiff)}
+                      />
+                    </div>
+                  </Panel>
+                ) : null}
               </ReactFlow>
 
               {/* 空画布引导 */}
@@ -1722,6 +1802,7 @@ export default function CanvasArea() {
 
 /** 供测试/调试：注册表 type 列表与端口矩阵的快速导出 */
 export { NODE_TYPE_KEYS, CATEGORY_ORDER };
+
 
 
 

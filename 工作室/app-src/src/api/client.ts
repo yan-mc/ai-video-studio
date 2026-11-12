@@ -359,6 +359,11 @@ export const api = {
   promptFromShot: (input: Record<string, unknown>) => request<unknown>('POST', '/prompt/from-shot', input),
   promptPreview: (input: Record<string, unknown>) => request<unknown>('POST', '/prompt/preview', input),
 
+  /* 画布内置 Agent */
+  canvasAgentMeta: () => request<unknown>('GET', '/canvas-agent/meta'),
+  canvasAgentExec: (input: Record<string, unknown>) =>
+    request<unknown>('POST', '/canvas-agent/exec', input),
+
   /* 后处理 */
   transcode: (input: TranscodeInput) => request<unknown>('POST', '/post/transcode', input),
   qc: (path: string) => request<QcResult>('POST', '/post/qc', { path }),
@@ -396,3 +401,4 @@ export function describeError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return '发生未知错误';
 }
+

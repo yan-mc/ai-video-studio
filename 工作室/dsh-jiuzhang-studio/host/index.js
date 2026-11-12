@@ -26,6 +26,7 @@ import { createScriptService } from './services/script-service.js';
 import { createComicService } from './services/comic-service.js';
 import { createModelWorkbench } from './services/model-workbench.js';
 import { createDirectorController } from './services/director3d.js';
+import { createCanvasAgent } from './services/canvas-agent.js';
 import { initRuntime, attachControllers, disposeRuntime } from './runtime.js';
 
 export const inject = ['tools', 'webServer'];
@@ -51,7 +52,8 @@ export function apply(ctx) {
   const comic = createComicService({ cfg });
   const mw = createModelWorkbench({ cfg });
   const director = createDirectorController({ cfg, root });
-  attachControllers({ previz, h3, post, assets, script, comic, mw, director });
+  const canvasAgent = createCanvasAgent({ cfg });
+  attachControllers({ previz, h3, post, assets, script, comic, mw, director, canvasAgent });
 
   /* ---------------------------- HTTP 路由 ---------------------------- */
 
@@ -120,6 +122,7 @@ export function apply(ctx) {
     + `后端=${cfg.defaultBackend} 并发=${cfg.maxConcurrentLocal} 运行统计=${JSON.stringify(runtimeStats())}`,
   );
 }
+
 
 
 
