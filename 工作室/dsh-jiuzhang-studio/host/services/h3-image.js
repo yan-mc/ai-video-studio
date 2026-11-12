@@ -65,6 +65,50 @@ export function imageSize(id) {
 }
 
 /**
+ * 推导模型根目录。优先级：
+ *  1) 配置里的 imageModelRoot（显式指定）
+ *  2) 配置的 comfyInputDir 的兄弟目录 models
+ *  3) 从 ComfyUI 实际路径推断（通过其 output 目录反推）
+ *  4) 环境变量 H3_MODEL_ROOT
+ *  5) 几个常见默认位置
+ */
+export function resolveModelRoot(cfg = loadConfig()) {
+  const candidates = [];
+
+  if (cfg.imageModelRoot) candidates.push(cfg.imageModelRoot);
+
+  if (cfg.comfyInputDir) {
+    candidates.push(path.resolve(cfg.comfyInputDir, '..', 'models'));
+    candidates.push(path.resolve(cfg.comfyInputDir, '..', '..', 'models'));
+  }
+
+  if (process.env.H3_MODEL_ROOT) candidates.push(process.env.H3_MODEL_ROOT);
+
+  // 常见布局
+  candidates.push('F:\\AI视频\\ai-runtime\\models');
+
+  // 从插件自身位置向上找 ai-runtime/models（插件可能放在任意位置）
+  try {
+    const here = import.meta.dirname;   // .../host/services
+    let dir = here;
+    for (let i = 0; i < 6; i++) {
+      dir = path.dirname(dir);
+      candidates.push(path.join(dir, 'models'));
+      candidates.push(path.join(dir, 'ai-runtime', 'models'));
+    }
+  } catch { /* ignore */ }
+
+  // 取第一个「真的存在 diffusion_models 子目录」的
+  for (const c of candidates) {
+    if (!c) continue;
+    try {
+      if (fs.existsSync(path.join(c, 'diffusion_models'))) return c;
+    } catch { /* ignore */ }
+  }
+  return candidates.find(Boolean) ?? '';
+}
+
+/**
  * 按用途推荐尺寸（模特/漫画/画布）。
  */
 export function sizeForPurpose(purpose) {
@@ -85,7 +129,7 @@ export function sizeForPurpose(purpose) {
 
 /** 检查本地模型是否就绪 */
 export function checkImageModels(cfg = loadConfig()) {
-  const root = cfg.imageModelRoot || path.resolve(cfg.comfyInputDir, '..', 'models');
+  const root = resolveModelRoot(cfg);
   const unetDir = path.join(root, 'diffusion_models');
   const vaeDir = path.join(root, 'vae');
   const clipDir = path.join(root, 'text_encoders');
@@ -182,6 +226,10 @@ export async function runH3Image({
   };
 
   const wf = structuredClone(workflow);
+  // ComfyUI 会把非数字 key 也当节点解析 → `_comment` 必须剔除，否则 500
+  for (const k of Object.keys(wf)) {
+    if (!/^\d+$/.test(k)) delete wf[k];
+  }
 
   // 参考图接线：node 4 的 images（AUTOGROW）
   const refNames = refImages.map((_, i) => staged[`{{IMG_REF_${i + 1}}}`]).filter(Boolean);
