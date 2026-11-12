@@ -287,6 +287,24 @@ export const api = {
     return request<Asset[]>('GET', `/assets${suffix}`);
   },
 
+  /* 剧本创作 */
+  scriptMeta: () => request<unknown>('GET', '/script/meta'),
+  getScript: (projectId: string) =>
+    request<unknown>('GET', `/script?projectId=${encodeURIComponent(projectId)}`),
+  runScriptStage: (input: Record<string, unknown>) =>
+    request<unknown>('POST', '/script/stage', input),
+  runScriptAll: (input: Record<string, unknown>) =>
+    request<unknown>('POST', '/script/runAll', input),
+  checkScript: (projectId: string, limit = 10) =>
+    request<unknown>('POST', '/script/check', { projectId, limit }),
+  saveScript: (projectId: string, doc: unknown) =>
+    request<unknown>('POST', '/script/save', { projectId, doc }),
+
+  /* 图像工具 */
+  postOp: (op: string, input: Record<string, unknown> = {}) =>
+    request<unknown>('POST', `/post/${op}`, input),
+  postFonts: () => request<{ fonts: string[] }>('GET', '/post/fonts'),
+
   /* 后处理 */
   transcode: (input: TranscodeInput) => request<unknown>('POST', '/post/transcode', input),
   qc: (path: string) => request<QcResult>('POST', '/post/qc', { path }),

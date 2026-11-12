@@ -12,6 +12,7 @@ import * as comfy from './services/comfy-client.js';
 import * as seedanceClient from './services/seedance-client.js';
 import { extractAssets, segmentScript } from './services/h3-workshop.js';
 import { runH3Local } from './services/generator.js';
+import { SCRIPT_GENRES, SCRIPT_STAGES, checkConsistency } from './services/script-service.js';
 import { getRuntime } from './runtime.js';
 
 function ok(value) {
@@ -351,10 +352,46 @@ export function registerTools(ctx) {
     },
   )));
 
+  /* ---------------------------------------------------------- 剧本 */
+  disposers.push(reg(tool(
+    'studio_script',
+    '剧本创作（5 阶段）：outline 大纲 / bios 人物小传 / chapters 章节目录 / body 章节正文 / storyboard 视觉分镜；也可 runAll 一键跑完。',
+    {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['get', 'stage', 'runAll', 'check', 'meta'] },
+        projectId: { type: 'string' },
+        stage: { type: 'string', enum: ['outline', 'bios', 'chapters', 'body', 'storyboard'] },
+        title: { type: 'string' },
+        premise: { type: 'string', description: '一句话故事' },
+        genre: { type: 'string', description: '题材 id（见 meta）' },
+        episodes: { type: 'number', description: '集数（1-200）' },
+        episodeIndex: { type: 'number', description: 'body/storyboard 针对第几集' },
+        consistencyLimit: { type: 'number' },
+        characters: { type: 'array', items: { type: 'object' } },
+      },
+      required: ['action', 'projectId'],
+      additionalProperties: false,
+    },
+    async (a) => {
+      const { action, projectId, ...rest } = a;
+      if (action === 'meta') return { genres: SCRIPT_GENRES, stages: SCRIPT_STAGES };
+      if (action === 'get') return z.script.load(projectId);
+      if (action === 'stage') return await z.script.runStage(projectId, rest.stage, rest);
+      if (action === 'runAll') return await z.script.runAll(projectId, rest);
+      if (action === 'check') {
+        const doc = z.script.load(projectId) ?? {};
+        return checkConsistency(doc, { limit: rest.consistencyLimit ?? 10 });
+      }
+      throw new Error('UNKNOWN_ACTION');
+    },
+  )));
+
   return () => disposers.forEach((d) => d && d());
 }
 
 export default registerTools;
+
 
 
 

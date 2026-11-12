@@ -54,6 +54,7 @@ export const zh = {
     settings: '设置',
     jobs: '任务',
     previz: '预演',
+    script: '剧本',
     collapse: '收起侧栏',
     expand: '展开侧栏',
     theme: '切换主题',

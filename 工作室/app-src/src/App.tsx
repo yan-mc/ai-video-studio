@@ -14,6 +14,7 @@ import { H3Page } from './pages/H3Page';
 import { SettingsPage } from './pages/SettingsPage';
 import { JobsPage } from './pages/JobsPage';
 import { PrevizPage } from './pages/PrevizPage';
+import { ScriptPage } from './pages/ScriptPage';
 
 import { useRouter } from './router';
 import type { RouteId } from './router';
@@ -35,6 +36,7 @@ const NAV: ReadonlyArray<NavEntry> = [
   { key: 'assets', icon: 'assets', labelKey: 'nav.assets' },
   { key: 'projects', icon: 'projects', labelKey: 'nav.projects' },
   { key: 'h3', icon: 'h3', labelKey: 'nav.h3' },
+  { key: 'script', icon: 'text', labelKey: 'nav.script' },
   { key: 'previz', icon: 'cube', labelKey: 'nav.previz' },
   { key: 'jobs', icon: 'jobs', labelKey: 'nav.jobs' },
   { key: 'settings', icon: 'settings', labelKey: 'nav.settings' },
@@ -213,6 +215,8 @@ function RouteView({ route }: { route: RouteId }) {
       return <JobsPage />;
     case 'previz':
       return <PrevizPage />;
+    case 'script':
+      return <ScriptPage />;
     case 'canvas':
     default:
       return <CanvasPage />;
@@ -279,3 +283,4 @@ export default function App() {
     </ThemeProvider>
   );
 }
+

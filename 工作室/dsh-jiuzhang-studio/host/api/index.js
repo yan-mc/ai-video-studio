@@ -15,6 +15,7 @@ import { runJob, cancelJob, runtimeStats, markCancelled, CancelledError } from '
 import { newJob, jobs as jobsStore } from '../services/job-store.js';
 import { runH3Local } from '../services/generator.js';
 import { packGraph, unpackGraph, IMG_REF_PREFIX } from '../store/image-pool.js';
+import { SCRIPT_GENRES, SCRIPT_STAGES, checkConsistency } from '../services/script-service.js';
 import { getRuntime } from '../runtime.js';
 
 /* ------------------------------------------------------------- 工具函数 */
@@ -358,6 +359,37 @@ export async function handleApi(req, res) {
       return sendJson(res, 200, await ctx.h3.filmRender(body));
     }
 
+    /* ---------------- 剧本创作 ---------------- */
+    if (req.method === 'GET' && route === '/script/meta') {
+      return sendJson(res, 200, { genres: SCRIPT_GENRES, stages: SCRIPT_STAGES });
+    }
+    if (req.method === 'GET' && route === '/script') {
+      const pid = safeId(url.searchParams.get('projectId') || '');
+      return sendJson(res, 200, ctx.script.load(pid));
+    }
+    if (req.method === 'POST' && route === '/script/stage') {
+      const body = await readJsonBody(req);
+      const pid = safeId(body.projectId || '');
+      const stage = String(body.stage || '');
+      return sendJson(res, 200, await ctx.script.runStage(pid, stage, body));
+    }
+    if (req.method === 'POST' && route === '/script/runAll') {
+      const body = await readJsonBody(req);
+      const pid = safeId(body.projectId || '');
+      return sendJson(res, 200, await ctx.script.runAll(pid, body));
+    }
+    if (req.method === 'POST' && route === '/script/check') {
+      const body = await readJsonBody(req);
+      const pid = safeId(body.projectId || '');
+      const doc = ctx.script.load(pid) ?? {};
+      return sendJson(res, 200, checkConsistency(doc, { limit: body.limit ?? 10 }));
+    }
+    if (req.method === 'POST' && route === '/script/save') {
+      const body = await readJsonBody(req);
+      const pid = safeId(body.projectId || '');
+      return sendJson(res, 200, ctx.script.save(pid, body.doc ?? {}));
+    }
+
     /* ---------------- 资产 ---------------- */
     if (req.method === 'GET' && route === '/assets') {
       const type = url.searchParams.get('type') || undefined;
@@ -671,6 +703,7 @@ async function executeBackend(job, shot, ctx, cfg) {
 
   return seedance.runMock({ cfg, job, shot, prompt });
 }
+
 
 
 
