@@ -1,4 +1,0 @@
-- insert:
-    - id: ai-video-studio
-      name: '@local/dsh-ai-video-studio'
-      config: {}

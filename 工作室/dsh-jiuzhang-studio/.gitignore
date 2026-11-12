@@ -6,10 +6,26 @@ data/previz/
 data/post/
 data/assets/
 data/shots/
+data/comic/
+data/mw/
+data/script/
+data/extras/
+data/previz-shots/
 data/selftest-*/
 
 # 仓库里只保留工作流模板
 !data/workflows/
 
-# 自检脚本的临时产物
+# 前端依赖与构建中间产物
+app-src/node_modules/
+app-src/dist/
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+*.log
 *.tmp
+
+# 本地备份
+*.broken
+__pycache__/

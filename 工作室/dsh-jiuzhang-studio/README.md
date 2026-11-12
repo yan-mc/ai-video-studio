@@ -1,37 +1,76 @@
-# 九章工作室 · DSH 插件
+# 九章工作室 · DSH 视频/图像创作插件
 
-> 本地 AI 视频工作室。节点画布 / 素材库 / 剧本·漫画·分镜 / 六个导演台 / **H3 与 Seedance 双后端**。
+> 本地 AI 视频与图像工作室。节点画布 / 素材库 / 剧本 / 漫画 / 模特 / 3D 导演台 / 人设卡拆解 / **H3 + H3-Image + Seedance 三后端**。
 >
-> 基于对「洛书灵枢 1.0.59」的功能学习重写 —— **不含任何商业软件代码或资产**。
+> 完全本地运行，数据不出机器。
 
 ---
 
-## 安装
+## 特性
+
+| 能力 | 说明 |
+|---|---|
+| **26 节点画布** | 节点式工作流，8 种端口类型，拖线只列可连接节点，12 步撤销，自动保存 |
+| **H3 视频生成** | MiniMax H3 本地（Ref2VA / FL2VA / T2V），5 秒片约 130 秒 |
+| **H3-Image 图像生成** | 33B 扩散模型，6 步采样，原生 16MP，**12GB 显存可跑** |
+| **人设卡拆解** | 立绘 → 全景式角色概念分解图（服装分层/表情集/材质特写/随身物品） |
+| **漫画工作台** | 分镜抽取 → 提示词计划 → 逐格出图 → 内含图片的 SVG 导出 |
+| **模特工作台** | 电商 6 风格 / 影视 10 画风，套件批量出图（13 张 / 10 张） |
+| **剧本 5 阶段** | 大纲 → 人物小传 → 章节目录 → 章节正文 → 视觉分镜，14 题材 |
+| **3D 导演台** | 58 动作 / 28 运镜 / 7 人物 / 10 道具，白模预演 → 成片 |
+| **H3 提示词工程** | 官方六段式/三段式编译器，9 种画风，硬约束校验 |
+| **画布 AI 助手** | 17 个画布工具 + 4 个权限位，自然语言改画布 |
+| **图像工具** | 裁剪 / 切割 / 标注 / 抽帧 / 抽音 / 质检 |
+| **画布生成闭环** | 节点参数 → 镜头卡 → 生成 → 轮询 → 结果回写 |
+
+---
+
+## 快速开始
+
+### 1. 安装插件
 
 ```powershell
-# 1) 让 DSH 加载插件（在 profile 里 link 本目录）
+# 在 DSH profile 里 link 本目录
 cd $env:USERPROFILE\.dsh\profiles\desktop
-# package.json 的 dependencies 里加：
-#   "@local/dsh-jiuzhang-studio": "link:F:/AI视频/工作室/dsh-jiuzhang-studio"
-
-# 2) 构建 SPA（首次或前端改动后）
-cd F:\AI视频\工作室\app-src
-$env:Path = 'F:\Deepseek_harness\rea-agent\runtime;' + $env:Path
-npm run build
+# package.json dependencies 里加：
+#   "@local/dsh-jiuzhang-studio": "link:<本仓库路径>"
 ```
 
-重启 DSH 后，左侧栏出现「九章工作室」图标。
+重启 DSH，左侧栏出现「九章工作室」图标。
+
+### 2. 准备本地模型
+
+**插件不包含模型权重。** 需要：
+
+- ComfyUI ≥ 0.45.0
+- MiniMax H3 视频模型（约 47 GB）
+- MiniMax H3-Image 图像模型（约 13 GB）
+
+详细步骤见 **[部署 skill](skills/jiuzhang-studio-setup/SKILL.md)**，包含：
+- 完整模型清单与下载命令
+- 显存/磁盘要求与量化档位选择
+- 常见错误排查
+- 硬件性能基线（实测数据）
+
+### 3. 构建前端（可选）
+
+仓库已包含构建好的 `app-dist`，clone 即用。若改了 `app-src`：
+
+```powershell
+cd app-src
+npm install
+npm run build
+```
 
 ---
 
 ## 用法
 
-1. 点侧栏图标 → 面板显示**启动器 + 监测器**
-2. 点任意入口（画布/素材库/H3 工坊…）→ **浏览器新标签页全屏打开**
-3. 画布、素材、生成都在浏览器里操作
+点侧栏图标 → 面板显示**启动器 + 监测器** → 点任意入口，浏览器新标签页全屏打开。
 
-> 为什么不用 DSH 面板直接画？DSH 侧栏会挤压可用宽度，画布在浏览器全屏体验才对。
-> 面板里的监测器仍会实时显示 H3 / Seedance / 预演引擎 / 任务队列状态。
+**详细功能说明见 [使用指南](docs/使用指南.md)**，覆盖 15 个页面每一个窗口、每个输入框的作用。
+
+> 为什么不在 DSH 面板里直接画？侧栏会挤压可用宽度，画布在浏览器全屏体验才正确。面板里的监测器仍实时显示后端状态。
 
 ---
 
@@ -40,139 +79,156 @@ npm run build
 ```
 DSH Host (Electron, 127.0.0.1:随机端口)
 └─ @local/dsh-jiuzhang-studio
-   ├─ host/           Node ESM：工具 + REST + 子进程
-   │  ├─ index.js     插件入口（tools / webServer / 生命周期）
-   │  ├─ security.js  Origin 同源校验 + 写操作 token + 路径穿越防护
-   │  ├─ config.js    配置白名单（**可执行路径不接受外部注入**）
-   │  ├─ static.js    SPA 静态服务（Range / HEAD / ETag）
-   │  ├─ api/         REST 路由（全部 /luoshu/api 前缀）
-   │  ├─ services/    job-runner / comfy / seedance / previz / h3-workshop / post / assets
-   │  └─ store/       原子 JSON（串行队列 + tmp+rename）
-   ├─ client.js       DSH 面板（启动器 + 监测器）
-   └─ app-dist/       SPA 构建产物（进仓库，clone 即用）
+   ├─ host/                Node ESM：工具 + REST + 子进程
+   │  ├─ index.js          插件入口
+   │  ├─ security.js       Origin 同源 + 写令牌 + 路径穿越防护
+   │  ├─ config.js         配置白名单（可执行路径不接受外部注入）
+   │  ├─ static.js         SPA 静态服务（Range / HEAD / ETag）
+   │  ├─ api/index.js      104 条 REST 路由
+   │  ├─ services/         19 个服务
+   │  └─ store/            原子 JSON + 图片引用池
+   ├─ client.js            DSH 面板（启动器 + 监测器）
+   ├─ app-dist/            SPA 构建产物（进仓库）
+   └─ app-src/             SPA 源码（React 18 + Vite）
 ```
 
 **HTTP 路由**（全部 handler 注册，绕过 DSH 准入 → 自带鉴权）：
 
 | 路径 | 用途 |
 |---|---|
-| `/luoshu/api/*` | REST |
+| `/luoshu/api/*` | REST（104 条） |
 | `/luoshu/app/*` | SPA 静态 |
 | `/luoshu/assets/*` | 3D 资产静态 |
 
 ---
 
-## 工具（Agent 可调用）
+## Agent 工具（16 个）
 
 | 工具 | 说明 |
 |---|---|
-| `studio_meta` | 档位 / H3 19 槽位 / 26 节点 / 14 资产类型 |
+| `studio_meta` | 档位 / 19 H3 槽位 / 26 节点 / 14 资产类型 |
 | `studio_config` | 配置读写（白名单） |
 | `studio_project` | 项目 CRUD |
 | `studio_shot` | 镜头卡 CRUD |
-| `studio_prompt` | 编译 H3 提示词 + 分辨率 + 帧数 |
-| `studio_generate` | 提交生成（h3-local / seedance-cloud / mock） |
-| `studio_jobs` | 任务查询 / 取消（**真终止远端**） |
-| `studio_h3_workshop` | 剧本 → 中性分段 + 资产提示词 |
-| `studio_previz` | 3D 预演 start/stop/state/command |
-| `studio_post` | ffmpeg 转码/缩放/提帧/裁剪/抽音/质检 |
+| `studio_generate` | 触发生成（h3-local / h3-image / seedance / mock） |
+| `studio_jobs` | 任务查询 / 取消（真终止远端） |
+| `studio_asset` | 资产管理 |
+| `studio_post` | 8 个后处理/图像工具 |
+| `studio_h3_workshop` | 剧本 → 分段 + 资产 |
+| `studio_previz` | 3D 预演控制 |
+| `studio_script` | 剧本 5 阶段 |
+| `studio_mw` | 模特工作台（11 action） |
+| `studio_director` | 3D 导演台（8 action） |
+| `studio_prompt` | H3 提示词编译 |
+| `studio_image` | H3-Image 出图 |
+| `studio_toolbox` | 7 个域的工具箱 |
 
 ---
 
-## H3 双后端
+## 本地模型要求
 
-### 本地 H3（默认，需 ComfyUI）
+### H3 视频
 
-- 需先启动 ComfyUI（`/system_stats` 可达即视为就绪）
-- 工作流模板：`data/workflows/h3.json`（13 节点，含双 VAE、Turbo LoRA、首尾帧节点）
-- 分辨率严格对齐 H3 画布表（32 倍数 + latent 网格），**否则会 RuntimeError**
-- 帧数按 `17k+5` 网格自动计算（5s = 124 帧）
-
-**档位**：
-
-| 档位 | 分辨率 | 说明 |
+| 文件 | 大小 | 目录 |
 |---|---|---|
-| `P12-draft` | 864×480 | 12G 显存草稿 |
-| `P16-std` | 960×544 | 标准 |
-| `P24-quality` | 1056×608 | 高质（推荐） |
-| `P768-quality` | 1344×768 | 官方档（显存吃紧） |
+| `minimax_h3_ref2va_pruned_fp8_scaled` | 19.5 GB | `diffusion_models/` |
+| `minimax_h3_fl2va_pruned_fp8_scaled` | 19.5 GB | `diffusion_models/` |
+| `qwen3vl_32b_minimax_h3_int8_convrot` | 25.3 GB | `text_encoders/` |
+| `minimax_h3_video_vae_fp16` | 4.9 GB | `vae/` |
+| `minimax_h3_audio_vae_fp32` | 0.6 GB | `vae/` |
+| Turbo LoRA ×2 | 3.6 GB | `loras/` |
 
-### Seedance（云端）
+### H3-Image 图像
 
-- 无 API key 时自动走 **Mock**（本地 ffmpeg 生成占位视频），**全流程可测**
-- 填了 key（`seedanceApiKey`）自动切真实通道
-- 接口与 H3 完全一致，画布节点里一键切换
+| 文件 | 大小 | 目录 |
+|---|---|---|
+| `minimax_h3_image_pruned_w4a8` | 12.55 GB | `diffusion_models/` |
+| `minimax_h3_image_vae_fp16` | 1.17 GB | `vae/` |
 
----
+文本编码器**与视频共用**，不用重复下载。
 
-## H3 工坊（核心增量）
-
-把一集剧本变成可执行的镜头表：
-
-1. **输入**：本地目录扫描 或 粘贴文本（互不依赖）
-2. **参数**：集数 / 画幅 / 目标时长(最短-最长) / 台词语言 / 画面风格 / 平台 / 标题
-3. **分析** → 中性分段 + 资产提示词（角色/场景/道具/音色）+ 镜头提示词
-4. **导入** → 落成资产库条目 + 镜头卡
-
-规则引擎本地可跑，不依赖 LLM；接 LLM 后可精修。
-
-**成片工作台**：分段视频 concat + 可选字幕烧录 → 成片。
+> **模型目录自动探测**：插件会按 `imageModelRoot` → `comfyInputDir` 兄弟目录 → `H3_MODEL_ROOT` 环境变量 → 常见路径 → 向上搜索 的顺序找 `models` 目录，无需手工配置。
 
 ---
 
-## 安全设计（重要）
+## 硬约束（改代码必读）
 
-DSH 的 `webServer` handler 路由**不经过** DSH 的连接准入，因此本插件自行实现：
+违反会直接失败：
+
+| 约束 | 值 |
+|---|---|
+| H3 视频分辨率 | 必须 32 倍数 + 官方档位（864×480 / 960×544 / 1056×608 / 1344×768） |
+| H3 视频帧数 | 17k+5 网格（124 / 243 / 362） |
+| H3 guidance | 固定 1.0（CFG 蒸馏） |
+| 视频采样步数 | Turbo LoRA 只能 4 或 8 |
+| 音频 VAE | 必须 fp32（fp16 会静音） |
+| H3-Image 步数 | 固定 6 |
+| H3-Image guidance | 固定 1.0 |
+| H3-Image 负面提示 | **不支持**，需改成正向描述 |
+| 参考图上限 | Ref2VA 9 张 / H3-Image 16 张 |
+| 参考文件总数 | ≤ 12（视频/音频各 ≤3，每段 2-15 秒） |
+
+---
+
+## 性能基线（RTX 4080 Laptop 12GB 实测）
+
+| 任务 | 分辨率 | 耗时 | 显存 |
+|---|---|---|---|
+| H3 视频 5 秒 | 864×480 | 130 秒 | 11.5 GB |
+| H3-Image | 2048² | 45-85 秒 | 11.4 GB |
+| 人设卡拆解 | 2048² | 80-90 秒 | 11.4 GB |
+| 漫画单格 | 2048² | 75 秒 | 11.4 GB |
+| 预演白模→成片 | 2048×1344 | 75 秒 | 11.4 GB |
+
+12 GB 显存**不能并行**，插件内部串行执行。
+
+---
+
+## 测试
+
+```powershell
+cd tests
+node verify-all.mjs        # 88 项全量验收
+node test-image-pool.mjs   # 图片引用池 22 项
+```
+
+SPA 侧：
+
+```powershell
+cd app-src
+node --import ./tests/register.mjs tests/acceptance.mjs   # 12 项 + 179 单测
+```
+
+---
+
+## 安全设计
+
+DSH 的 `webServer` handler 路由**不经过** DSH 的连接准入，因此插件自行实现：
 
 - **Host 校验**：只接受 loopback
 - **Origin 校验**：严格同源，跨源 403
-- **写操作 token**：`POST/PUT/PATCH/DELETE` 必须带 `X-JZ-Token`（启动时随机生成，`GET /luoshu/api/token` 领取）
-- **配置白名单**：`ffmpeg` / `previzExe` 等可执行路径**不接受**来自配置或接口的注入
-- **id 白名单 + safeJoin**：所有资源 id 走正则校验，路径拼接防穿越
+- **写令牌**：POST/PUT/PATCH/DELETE 需 `X-JZ-Token`
+- **路径穿越防护**：所有文件访问经 `safeJoin` 限制在数据目录内
+- **可执行路径**：不在配置白名单内，不接受外部注入
+- **画布 Agent 权限位**：写/删/花钱分别授权，默认不允许花钱
 
 ---
 
-## 数据目录
+## 许可证说明
 
-```
-data/
-├─ config.json          自动创建（可编辑）
-├─ projects.json
-├─ jobs.json
-├─ assets-index.json
-├─ shots/<projectId>/shots.json
-├─ outputs/             生成的视频
-├─ previz/              预演工程与帧
-├─ post/                后处理产物
-├─ assets/              上传的素材
-└─ workflows/h3.json    H3 工作流模板
-```
+本项目代码为原创。运行时依赖的 MiniMax H3 与 H3-Image 模型有各自的许可：
+
+- **H3**：MiniMax H3 Community License
+- **H3-Image**：MiniMax-H3-Image Community License（**与 H3 不同**）
+  - 年收入 ≤ 100 万美元且不对外提供托管服务 → 可直接使用
+  - 超出 → 需向 MiniMax 申请授权
+
+本项目**不包含**任何商业软件的代码或资产。
 
 ---
 
-## 开发
+## 致谢
 
-```powershell
-# 前端热更新（可选）
-cd F:\AI视频\工作室\app-src
-$env:Path = 'F:\Deepseek_harness\rea-agent\runtime;' + $env:Path
-npm run dev
-
-# 构建
-npm run build
-
-# Host 侧自检
-cd ..\dsh-jiuzhang-studio
-node _selftest.mjs       # 模块级
-node _integration.mjs    # HTTP 级（25 项断言）
-node _distcheck.mjs      # 构建产物可服务性
-```
-
----
-
-## 许可与来源
-
-- 本项目代码：仅供学习研究
-- **不含任何商业软件代码、资产包、拆解产物或模型权重**
-- 功能设计参考公开官方教程与用户操作观察，实现为独立编写
-- React / React Flow / three.js / ffmpeg 遵循各自许可
+- [ComfyUI](https://github.com/comfyanonymous/ComfyUI) — 推理框架
+- [MiniMax](https://www.minimax.io/) — H3 / H3-Image 模型
+- [React Flow](https://reactflow.dev/) — 画布
