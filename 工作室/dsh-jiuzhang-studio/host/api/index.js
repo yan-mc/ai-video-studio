@@ -18,6 +18,7 @@ import { packGraph, unpackGraph, IMG_REF_PREFIX } from '../store/image-pool.js';
 import { SCRIPT_GENRES, SCRIPT_STAGES, checkConsistency } from '../services/script-service.js';
 import { COMIC_TEMPLATES, COMIC_STATIONS } from '../services/comic-service.js';
 import { DIRECTOR_COMMANDS, CAMERA_MOVES, DIRECTOR_FPS } from '../services/director3d.js';
+import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, H3_MODES, H3_LIMITS } from '../services/h3-prompt.js';
 import { getRuntime } from '../runtime.js';
 
 /* ------------------------------------------------------------- 工具函数 */
@@ -476,6 +477,38 @@ export async function handleApi(req, res) {
       return sendJson(res, 200, await ctx.director.stop());
     }
 
+    /* ---------------- H3 提示词编译 ---------------- */
+    if (req.method === 'GET' && route === '/prompt/meta') {
+      return sendJson(res, 200, {
+        styles: STYLE_PRESETS,
+        modes: H3_MODES,
+        limits: H3_LIMITS,
+      });
+    }
+    if (req.method === 'POST' && route === '/prompt/compile') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, compileH3Prompt(body));
+    }
+    if (req.method === 'POST' && route === '/prompt/from-shot') {
+      const body = await readJsonBody(req);
+      const pid = safeId(body.projectId || '');
+      const shot = body.shot ?? listShots(pid).find((s) => s.id === body.shotId);
+      if (!shot) return sendJson(res, 404, { error: 'SHOT_NOT_FOUND' });
+      const pkg = toShotInputPackage(shot, {
+        styleId: body.styleId ?? shot.styleId ?? null,
+        subjects: body.subjects ?? deriveSubjectsFromShot(shot),
+        scenes: body.scenes,
+        seed: body.seed,
+      });
+      const r = compileH3Prompt(pkg);
+      return sendJson(res, 200, { ...r, package: pkg });
+    }
+    if (req.method === 'POST' && route === '/prompt/preview') {
+      // 只编译不落盘，供前端实时预览（与 /compile 同，但接受 shot 直传）
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, compileH3Prompt(body));
+    }
+
     /* ---------------- 模特工作台 ---------------- */
     if (req.method === 'GET' && route === '/mw/meta') {
       return sendJson(res, 200, ctx.mw.meta());
@@ -776,7 +809,33 @@ export function upsertShot(projectId, shot) {
   return next;
 }
 
+/**
+ * 编译提示词。
+ *
+ * 优先走 **H3 官方六段式/三段式编译器**（services/h3-prompt.js），
+ * 它按用户提供的技能书规范生成结构化提示词。
+ * 镜头卡没给够字段时（无 subjects / 无 shots）退回简单的段落拼接，
+ * 保证旧数据仍能生成。
+ */
 export function compilePrompt(shot) {
+  // 走官方结构：需要有 mode 或 styleId，或显式给了 subjects
+  const useStructured = Boolean(shot.mode || shot.styleId || shot.subjects?.length || shot.h3mode);
+  if (useStructured) {
+    try {
+      const pkg = toShotInputPackage(shot, {
+        styleId: shot.styleId ?? null,
+        subjects: shot.subjects ?? deriveSubjectsFromShot(shot),
+        scenes: shot.scenes ?? undefined,
+        seed: shot.seed,
+      });
+      // 兼容旧字段：description/camera/style 已在 toShotInputPackage 里映射
+      if (shot.prompt) pkg.sceneLayout = `${pkg.sceneLayout}\n${shot.prompt}`;
+      const r = compileH3Prompt(pkg);
+      if (r.prompt && r.prompt.length > 40) return r.prompt.slice(0, 7000);
+    } catch {
+      // 结构化编译失败 → 退回简单拼接，不让生成中断
+    }
+  }
   const parts = [];
   if (shot.style) parts.push(`风格：${shot.style}`);
   if (shot.description) parts.push(shot.description);
@@ -786,6 +845,22 @@ export function compilePrompt(shot) {
   if (shot.music) parts.push(`配乐：${shot.music}`);
   if (shot.prompt) parts.push(shot.prompt);
   return parts.join('\n').slice(0, 7000);
+}
+
+/**
+ * 从镜头卡推断 subjects（参考图 → 角色）。
+ * 没有显式 subjects 时用这个兜底，让结构化编译器也能工作。
+ */
+function deriveSubjectsFromShot(shot) {
+  const imgs = shot.refs?.images ?? [];
+  if (!imgs.length) return [];
+  return imgs.map((_, i) => ({
+    id: `S${i + 1}`,
+    name: `角色${i + 1}`,
+    pictureIndex: i + 1,
+    gender: 'FEMALE',
+    traits: '',
+  }));
 }
 
 async function monitorPayload(ctx) {
@@ -839,6 +914,7 @@ async function executeBackend(job, shot, ctx, cfg) {
 
   return seedance.runMock({ cfg, job, shot, prompt });
 }
+
 
 
 

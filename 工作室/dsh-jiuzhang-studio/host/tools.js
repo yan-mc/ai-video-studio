@@ -14,6 +14,7 @@ import { extractAssets, segmentScript } from './services/h3-workshop.js';
 import { runH3Local } from './services/generator.js';
 import { SCRIPT_GENRES, SCRIPT_STAGES, checkConsistency } from './services/script-service.js';
 import { DIRECTOR_COMMANDS, CAMERA_MOVES, DIRECTOR_FPS } from './services/director3d.js';
+import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, H3_MODES, H3_LIMITS } from './services/h3-prompt.js';
 import { getRuntime } from './runtime.js';
 
 function ok(value) {
@@ -483,10 +484,74 @@ export function registerTools(ctx) {
     },
   )));
 
+  /* ---------------------------------------------------------- H3 提示词编译 */
+  disposers.push(reg(tool(
+    'studio_prompt',
+    'H3 提示词编译：按官方六段式(Ref2VA)/三段式(T2VA)规范生成结构化提示词。action=meta 取画风库与模式；compile 直接编译；fromShot 从镜头卡编译。',
+    {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['meta', 'compile', 'fromShot'] },
+        projectId: { type: 'string' },
+        shotId: { type: 'string' },
+        mode: { type: 'string', enum: ['t2va', 'i2va', 'fl2va', 'l2va', 'ref2va'] },
+        styleId: { type: 'string', description: '画风 id（见 meta）' },
+        styleEn: { type: 'string', description: '自定义英文画风描述' },
+        durationSec: { type: 'number' },
+        sceneLayout: { type: 'string' },
+        subjects: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              name: { type: 'string' },
+              pictureIndex: { type: 'number' },
+              gender: { type: 'string' },
+              heightCm: { type: 'number' },
+              traits: { type: 'string' },
+              personality: { type: 'string' },
+              voiceDesc: { type: 'string' },
+              audioIndex: { type: 'number' },
+            },
+          },
+        },
+        shots: { type: 'array', items: { type: 'object' } },
+        references: { type: 'object' },
+        overall_soundscape: { type: 'string' },
+        non_diegetic_music: { type: 'string' },
+        summary: { type: 'string' },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+    async (a) => {
+      if (a.action === 'meta') {
+        return { styles: STYLE_PRESETS, modes: H3_MODES, limits: H3_LIMITS };
+      }
+      if (a.action === 'compile') {
+        const { action, ...rest } = a;
+        return compileH3Prompt(rest);
+      }
+      if (a.action === 'fromShot') {
+        const shot = listShots(a.projectId || '').find((s) => s.id === a.shotId);
+        if (!shot) throw new Error('SHOT_NOT_FOUND');
+        const pkg = toShotInputPackage(shot, {
+          styleId: a.styleId ?? shot.styleId ?? null,
+          subjects: a.subjects,
+          scenes: a.shots,
+        });
+        return { ...compileH3Prompt(pkg), package: pkg };
+      }
+      throw new Error('UNKNOWN_ACTION');
+    },
+  )));
+
   return () => disposers.forEach((d) => d && d());
 }
 
 export default registerTools;
+
 
 
 

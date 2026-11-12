@@ -353,6 +353,12 @@ export const api = {
   directorStart: () => request<unknown>('POST', '/director/start'),
   directorStop: () => request<unknown>('POST', '/director/stop'),
 
+  /* H3 提示词编译 */
+  promptMeta: () => request<unknown>('GET', '/prompt/meta'),
+  promptCompile: (input: Record<string, unknown>) => request<unknown>('POST', '/prompt/compile', input),
+  promptFromShot: (input: Record<string, unknown>) => request<unknown>('POST', '/prompt/from-shot', input),
+  promptPreview: (input: Record<string, unknown>) => request<unknown>('POST', '/prompt/preview', input),
+
   /* 后处理 */
   transcode: (input: TranscodeInput) => request<unknown>('POST', '/post/transcode', input),
   qc: (path: string) => request<QcResult>('POST', '/post/qc', { path }),
