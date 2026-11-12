@@ -1,0 +1,277 @@
+MiniMax H3 中文提示词写法规范 v3.1 正式版
+
+更新日期：2026年8月27日 | 核心变化：视频参考写法修正 + 不同模式说明
+
+⚠️ 交互规则
+
+接受此技能书后，每次新对话优先执行以下步骤：
+
+1. 询问用户选择画风 — 从七种画风库中让用户选择
+2. 询问生成模式 — Ref2VA（全参考）/ I2VA（首帧）/ 视频续篇 / 其他
+3. 收集素材 — 参考图、参考视频、参考音频
+4. 按规范生成提示词
+
+一、核心原则
+
+原则 说明
+画风用英文 CRITICAL STYLE RULE 使用英文，视觉模型对英文风格关键词响应更精准
+其他全中文 参考规则、角色定义、分镜描述、对白等全部可用中文
+音色绑定一次 在 CHARACTER DEFINITION 中绑定一次音频，分镜只用 (S1) + 情绪
+三字段必须写满 overall_soundscape、non_diegetic_music、MOTION DESCRIPTION 的 音效 都不能空
+视频续篇写法 <Video 1> 是**上一段视频**——本次生成 <Video 1> 的续篇，无需额外声明
+
+二、五种生成模式
+
+模式 输入 说明
+T2VA 纯文本 文生视频
+I2VA 1张图（首帧） 从首帧图开始向前发展
+FL2VA 0-2张图 0=文生视频，1=首帧/尾帧，2=首尾帧控制
+L2VA 1张图（尾帧） 推断开头，收敛到给定尾帧
+Ref2VA 图≤9+视频≤3+音频≤3 全参考模式，结构最完整
+
+三、画风库（英文直接复制，共7种）
+
+画风1：地狱把妹王（外观版）
+
+```
+Helltaker game visual aesthetic. High contrast black/white/deep red color palette. Flat cartoon character design with exaggerated proportions — slightly larger head, slender limbs, flat torso, simplified geometric shapes. Thick, bold, jagged black outlines. Flat cel-shaded coloring with heavy block shadows, no gradients. Render characters as 2D cartoons, NOT realistic. NO photorealistic textures, NO realistic skin shading, NO 3D proportions, NO PBR materials. NO subtitles, NO on-screen text.
+```
+
+画风2：地狱把妹王（画风版）
+
+```
+Helltaker game visual aesthetic. High contrast black/white/deep red color palette. Flat cel-shaded coloring with heavy block shadows, no gradients. Render characters as 2D cartoons, NOT realistic. DO NOT change character proportions.
+```
+
+画风3：90年代OVA风
+
+```
+90s OVA retro cel-animation style. High saturation, hard cel-shaded shadows, soft gradient blush on cheeks (blending naturally from pink to warm red), film grain texture. Natural anime facial bone structure. Upper eyelid shadows rendered with natural gradients. Render characters as 2D hand-drawn anime, NOT 3D. NO photorealistic textures. NO subtitles, NO on-screen text.
+```
+
+画风4：新海诚/吉卜力风
+
+```
+Studio Ghibli / Makoto Shinkai inspired cinematic anime style. Soft atmospheric lighting, bokeh depth of field, warm natural sunlight, gentle pastel gradients. Soft cel-shaded character rendering with gentle shadows. Render characters as 2D anime, NOT 3D. NO photorealistic textures. NO subtitles, NO on-screen text.
+```
+
+画风5：经典美式卡通
+
+```
+Classic American cel-animation style. Confident, evenly weighted outlines defining exaggerated, highly readable proportions. Flat color fill with minimal shading — no gradients, no complex shadows. Elastic, squash-and-stretch sense of form. Cheerful, uncomplicated composition. NO photorealistic textures. NO subtitles, NO on-screen text.
+```
+
+画风6：三渲二+PBR混合
+
+```
+3D cel-shaded anime style with PBR physical rendering. Semi-realistic anime style, 3D character rendering with subtle dark thin contour lines (thin, NOT thick hand-drawn lines), soft cel-shaded coloring mixed with realistic material rendering. Subsurface scattering on skin. Soft studio lighting, smooth shadows with gentle transitions, soft diffuse shadows, no harsh blocks. Hair rendered as 3D physical strands. Clean render, delicate materials. NO thick black hand-drawn outlines, NO flat cel-shading only, NO photorealistic human textures.
+```
+
+画风7：飞碟社（Ufotable）风
+
+```
+Ufotable animation style. Digital painting with high contrast cinematography. Photorealistic detailed backgrounds. 2D cel-shaded characters with large hard shadows. Dramatic lighting with strong sunlight and sharp contrast. Particle effects including flames, sparks, exhaust trails. Deep color palette with lower saturation. Render characters and vehicles as 2D cel-shaded, NOT realistic. NO photorealistic textures on characters. NO thick black outlines. NO gradients, NO soft lighting.
+```
+
+四、视频参考的三种模式
+
+4.1 参考视频生成续篇（最常用）
+
+适用场景：你已生成一段视频，希望 H3 生成它的直接后续，角色、场景、运镜全部延续。
+
+正确写法：
+
+```text
+CRITICAL REFERENCE RULE:
+- <Video 1> 是**上一段视频**——本次生成 <Video 1> 的续篇
+```
+
+不需要写“不复制外观”——续篇本来就是一切延续，写了反而让模型困惑。
+
+4.2 参考视频仅做动作/运镜参考（不保留角色）
+
+适用场景：想保留视频的镜头运动、节奏、拍法，但替换成自己的角色和场景。
+
+```text
+CRITICAL REFERENCE RULE:
+- <Video 1> 是动作和运镜参考 ONLY — 仅用于动作路径和镜头运动，不复制角色外观或场景
+```
+
+4.3 参考视频仅做节奏/剪辑参考
+
+适用场景：想保留视频的剪辑节奏、景别切换频率，但内容和角色完全不同。
+
+```text
+CRITICAL REFERENCE RULE:
+- <Video 1> 是剪辑节奏参考 ONLY — 仅用于切镜时机和叙事节奏，不复制内容
+```
+
+五、视频参考续篇完整示例
+
+```text
+CRITICAL STYLE RULE:
+90s OVA retro cel-animation style. High saturation, hard cel-shaded shadows, soft gradient blush on cheeks, film grain texture. Natural anime facial bone structure. Render characters as 2D hand-drawn anime, NOT 3D. NO photorealistic textures. NO subtitles, NO on-screen text.
+
+CRITICAL REFERENCE RULE:
+- <Video 1> 是**上一段视频**——本次生成 <Video 1> 的续篇
+- <Picture 1> 是目目子的外观参考
+- <Picture 2> 是祥子的外观参考
+- <Audio 1> 是目目子的声音参考 — 轻柔、柔和、略带沙哑，仅用于音色
+- <Audio 2> 是祥子的声音参考 — 清澈、沉稳、优雅，仅用于音色
+
+subject_definitions:
+目目子 = 外观来自 <Picture 1> — 浅绿色长发，左侧有浅绿色发夹，琥珀色眼睛，身高160cm。此角色为说话人 (S1)。
+祥子 = 外观来自 <Picture 2> — 灰青色长发，金色眼睛，身高160cm。此角色为说话人 (S2)。
+
+CHARACTER DEFINITION — 目目子 (S1):
+- 性别：女
+- 身高：160cm
+- 关键特征：浅绿色长发、左侧发夹、琥珀色眼睛
+- 性格：温暖、沉稳
+- 声音：锁定 <Audio 1>，轻柔、柔和、略带沙哑
+
+CHARACTER DEFINITION — 祥子 (S2):
+- 性别：女
+- 身高：160cm
+- 关键特征：灰青色长发、金色眼睛
+- 性格：矜持、容易慌乱
+- 声音：锁定 <Audio 2>，清澈、沉稳、优雅
+
+summary:
+祥子听完目目子的告白后，从慌乱中抬头，轻声回应。
+
+retention_analysis:
+- 目目子的浅绿色长发、发夹、琥珀色眼睛全程一致
+- 祥子的灰青色长发、金色眼睛全程一致
+- 场景为秋季傍晚河堤，背景不变
+- **角色、场景、运镜连续延续自 <Video 1>**
+
+non_diegetic_music: N/A
+
+SCENE LAYOUT:
+秋季傍晚的城市河堤，目目子和祥子并肩站在栏杆旁，位置和光线与 <Video 1> 结束时一致。
+
+MOTION DESCRIPTION:
+[0s-2.0s] 近景。祥子的脸——刚刚听完目目子的话，目光从慌乱中逐渐平静。
+音效：轻柔风声（叙事内）。
+
+[2.0s-4.0s] 近景，镜头缓慢推近。祥子深吸一口气，抬起头看向目目子，语气从慌乱中恢复平静，带着一丝颤抖但坚定。
+音效：(S2) —— <d>[中文] 我明白了。</d>
+
+[4.0s-6.0s] 中景。两人同框，目目子嘴角浮现一丝欣慰的笑意。祥子低头又抬起，语气柔和、真诚。
+音效：(S2) —— <d>[中文] 谢谢你，一直在我身边。</d>
+音效：河水声，微风（叙事内）。
+```
+
+六、首帧图写法（I2VA 模式）
+
+适用场景：你有一张开头画面（如角色站在某处），希望生成从这张图开始向后发展的动态视频。
+
+```text
+CRITICAL REFERENCE RULE:
+- <Picture 1> 是**首帧图**——目目子站在河堤栏杆旁，面对镜头，表情平静
+- <Picture 2> 是目目子的面部特写参考
+- <Audio 1> 是目目子的声音参考
+
+SCENE LAYOUT:
+秋季傍晚的城市河堤。**起始画面直接对齐 <Picture 1>。**
+
+MOTION DESCRIPTION:
+[0s-1.5s] 中景。目目子站在河堤栏杆旁，面对镜头，表情平静——**此画面完全对齐 <Picture 1>，作为视频的起始帧。**
+音效：轻柔风声（叙事内）。
+
+[1.5s-4.0s] 中景。目目子缓缓转身，侧身面对河面，目光望向远方。
+音效：(S1) —— <d>[中文] 秋天快结束了呢。</d>
+```
+
+七、提示词完整结构（Ref2VA 六段式）
+
+```text
+CRITICAL STYLE RULE:
+[英文画风描述]
+
+CRITICAL REFERENCE RULE:
+- <Picture 1> 是 [角色名] 的外观参考
+- <Video 1> 是**上一段视频**——本次生成 <Video 1> 的续篇（如适用）
+- <Audio 1> 是 [角色名] 的声音参考 — [音色描述]，仅用于音色
+
+subject_definitions:
+[角色名] = 外观来自 <Picture N> — [发色、瞳色、服装、身高、特殊标记]。此角色为说话人 (S1)。
+
+CHARACTER DEFINITION — [角色名] (S1):
+- 性别：
+- 身高：
+- 关键特征：
+- 性格：
+- 声音：锁定 <Audio 1>，[音色描述]
+
+summary:
+[一句话概括视频内容]
+
+retention_analysis:
+[需要保持一致的属性列表]
+
+non_diegetic_music:
+N/A 或 [时间段] [音乐描述]
+
+SCENE LAYOUT:
+[场景全局描述：地点、光线、空间布局、角色站位]
+[如视频续篇：位置和光线与 <Video 1> 结束时一致]
+
+MOTION DESCRIPTION:
+[0s-Xs] [景别] [动作] [表情] [运镜]
+音效：[环境音、音效]（叙事内）
+音效：(S1) —— <d>[语言] 台词</d>（情绪描述）
+```
+
+八、关键标签规范
+
+8.1 素材标签
+
+标签 限制
+<Picture N> ≤9张
+<Video N> ≤3段，每段2-15秒
+<Audio N> ≤3段，须与图像/视频一起使用
+
+8.2 对话标签
+
+```text
+(S1) —— <d>[中文/日语/英语] 台词内容</d>
+```
+
+· (S1) 表示说话人ID，对应 CHARACTER DEFINITION 中绑定的音频
+· 音色只需在角色定义处绑定一次，分镜中不需要重复写“使用 <Audio 1> 的音色”
+
+8.3 声音三字段
+
+字段 内容
+overall_soundscape 画内音：环境音、脚步声、引擎声等
+non_diegetic_music 画外音/配乐：N/A 或具体描述
+音效： 每段分镜中的同步音效和台词
+
+三字段必须写满，不可留空。
+
+九、关键规则速查
+
+规则 说明
+画风用英文 CRITICAL STYLE RULE 必须用英文，其他全中文
+交互优先问画风 新对话先问用户选哪种画风
+音色绑定一次 在 CHARACTER DEFINITION 中绑定，分镜只用 (S1) 不重复写音频
+分镜只标情绪 台词前写 (S1) + 情绪描述即可
+三字段写满 overall_soundscape、non_diegetic_music、音效 均不可为空
+音频不能单独用 必须与图像或视频一起使用
+对话标注语言 <d>[中文] 或 <d>[日语]
+视频续篇写法 <Video 1> 是**上一段视频**——本次生成 <Video 1> 的续篇，不需额外声明
+首帧图需标注 在 CRITICAL REFERENCE RULE 和 MOTION DESCRIPTION 首段明确标注为起始帧
+subject_definitions 不写画风 风格已在 CRITICAL STYLE RULE 中定义，此处只描述外观特征
+参考视频职责声明 只有“非续篇”场景才需要声明用途（动作参考/剪辑节奏参考）
+
+十、官方技能包
+
+```bash
+npx skills add https://github.com/MiniMax-AI/MiniMax-H3 --skill h3-prompt-writing
+```
+
+---
+
+版本 v3.1 已就绪，可前往新对话测试。 🎬

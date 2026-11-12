@@ -14,7 +14,7 @@ export default defineConfig({
   base: './',
   plugins: [react()],
   build: {
-    outDir: '../dsh-jiuzhang-studio/app-dist',
+    outDir: '../app-dist',
     assetsDir: 'assets',
     emptyOutDir: true,
     sourcemap: false,

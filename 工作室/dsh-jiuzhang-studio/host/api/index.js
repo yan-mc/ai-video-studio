@@ -608,7 +608,7 @@ export async function handleApi(req, res) {
     }
     if (req.method === 'POST' && route === '/breakdown/preview') {
       const body = await readJsonBody(req);
-      const lv = breakdownLevel(body.level ?? 'full');
+      const lv = breakdownLevel(body.level ?? 'standard');
       return sendJson(res, 200, {
         level: lv.id,
         prompt: buildBreakdownPrompt(body, lv.id),
@@ -621,7 +621,7 @@ export async function handleApi(req, res) {
       const wf = loadImageWorkflow();
       if (!wf) return sendJson(res, 500, { error: 'WORKFLOW_MISSING' });
 
-      const lv = breakdownLevel(body.level ?? 'full');
+      const lv = breakdownLevel(body.level ?? 'standard');
       const size = breakdownSize(body.sizeId ?? 'square');
       const prompt = buildBreakdownPrompt(body, lv.id);
 
@@ -1365,6 +1365,7 @@ function loadImageWorkflow() {
     return _imgWf;
   } catch { return null; }
 }
+
 
 
 

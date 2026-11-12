@@ -82,7 +82,7 @@ add('B-存储', '并发 40 写不丢', (await cs.list()).length === 40, (await c
 // 模型
 const { NODE_TYPES, ASSET_TYPES, resolutionFor, h3Length, PROFILES, H3_MODEL_SLOTS } = await import('../host/store/models.js');
 add('B-模型', '26 种节点', NODE_TYPES.length === 26, NODE_TYPES.length);
-add('B-模型', '14 类资产', ASSET_TYPES.length === 14, ASSET_TYPES.length);
+add('B-模型', '15 类资产（含人设卡）', ASSET_TYPES.length === 15, ASSET_TYPES.length);
 add('B-模型', '19 档 H3 槽位', H3_MODEL_SLOTS.length === 19, H3_MODEL_SLOTS.length);
 add('B-模型', '5 个生成档位', Object.keys(PROFILES).length === 5);
 add('B-模型', 'P24 16:9 = 1056x608', resolutionFor('P24-quality', '16:9').width === 1056);

@@ -20,7 +20,7 @@ import { loadConfig } from '../config.js';
 
 /** 14 类资产（洛书 Ke 枚举） */
 export const ASSET_TYPES = Object.freeze([
-  'general', 'character', 'scene', 'item', 'reference',
+  'general', 'character', 'character_sheet', 'scene', 'item', 'reference',
   'video_segment', 'voice_tone', 'shot', 'control', 'motion_shot',
   'previz', 'costume', 'accessory', 'weapon',
 ]);
@@ -29,6 +29,7 @@ export const ASSET_TYPES = Object.freeze([
 export const ASSET_TYPE_LABELS = Object.freeze({
   general: '通用',
   character: '角色',
+  character_sheet: '人设卡',
   scene: '场景',
   item: '道具',
   reference: '参考',

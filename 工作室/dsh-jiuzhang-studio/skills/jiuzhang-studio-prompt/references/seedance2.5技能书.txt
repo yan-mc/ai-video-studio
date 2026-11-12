@@ -1,0 +1,166 @@
+# Seedance 2.5 · 动画制作完整技术指南
+
+**核心规则：画风描述必须用英文，其余部分（参考图、人物、分镜、禁止词）用中文。**
+
+
+## 一、画风选择（8种，按需切换）
+
+
+### 画风1：地狱把妹王（外观版）
+
+| 项目 | 内容 |
+|------|------|
+| **画风名称** | 地狱把妹王（外观版） |
+| **类别** | 2D扁平卡通 |
+| **核心特征** | 高对比黑白/深红配色。大头、细肢、扁平躯干。粗黑锯齿形轮廓线。平涂色块阴影，无渐变。角色比例被强制改变（夸张化）。 |
+| **最佳适用场景** | 暗黑戏剧、暴力动作、硬核狂野、冲击力亮相、高速飙车 |
+| **画风描述（英文，复制用）** | `Helltaker game visual aesthetic. High contrast black/white/deep red color palette. Flat cartoon character design — slightly larger head, slender limbs, flat torso, simplified geometric shapes. Thick jagged black outlines. Flat cel-shaded coloring with block shadows, no gradients. Render characters as 2D cartoons, NOT realistic.` |
+| **专属禁止词（中文）** | `写实质感、写实皮肤阴影、3D比例、PBR材质、渐变、柔光、模糊、照片级渲染` |
+
+
+### 画风2：地狱把妹王（画风版）
+
+| 项目 | 内容 |
+|------|------|
+| **画风名称** | 地狱把妹王（画风版） |
+| **类别** | 2D扁平卡通 |
+| **核心特征** | 高对比光影、粗黑轮廓、块状阴影等渲染风格与画风1相同，但**不改人物比例**。保留参考图中原有的人物比例。 |
+| **最佳适用场景** | 需要Helltaker风格的光影冲击力，但角色比例必须保持原有设计的场景 |
+| **画风描述（英文，复制用）** | `Helltaker rendering style. High contrast black/white/deep red color palette. Flat cel-shaded coloring with block shadows, no gradients. Thick jagged black outlines. Render characters as 2D cartoons, NOT realistic. CRITICAL: Keep original character proportions unchanged. DO NOT exaggerate head size or limb length.` |
+| **专属禁止词（中文）** | `写实质感、写实皮肤阴影、PBR材质、渐变、柔光、比例改变、头部放大、四肢拉长` |
+
+
+### 画风3：90年代OVA风
+
+| 项目 | 内容 |
+|------|------|
+| **画风名称** | 90年代OVA风 |
+| **类别** | 2D手绘赛璐珞 |
+| **核心特征** | 高饱和色彩，硬阴影（非块状），胶片颗粒，自然人体比例。腮红柔和渐变。粗线稿但非锯齿状。 |
+| **最佳适用场景** | 怀旧日常、喜剧四格、情感戏、轻度复古、回忆叙事 |
+| **画风描述（英文，复制用）** | `90s OVA animation style. Cel animation look. High saturation colors. Hard shadows (not block shadows). Film grain texture. Natural human proportions. Soft gradient blush. Thick but not jagged outlines. 4K.` |
+| **专属禁止词（中文）** | `写实质感、实拍质感、3D比例、粗黑锯齿轮廓、块状阴影` |
+
+
+### 画风4：新海诚风
+
+| 项目 | 内容 |
+|------|------|
+| **画风名称** | 新海诚风 |
+| **类别** | 2D手绘柔光 |
+| **核心特征** | 柔和光影，浅景深（虚化背景），大面积亮部过曝，通透的蓝色调，云和水的细腻刻画。自然人体比例。色块边缘柔和。 |
+| **最佳适用场景** | 治愈系、都市夜景、梦幻场景、情感细腻、风景展示 |
+| **画风描述（英文，复制用）** | `Makoto Shinkai animation style. Soft atmospheric lighting. Shallow depth of field with bokeh background. Pale blue sky with translucent clouds. Lens flare. Water reflections. Natural human proportions. 4K.` |
+| **专属禁止词（中文）** | `硬阴影、粗黑轮廓、高对比、块状阴影、赛璐珞质感、胶片颗粒` |
+
+
+### 画风5：吉卜力风
+
+| 项目 | 内容 |
+|------|------|
+| **画风名称** | 吉卜力风 |
+| **类别** | 2D手绘柔光 |
+| **核心特征** | 温暖的空气感、手绘水彩质感、自然光（无过曝）、树木建筑线条柔润。角色线条自然，非机械感。色彩偏暖，饱和度适中。 |
+| **最佳适用场景** | 田园风光、异世界、奇幻冒险、温馨日常、自然主题 |
+| **画风描述（英文，复制用）** | `Studio Ghibli animation style. Warm atmospheric lighting. Hand-painted watercolor texture. Soft organic lines on buildings and trees. Natural light without overexposure. Warm color palette, moderate saturation. Natural proportions. 4K.` |
+| **专属禁止词（中文）** | `硬阴影、高对比、冷色过蓝、过曝、写实质感、数码感` |
+
+
+### 画风6：经典美式卡通
+
+| 项目 | 内容 |
+|------|------|
+| **画风名称** | 经典美式卡通 |
+| **类别** | 2D扁平弹性 |
+| **核心特征** | 均匀轮廓线（无锯齿）。弹性形变（squash-and-stretch）。平涂填色，极少阴影。色彩明亮饱和。 |
+| **最佳适用场景** | 喜剧、合家欢、夸张搞笑、轻松无厘头 |
+| **画风描述（英文，复制用）** | `Classic American cartoon style. Even outlines (no jagged lines). Squash-and-stretch deformation. Flat fill colors. Minimal shadows. Bright saturated color palette. 2D flat animation.` |
+| **专属禁止词（中文）** | `锯齿状轮廓、日式腮红、胶片颗粒、赛璐珞质感、高对比阴影` |
+
+
+### 画风7：飞碟社（Ufotable）风
+
+| 项目 | 内容 |
+|------|------|
+| **画风名称** | 飞碟社风 |
+| **类别** | 3D背景+2D角色混合 + 高对比摄影 |
+| **核心特征** | 数码作画+高对比摄影。背景高度写实（照片级细节）。角色2D赛璐珞平涂，但阴影面积大且硬。火焰、光效、粒子特效极为突出。饱和度偏深色系，不发亮。 |
+| **最佳适用场景** | 热血战斗、奇幻史诗、特效炫酷、深沉暗调、动态场面 |
+| **画风描述（英文，复制用）** | `Ufotable animation style. Digital painting with high contrast cinematography. Photorealistic detailed backgrounds. 2D cel-shaded characters with large hard shadows. Dramatic lighting. Particle effects. Deep color palette with lower saturation. 4K.` |
+| **专属禁止词（中文）** | `粗黑轮廓线、平涂无阴影、低对比、浅景深虚化、柔光、水彩质感` |
+
+
+### 画风8：三渲二 + PBR混合
+
+| 项目 | 内容 |
+|------|------|
+| **画风名称** | 三渲二 + PBR混合 |
+| **类别** | 3D半写实 |
+| **核心特征** | 3D渲染，极细暗色描边（非粗黑手绘线）。次表面散射皮肤（半透明质感）。平滑光影过渡，软阴影。真实材质（布料、针织、金属）。3D物理发丝分组清晰。 |
+| **最佳适用场景** | 3D VTuber风格、偶像演出、现代都市、需要材质细节的场景 |
+| **画风描述（英文，复制用）** | `3D cel-shaded animation with PBR rendering. Thin dark outlines (not thick hand-drawn lines). Subsurface scattering on skin — soft, translucent, delicate. Soft studio lighting. Smooth shadow transitions, soft diffused shadows. Realistic fabric textures with wrinkles and bump. 3D physical hair strands with clear groups. Clean render, smooth surfaces.` |
+| **专属禁止词（中文）** | `粗黑手绘轮廓线、纯平涂赛璐珞、硬块状阴影、写实人类皮肤质感、背景路人出现写实真人脸` |
+
+
+## 二、画风指令速查表（开新对话时复制使用）
+
+| 目标画风 | 画风描述（英文，直接复制） |
+|----------|---------------------------|
+| 地狱把妹王（外观版） | `Helltaker game visual aesthetic. High contrast black/white/deep red color palette. Flat cartoon character design — slightly larger head, slender limbs, flat torso, simplified geometric shapes. Thick jagged black outlines. Flat cel-shaded coloring with block shadows, no gradients. Render characters as 2D cartoons, NOT realistic.` |
+| 地狱把妹王（画风版） | `Helltaker rendering style. High contrast black/white/deep red color palette. Flat cel-shaded coloring with block shadows, no gradients. Thick jagged black outlines. Render characters as 2D cartoons, NOT realistic. CRITICAL: Keep original character proportions unchanged. DO NOT exaggerate head size or limb length.` |
+| 90年代OVA风 | `90s OVA animation style. Cel animation look. High saturation colors. Hard shadows (not block shadows). Film grain texture. Natural human proportions. Soft gradient blush. Thick but not jagged outlines. 4K.` |
+| 新海诚风 | `Makoto Shinkai animation style. Soft atmospheric lighting. Shallow depth of field with bokeh background. Pale blue sky with translucent clouds. Lens flare. Water reflections. Natural human proportions. 4K.` |
+| 吉卜力风 | `Studio Ghibli animation style. Warm atmospheric lighting. Hand-painted watercolor texture. Soft organic lines on buildings and trees. Natural light without overexposure. Warm color palette, moderate saturation. Natural proportions. 4K.` |
+| 经典美式卡通 | `Classic American cartoon style. Even outlines (no jagged lines). Squash-and-stretch deformation. Flat fill colors. Minimal shadows. Bright saturated color palette. 2D flat animation.` |
+| 飞碟社风 | `Ufotable animation style. Digital painting with high contrast cinematography. Photorealistic detailed backgrounds. 2D cel-shaded characters with large hard shadows. Dramatic lighting. Particle effects. Deep color palette with lower saturation. 4K.` |
+| 三渲二+PBR | `3D cel-shaded animation with PBR rendering. Thin dark outlines (not thick hand-drawn lines). Subsurface scattering on skin — soft, translucent, delicate. Soft studio lighting. Smooth shadow transitions, soft diffused shadows. Realistic fabric textures with wrinkles and bump. 3D physical hair strands with clear groups. Clean render, smooth surfaces.` |
+
+
+## 三、全局前置词完整结构
+
+```
+[画风描述（英文）]
+[参考图声明（中文）]
+[人物定义（中文）]
+[音频定义（中文）]
+[禁止词（中文）]
+```
+
+
+### 完整示例（90年代OVA风）
+
+```
+90s OVA animation style. Cel animation look. High saturation colors. Hard shadows (not block shadows). Film grain texture. Natural human proportions. Soft gradient blush. Thick but not jagged outlines. 4K.
+
+喜剧四格漫画式叙事——快速切镜、夸张表情、Q版变形、漫画式特效（汗滴、十字青筋、飞白、加速线、闪光觉醒、石化、膨胀、拟声字）。角色情绪用漫画符号强化。
+
+参考图：
+- 图1、图2：主角形象——粉色头发、眼镜、女性。
+- 图3：卧室场景参考——床、床头柜、台灯、衣柜。夜间，暖色台灯光为主光源。
+- 图4：粗糙制品参考。
+- 图5：完成品参考。
+
+人物：
+- 主角——图1、图2参考。粉色头发、眼镜、女性。声线：带鼻音，略傻气，语速偏慢。角色声の参照：<audio1>
+- 群友——仅画外音。声线：略沙哑高腔，语速快，带挑衅意味。角色声の参照：<audio2>
+
+音频控制：BGM音量极低或静默，仅保留环境音、人声和音效。禁止BGM盖过人声。
+
+禁止：BGM、字幕、音乐、多余眉骨、双重眉、其他角色的耳饰/项链/首饰。写实质感、实拍质感、3D比例、粗黑锯齿轮廓、块状阴影。
+```
+
+
+## 四、分镜表
+
+| # | 时间 | 景别 | 画面 | 台词/特效 |
+|---|------|------|------|----------|
+
+
+## 五、切割规则
+
+| 规则 | 说明 |
+|------|------|
+| 单段上限 | 20秒 |
+| 切割点 | 镜头切换处，不切断单个镜头 |
+| 每段独立 | 每段都要完整复制全局前置词 |
+| 卡号连续 | 跨段连续，不重复不跳跃 |

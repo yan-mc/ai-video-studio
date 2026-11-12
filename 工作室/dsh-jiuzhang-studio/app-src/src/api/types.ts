@@ -14,7 +14,7 @@ export type BackendId = 'h3-local' | 'seedance-cloud' | 'mock';
 export type ProjectCategory = 'drama' | 'comic' | 'ecommerce' | 'free' | 'uncategorized';
 
 export type AssetType =
-  | 'general' | 'character' | 'scene' | 'item' | 'reference'
+  | 'general' | 'character' | 'character_sheet' | 'scene' | 'item' | 'reference'
   | 'video_segment' | 'voice_tone' | 'shot' | 'control' | 'motion_shot'
   | 'previz' | 'costume' | 'accessory' | 'weapon';
 

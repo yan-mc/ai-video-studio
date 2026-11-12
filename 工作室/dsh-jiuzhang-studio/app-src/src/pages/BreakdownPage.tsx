@@ -2,11 +2,11 @@
  * 人设卡 / 拆解图 —— 把一个立绘转成全景式角色概念分解图。
  *
  * 玩法来源：社区爆火的 Nano Banana Pro 像素级拆解图
- *  - 中心立绘 + 服装分层 + 表情集 + 材质特写 + 随身物品 + 手绘引导线
+ *  - 三视图 + 服装部件拆解 + 附属部件拆解（+ 表情集 / 材质细节）
  *
  * 三个档位：
- *  - 标准人设卡：服装 + 表情 + 材质
- *  - 完整人设卡：+ 随身物品 + 美妆（Nano Banana 同款）
+ *  - 角色设定卡：三视图 + 服装部件 + 附属部件
+ *  - 完整设定卡：+ 表情集 + 材质细节放大
  *  - 纯服装拆解：只拆衣服，平铺网格，无人无物
  */
 import { useCallback, useEffect, useState } from 'react';
@@ -35,11 +35,11 @@ export function BreakdownPage() {
   const [refRel, setRefRel] = useState('');
   const [character, setCharacter] = useState('');
   const [outfitText, setOutfitText] = useState('');
-  const [accText, setAccText] = useState('');
+  const [partsText, setPartsText] = useState('');
+  const [viewText, setViewText] = useState('正面，侧面，背面');
   const [exprText, setExprText] = useState('平静，微笑，微怒，惊讶');
-  const [itemsText, setItemsText] = useState('随身包袋，化妆品');
   const [notes, setNotes] = useState('');
-  const [level, setLevel] = useState('full');
+  const [level, setLevel] = useState('standard');
   const [sizeId, setSizeId] = useState('square');
 
   const [preview, setPreview] = useState('');
@@ -68,14 +68,14 @@ export function BreakdownPage() {
   const buildInput = useCallback(() => ({
     character: character || '图中角色',
     outfit: outfitText.split(/[\n,，;；]/).map((s) => s.trim()).filter(Boolean),
-    accessories: accText.split(/[\n,，;；]/).map((s) => s.trim()).filter(Boolean),
+    parts: partsText.split(/[\n,，;；]/).map((s) => s.trim()).filter(Boolean),
+    views: viewText.split(/[\n,，;；]/).map((s) => s.trim()).filter(Boolean),
     expressions: exprText.split(/[\n,，;；]/).map((s) => s.trim()).filter(Boolean),
-    items: itemsText.split(/[\n,，;；]/).map((s) => s.trim()).filter(Boolean),
     notes,
     level,
     sizeId,
     refImages: refRel ? [refRel] : [],
-  }), [character, outfitText, accText, exprText, itemsText, notes, level, sizeId, refRel]);
+  }), [character, outfitText, partsText, viewText, exprText, notes, level, sizeId, refRel]);
 
   async function doPreview() {
     setBusy(true);
@@ -215,16 +215,20 @@ export function BreakdownPage() {
                 placeholder={'蕾丝胸衣上身\n百褶长裙摆\n蕾丝颈饰\n蓝色缎面腰封\n蕾丝手套\n蓝色花朵发饰\n深蓝色平底鞋'} />
             </Panel>
 
-            <Panel title="配件 / 表情 / 随身物品">
-              <Field label="配件（一行一件）">
-                <Textarea value={accText} onChange={(e) => setAccText(e.target.value)} rows={2}
-                  placeholder="蓝色花朵发饰" />
+            <Panel title="附属部件 / 三视图 / 表情">
+              <div className="jz-sm jz-muted" style={{ marginBottom: 8 }}>
+                附属部件指发饰、首饰、挂件、武器、披风等非服装本体。
+              </div>
+              <Field label="附属部件（一行一件）">
+                <Textarea value={partsText} onChange={(e) => setPartsText(e.target.value)} rows={3}
+                  placeholder={'蓝色花朵发饰\n细颈链\n金属腰扣'} />
               </Field>
-              <Field label="表情集（逗号分隔，建议 3-4 个）">
+              <Field label="三视图角度（逗号分隔）">
+                <Input value={viewText} onChange={(e) => setViewText(e.target.value)}
+                  placeholder="正面，侧面，背面" />
+              </Field>
+              <Field label="表情集（完整档才用，逗号分隔）">
                 <Input value={exprText} onChange={(e) => setExprText(e.target.value)} />
-              </Field>
-              <Field label="随身物品（完整档才用）">
-                <Input value={itemsText} onChange={(e) => setItemsText(e.target.value)} />
               </Field>
             </Panel>
           </div>

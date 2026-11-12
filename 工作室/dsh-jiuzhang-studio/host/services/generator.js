@@ -23,8 +23,27 @@ const LORA_FL2V = 'minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensor
  * 支持：绝对路径 / dataDir 相对路径（assets/xxx.png）/ {absPath} / {rel}。
  * 上限 9 张（H3 ref_images 上限）。
  */
-export function resolveRefImages(shot, cfg = loadConfig()) {
+/**
+ * 解析镜头的参考图绝对路径。
+ *
+ * **优先级（重要）**：
+ *   1. `characterRefs` —— 选中的人设卡（角色三视图 + 部件拆解图）
+ *      人设卡是角色的"权威形象"，多镜之间必须一致，所以排最前
+ *   2. `refs.images` —— 手工挂的参考图
+ *   3. `sceneRefs` / `itemRefs` —— 场景与道具
+ *
+ * H3 Ref2VA 的 ref_images 上限 9 张，按上述顺序取前 9。
+ * 人设卡会占掉名额，所以一个人设卡最好只出【一张合成图】
+ * （三视图 + 部件在同一张里），而不是拆成多张。
+ *
+ * @param {object} shot 镜头卡
+ * @param {object} cfg  配置
+ * @param {{expandSheet?: boolean}} [opts] expandSheet=true 时把一张人设卡图的
+ *        各个子图（如果有分图）也展开成独立参考图
+ */
+export function resolveRefImages(shot, cfg = loadConfig(), opts = {}) {
   const out = [];
+  const seen = new Set();
   const toAbs = (ref) => {
     if (!ref) return '';
     if (typeof ref === 'string') {
@@ -46,11 +65,41 @@ export function resolveRefImages(shot, cfg = loadConfig()) {
     }
     return '';
   };
-  for (const ref of (shot.refs?.images || [])) {
-    const a = toAbs(ref);
-    if (a) out.push({ key: `{{REF_${out.length + 1}}}`, abs: a });
+
+  const push = (abs, source) => {
+    if (!abs || seen.has(abs)) return false;
+    if (out.length >= 9) return false;
+    seen.add(abs);
+    out.push({ key: `{{REF_${out.length + 1}}}`, abs, source });
+    return true;
+  };
+
+  // 1) 人设卡优先（characterRefs）
+  for (const ref of (shot.characterRefs || [])) {
     if (out.length >= 9) break;
+    // 人设卡可能是资产 id / rel 路径 / 对象
+    if (ref && typeof ref === 'object' && Array.isArray(ref.images)) {
+      // 一个人设卡带多张分图（三视图各一张的情况）
+      for (const img of ref.images) {
+        if (!push(toAbs(img), 'character-sheet')) break;
+      }
+    } else {
+      push(toAbs(ref), 'character-sheet');
+    }
   }
+
+  // 2) 手工参考图
+  for (const ref of (shot.refs?.images || [])) {
+    if (out.length >= 9) break;
+    push(toAbs(ref), 'manual');
+  }
+
+  // 3) 场景 / 道具
+  for (const ref of [...(shot.sceneRefs || []), ...(shot.itemRefs || [])]) {
+    if (out.length >= 9) break;
+    push(toAbs(ref), 'scene-item');
+  }
+
   return out;
 }
 
