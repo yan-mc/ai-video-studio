@@ -323,16 +323,22 @@ export function registerTools(ctx) {
   /* ---------------------------------------------------------- 后处理 */
   disposers.push(reg(tool(
     'studio_post',
-    'ffmpeg 后处理：transcode / scale / extractFrame / crop / extractAudio / qc。',
+    'ffmpeg 后处理与图像工具：transcode / scale / crop / split（切割分镜）/ annotate（文字标注）/ extractFrame / extractAudio / qc。',
     {
       type: 'object',
       properties: {
-        op: { type: 'string', enum: ['transcode', 'scale', 'extractFrame', 'crop', 'extractAudio', 'qc'] },
+        op: { type: 'string', enum: ['transcode', 'scale', 'crop', 'split', 'annotate', 'extractFrame', 'extractAudio', 'qc'] },
         input: { type: 'string' },
         width: { type: 'number' },
         height: { type: 'number' },
         x: { type: 'number' },
         y: { type: 'number' },
+        rows: { type: 'number', description: 'split 的行数' },
+        cols: { type: 'number', description: 'split 的列数' },
+        text: { type: 'string', description: 'annotate 的文字' },
+        fontSize: { type: 'number' },
+        color: { type: 'string' },
+        fontFile: { type: 'string', description: 'annotate 的字体文件（中文必填）' },
         timeSec: { type: 'number' },
         crf: { type: 'number' },
       },

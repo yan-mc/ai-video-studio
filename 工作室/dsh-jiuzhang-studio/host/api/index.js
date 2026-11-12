@@ -473,14 +473,48 @@ export async function handleApi(req, res) {
       return pipeStream(res, abs);
     }
 
-    /* ---------------- 后处理 ---------------- */
+    /* ---------------- 后处理 / 图像工具 ---------------- */
     if (req.method === 'POST' && route === '/post/transcode') {
       const body = await readJsonBody(req);
       return sendJson(res, 200, await ctx.post.transcode(body));
     }
+    if (req.method === 'POST' && route === '/post/scale') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, await ctx.post.scale(body));
+    }
+    if (req.method === 'POST' && route === '/post/crop') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, await ctx.post.crop(body));
+    }
+    if (req.method === 'POST' && route === '/post/split') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, await ctx.post.split(body));
+    }
+    if (req.method === 'POST' && route === '/post/annotate') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, await ctx.post.annotate(body));
+    }
+    if (req.method === 'POST' && route === '/post/extractFrame') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, await ctx.post.extractFrame(body));
+    }
+    if (req.method === 'POST' && route === '/post/extractAudio') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, await ctx.post.extractAudio(body));
+    }
     if (req.method === 'POST' && route === '/post/qc') {
       const body = await readJsonBody(req);
-      return sendJson(res, 200, await ctx.post.qc(body.path));
+      return sendJson(res, 200, await ctx.post.qc(body.path ?? body.input));
+    }
+    if (req.method === 'GET' && route === '/post/fonts') {
+      // 中文标注需要字体文件；给出候选列表供前端选择
+      const candidates = [
+        'C:/Windows/Fonts/msyh.ttc',
+        'C:/Windows/Fonts/simhei.ttf',
+        'C:/Windows/Fonts/simsun.ttc',
+        'C:/Windows/Fonts/msyhbd.ttc',
+      ].filter((f) => fs.existsSync(f));
+      return sendJson(res, 200, { fonts: candidates });
     }
 
     return sendJson(res, 404, { error: `UNKNOWN_ROUTE: ${req.method} ${route}` });
