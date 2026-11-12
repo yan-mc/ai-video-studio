@@ -427,6 +427,56 @@ export async function handleApi(req, res) {
       return sendJson(res, 200, ctx.comic.exportAllSvg(pid, body.options ?? {}));
     }
 
+    /* ---------------- 模特工作台 ---------------- */
+    if (req.method === 'GET' && route === '/mw/meta') {
+      return sendJson(res, 200, ctx.mw.meta());
+    }
+    if (req.method === 'GET' && route === '/mw/jobs') {
+      return sendJson(res, 200, ctx.mw.listJobs());
+    }
+    if (req.method === 'POST' && route === '/mw/jobs') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.mw.createJob(body));
+    }
+    if (req.method === 'POST' && route === '/mw/job/update') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.mw.updateJob(String(body.id), body.patch ?? {}));
+    }
+    if (req.method === 'POST' && route === '/mw/job/replan') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.mw.replanJob(String(body.id)));
+    }
+    if (req.method === 'POST' && route === '/mw/job/delete') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.mw.deleteJobs(body.ids ?? []));
+    }
+    if (req.method === 'GET' && route === '/mw/plans') {
+      return sendJson(res, 200, ctx.mw.listPlans());
+    }
+    if (req.method === 'POST' && route === '/mw/plan/save') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.mw.savePlan(String(body.jobId), body.name));
+    }
+    if (req.method === 'POST' && route === '/mw/plan/apply') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.mw.applyPlan(String(body.jobId), String(body.planId)));
+    }
+    if (req.method === 'POST' && route === '/mw/plan/delete') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.mw.deletePlan(String(body.id)));
+    }
+    if (req.method === 'GET' && route === '/mw/figures') {
+      return sendJson(res, 200, ctx.mw.listFigureItems());
+    }
+    if (req.method === 'POST' && route === '/mw/figure/upsert') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.mw.upsertFigure(body.figure ?? body));
+    }
+    if (req.method === 'POST' && route === '/mw/figure/delete') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, ctx.mw.deleteFigure(String(body.id)));
+    }
+
     /* ---------------- 资产 ---------------- */
     if (req.method === 'GET' && route === '/assets') {
       const type = url.searchParams.get('type') || undefined;

@@ -9,7 +9,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-export const ROUTES = ['canvas', 'assets', 'projects', 'h3', 'script', 'comic', 'settings', 'jobs', 'previz'] as const;
+export const ROUTES = ['canvas', 'assets', 'projects', 'h3', 'script', 'comic', 'mw', 'settings', 'jobs', 'previz'] as const;
 export type RouteId = (typeof ROUTES)[number];
 
 export const DEFAULT_ROUTE: RouteId = 'canvas';
@@ -66,4 +66,5 @@ export function navigateTo(route: RouteId): void {
   if (typeof window === 'undefined') return;
   window.location.hash = routeToHash(route);
 }
+
 

@@ -24,6 +24,7 @@ import { createPostService } from './services/post.js';
 import { createAssetService } from './services/asset-service.js';
 import { createScriptService } from './services/script-service.js';
 import { createComicService } from './services/comic-service.js';
+import { createModelWorkbench } from './services/model-workbench.js';
 import { initRuntime, attachControllers, disposeRuntime } from './runtime.js';
 
 export const inject = ['tools', 'webServer'];
@@ -47,7 +48,8 @@ export function apply(ctx) {
   const assets = createAssetService({ cfg });
   const script = createScriptService({ cfg });
   const comic = createComicService({ cfg });
-  attachControllers({ previz, h3, post, assets, script, comic });
+  const mw = createModelWorkbench({ cfg });
+  attachControllers({ previz, h3, post, assets, script, comic, mw });
 
   /* ---------------------------- HTTP 路由 ---------------------------- */
 
@@ -116,4 +118,5 @@ export function apply(ctx) {
     + `后端=${cfg.defaultBackend} 并发=${cfg.maxConcurrentLocal} 运行统计=${JSON.stringify(runtimeStats())}`,
   );
 }
+
 

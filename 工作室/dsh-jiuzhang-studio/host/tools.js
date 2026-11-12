@@ -387,6 +387,52 @@ export function registerTools(ctx) {
     },
   )));
 
+  /* ---------------------------------------------------------- 模特工作台 */
+  disposers.push(reg(tool(
+    'studio_mw',
+    '模特工作台：电商拍摄 / 影视角色双模式。action=meta 取元信息；jobs 列表；create 建作业；replan 重算镜头；plans/savePlan/applyPlan 方案库；figures 形象库。',
+    {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['meta', 'jobs', 'create', 'update', 'replan', 'delete', 'plans', 'savePlan', 'applyPlan', 'figures', 'upsertFigure'],
+        },
+        id: { type: 'string' },
+        ids: { type: 'array', items: { type: 'string' } },
+        name: { type: 'string' },
+        mode: { type: 'string', enum: ['ecom', 'film'] },
+        styleId: { type: 'string' },
+        customStyle: { type: 'string' },
+        sizeId: { type: 'string' },
+        count: { type: 'number' },
+        kind: { type: 'string', enum: ['person', 'beast'] },
+        jobId: { type: 'string' },
+        planId: { type: 'string' },
+        patch: { type: 'object' },
+        figure: { type: 'object' },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+    async (a) => {
+      switch (a.action) {
+        case 'meta': return z.mw.meta();
+        case 'jobs': return z.mw.listJobs();
+        case 'create': return z.mw.createJob(a);
+        case 'update': return z.mw.updateJob(String(a.id), a.patch ?? {});
+        case 'replan': return z.mw.replanJob(String(a.id));
+        case 'delete': return z.mw.deleteJobs(a.ids ?? []);
+        case 'plans': return z.mw.listPlans();
+        case 'savePlan': return z.mw.savePlan(String(a.jobId), a.name);
+        case 'applyPlan': return z.mw.applyPlan(String(a.jobId), String(a.planId));
+        case 'figures': return z.mw.listFigureItems();
+        case 'upsertFigure': return z.mw.upsertFigure(a.figure ?? {});
+        default: throw new Error('UNKNOWN_ACTION');
+      }
+    },
+  )));
+
   return () => disposers.forEach((d) => d && d());
 }
 

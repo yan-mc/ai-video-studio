@@ -324,6 +324,22 @@ export const api = {
   comicExportAll: (input: Record<string, unknown>) =>
     request<unknown>('POST', '/comic/export/all', input),
 
+  /* 模特工作台 */
+  mwMeta: () => request<unknown>('GET', '/mw/meta'),
+  mwJobs: () => request<unknown>('GET', '/mw/jobs'),
+  mwCreateJob: (input: Record<string, unknown>) => request<unknown>('POST', '/mw/jobs', input),
+  mwUpdateJob: (id: string, patch: Record<string, unknown>) =>
+    request<unknown>('POST', '/mw/job/update', { id, patch }),
+  mwReplanJob: (id: string) => request<unknown>('POST', '/mw/job/replan', { id }),
+  mwDeleteJobs: (ids: string[]) => request<unknown>('POST', '/mw/job/delete', { ids }),
+  mwPlans: () => request<unknown>('GET', '/mw/plans'),
+  mwSavePlan: (input: Record<string, unknown>) => request<unknown>('POST', '/mw/plan/save', input),
+  mwApplyPlan: (input: Record<string, unknown>) => request<unknown>('POST', '/mw/plan/apply', input),
+  mwDeletePlan: (id: string) => request<unknown>('POST', '/mw/plan/delete', { id }),
+  mwFigures: () => request<unknown>('GET', '/mw/figures'),
+  mwUpsertFigure: (figure: Record<string, unknown>) =>
+    request<unknown>('POST', '/mw/figure/upsert', { figure }),
+
   /* 后处理 */
   transcode: (input: TranscodeInput) => request<unknown>('POST', '/post/transcode', input),
   qc: (path: string) => request<QcResult>('POST', '/post/qc', { path }),
