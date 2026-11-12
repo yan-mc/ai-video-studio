@@ -28,7 +28,7 @@ import {
 import { useTheme } from '../ui/theme';
 import { useToast } from '../ui/Toast';
 
-type Section = 'backend' | 'appearance' | 'about';
+type Section = 'backend' | 'defaults' | 'promptLib' | 'appearance' | 'pricing' | 'shortcuts' | 'logs' | 'about';
 
 export function SettingsPage() {
   const t = useT();
@@ -114,9 +114,14 @@ export function SettingsPage() {
         <>
           <Tabs<Section>
             items={[
-              { value: 'backend', label: t('settings.sectionBackend') },
-              { value: 'appearance', label: t('settings.sectionAppearance') },
-              { value: 'about', label: t('settings.sectionAbout') },
+              { value: 'backend', label: '后端与模型' },
+              { value: 'defaults', label: 'AI 默认参数' },
+              { value: 'promptLib', label: '提示词库' },
+              { value: 'appearance', label: '外观' },
+              { value: 'pricing', label: '价格说明' },
+              { value: 'shortcuts', label: '快捷键' },
+              { value: 'logs', label: '运行日志' },
+              { value: 'about', label: '关于' },
             ]}
             value={section}
             onChange={setSection}
@@ -360,6 +365,128 @@ export function SettingsPage() {
             </div>
           </Panel>
         </div>
+      ) : section === 'defaults' ? (
+        <div className="jz-col" style={{ gap: 'var(--jz-sp-4)', maxWidth: 720 }}>
+          <Panel title="AI 默认参数">
+            <div className="jz-col" style={{ gap: 'var(--jz-sp-3)' }}>
+              <div className="jz-sm jz-muted">新建 AI 节点时使用的默认值</div>
+              <Field label="默认后端">
+                <Select<string>
+                  value={String(draft['defaultBackend'] ?? 'h3-local')}
+                  onChange={(v) => set('defaultBackend', v)}
+                  options={[
+                    { value: 'h3-local', label: 'H3 本地（ComfyUI）' },
+                    { value: 'seedance-cloud', label: 'Seedance 云端' },
+                    { value: 'mock', label: 'Mock（占位片）' },
+                  ]}
+                />
+              </Field>
+              <Field label="默认档位">
+                <Select<string>
+                  value={String(draft['defaultProfile'] ?? 'P12-draft')}
+                  onChange={(v) => set('defaultProfile', v)}
+                  options={[
+                    { value: 'P12-draft', label: 'P12-draft · 864×480' },
+                    { value: 'P16-std', label: 'P16-std · 960×544' },
+                    { value: 'P24-quality', label: 'P24-quality · 1056×608' },
+                    { value: 'P768-quality', label: 'P768-quality · 1344×768' },
+                    { value: 'cloud-fallback', label: 'cloud-fallback · Seedance' },
+                  ]}
+                />
+              </Field>
+              <Field label="本地并发上限" hint="12G 显存建议 1">
+                <Input
+                  value={String(draft['maxConcurrentLocal'] ?? 1)}
+                  onChange={(e) => set('maxConcurrentLocal', e.target.value)}
+                  mono
+                />
+              </Field>
+            </div>
+          </Panel>
+        </div>
+      ) : section === 'promptLib' ? (
+        <div className="jz-col" style={{ gap: 'var(--jz-sp-4)', maxWidth: 880 }}>
+          <Panel title="提示词库">
+            <div className="jz-col" style={{ gap: 'var(--jz-sp-3)' }}>
+              <div className="jz-sm jz-muted">
+                系统提示词模板，可在 AI 文本节点中快速选用。
+              </div>
+              <Alert tone="info">
+                洛书内置 20 条系统模板。当前版本支持在节点内直接手写提示词；模板管理（增删改分类）待接入。
+              </Alert>
+              <div className="jz-col" style={{ gap: 6 }}>
+                {[
+                  ['电影感镜头描述', '文字', '描述一个电影感镜头的画面、光线、构图与情绪'],
+                  ['角色外观固化', '角色', '把角色外观写成可复用的英文提示词（发色/发型/瞳色/服装/配饰）'],
+                  ['分镜拆分', '分镜', '把一段剧本拆成 N 个可拍摄的镜头，每镜含景别/动作/台词'],
+                  ['场景一致化', '场景', '为同一场景生成稳定的环境描述，保证多镜之间视觉连续'],
+                ].map(([name, cat, desc]) => (
+                  <div key={name} className="jz-card" style={{ padding: '8px 10px' }}>
+                    <div className="jz-row" style={{ justifyContent: 'space-between' }}>
+                      <b>{name}</b>
+                      <Badge>{cat}</Badge>
+                    </div>
+                    <div className="jz-sm jz-muted" style={{ marginTop: 4 }}>{desc}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </Panel>
+        </div>
+      ) : section === 'pricing' ? (
+        <div className="jz-col" style={{ gap: 'var(--jz-sp-4)', maxWidth: 880 }}>
+          <Panel title="价格说明">
+            <div className="jz-col" style={{ gap: 'var(--jz-sp-3)' }}>
+              <Alert tone="ok">
+                本地 H3 生成不产生费用（仅消耗本机显卡）。Seedance 云端按量计费。
+              </Alert>
+              <KeyValue
+                rows={[
+                  { key: 'H3 本地 · 480p', value: '免费（约 140s / 5秒片）' },
+                  { key: 'H3 本地 · 544p', value: '免费（约 170s）' },
+                  { key: 'H3 本地 · 608p', value: '免费（约 211s）' },
+                  { key: 'H3 本地 · 768p', value: '免费（约 336s）' },
+                  { key: 'Seedance 云端', value: '按方舟官方计费' },
+                ]}
+              />
+            </div>
+          </Panel>
+        </div>
+      ) : section === 'shortcuts' ? (
+        <div className="jz-col" style={{ gap: 'var(--jz-sp-4)', maxWidth: 720 }}>
+          <Panel title="快捷键">
+            <KeyValue
+              rows={[
+                { key: '撤销', value: 'Ctrl' },
+                { key: '重做', value: 'Ctrl' },
+                { key: '全选节点', value: 'Ctrl' },
+                { key: '创建分组', value: 'Ctrl' },
+                { key: '删除节点', value: 'Delete' },
+                { key: '复制节点', value: 'Ctrl' },
+                { key: '粘贴', value: 'Ctrl' },
+                { key: '适应视图', value: 'F' },
+              ]}
+            />
+          </Panel>
+        </div>
+      ) : section === 'logs' ? (
+        <div className="jz-col" style={{ gap: 'var(--jz-sp-4)', maxWidth: 880 }}>
+          <Panel title="运行日志">
+            <div className="jz-col" style={{ gap: 'var(--jz-sp-3)' }}>
+              <Alert tone="info">
+                实时日志在任务中心与预演页可查。此处显示最近的任务执行摘要。
+              </Alert>
+              <KeyValue
+                rows={[
+                  { key: 'H3 后端', value: String(health?.h3?.ok ? '在线' : '离线') },
+                  { key: '预演引擎', value: String(health?.previz?.ok ? '在线' : '离线') },
+                  
+                  
+                ]}
+              />
+            </div>
+          </Panel>
+        </div>
       ) : (
         <div className="jz-col" style={{ gap: 'var(--jz-sp-4)', maxWidth: 720 }}>
           <Panel title={t('settings.sectionAbout')}>
@@ -387,3 +514,4 @@ export function SettingsPage() {
 }
 
 export default SettingsPage;
+
