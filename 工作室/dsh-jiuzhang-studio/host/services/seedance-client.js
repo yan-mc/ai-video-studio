@@ -151,12 +151,24 @@ function bundledFfmpegDirs() {
 
 function resolveTool(cfg, baseName) {
   const exe = process.platform === 'win32' ? `${baseName}.exe` : baseName;
+
+  // 1) 环境变量最优先 —— 单独 clone 插件时没有内置 tools，靠这个指定
+  const envDir = process.env.DSH_FFMPEG_DIR || process.env.FFMPEG_DIR || '';
   const dirs = [];
+  if (envDir) {
+    dirs.push(path.join(envDir, 'bin'));
+    dirs.push(envDir);
+  }
+
+  // 2) 插件配置
   if (cfg?.ffmpegDir) {
     dirs.push(path.join(cfg.ffmpegDir, 'bin'));
     dirs.push(cfg.ffmpegDir);
   }
+
+  // 3) 插件自身位置向上找内置 tools/ffmpeg
   dirs.push(...bundledFfmpegDirs());
+
   for (const d of dirs) {
     const p = path.join(d, exe);
     try { if (fs.existsSync(p)) return p; } catch { /* ignore */ }

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="inknight" data-accent="cinnabar">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="description" content="九章工作室 · 节点画布与 H3 双后端创作台" />
+    <title>九章工作室</title>
+    <style>
+      /* 首屏防闪白：在 JS 与样式表加载前先把底色刷成墨夜基色 */
+      html,
+      body {
+        margin: 0;
+        background: #111316;
+        color: #e8e4dc;
+      }
+      html[data-theme='xuanpaper'],
+      html[data-theme='xuanpaper'] body {
+        background: #f5f1e8;
+        color: #22262a;
+      }
+      #root {
+        height: 100vh;
+      }
+      #root:empty::after {
+        content: '载入中…';
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font: 13px/1.6 system-ui, sans-serif;
+        color: rgba(232, 228, 220, 0.5);
+      }
+    </style>
+    <script type="module" crossorigin src="./assets/index-ldR97cSx.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-BJKnMdV7.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
