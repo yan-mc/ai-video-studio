@@ -15,6 +15,8 @@
  *  - 失败要有可读原因，不能静默停在"生成中"。
  */
 import { api, describeError } from '../api/client';
+import { fileUrl } from '../api/url';
+import type { JobOutput } from '../api/types';
 import type { CanvasNodeData } from './types';
 import type { CanvasFlowNode } from './types';
 
@@ -24,14 +26,30 @@ import type { CanvasFlowNode } from './types';
 //   - realtime  → 走 /image/generate（H3-Image 文生图）
 //   - imageEdit → 走 /breakdown/generate（参考图编辑）
 //   - video     → 走 /generate（H3 / Seedance / mock）
+/**
+ * 哪些节点能发起生成、以及走哪条路线。
+ *
+ * ⚠️ 这是**唯一真源**：nodeRegistry 的 `capabilities.generative` 必须与这里一致，
+ *    否则就会出现"有运行按钮但点了报暂不支持"或"有能力却永远走不到"。
+ *    `validateRegistry()` 会双向校验两边。
+ *
+ * audio / text 路线没有本地后端，会明确提示而不是假装成功。
+ */
 export const GENERATIVE_NODE_MAP = Object.freeze({
   videoGeneratorNode: 'video',
   imageNode: 'image',            // AI 图片生成
   storyboardGenNode: 'image',    // 分镜生成（逐格出图）
-  panoramaNode: 'image',         // 全景生成
-  vr360PanoramaNode: 'image',    // 全景 A
-  panoramaViewerBNode: 'image',  // 全景 B
+  panoramaNode: 'image',         // 全景生成（唯一真正出图的全景节点）
   backgroundMusicNode: 'audio',  // 背景音乐（暂无后端，会明确提示）
+  // 以下节点接的是 LLM / 语音服务，不是本地扩散模型：
+  aiTextNode: 'text',
+  agentGenNode: 'text',
+  episodeSubCanvasNode: 'text',
+  aiVoiceGenerationNode: 'audio',
+  extractVoiceNode: 'audio',
+  extractCharacterNode: 'extract',
+  extractSceneNode: 'extract',
+  extractItemNode: 'extract',
 } as const);
 
 export type GenerativeNodeType = keyof typeof GENERATIVE_NODE_MAP;
@@ -58,8 +76,11 @@ function str(v: unknown, fallback = ''): string {
 }
 
 /**
- * 把 upstream 节点里已产出的图片 URL 收集起来（用于参考图）。
- * 只收 http/data URL，忽略空值。
+ * 把 upstream 节点里已产出的图片收集起来（用于参考图）。
+ *
+ * 只收后端能解析的路径：http(s) URL、data URL、dataDir 相对路径（如 assets/x.png）。
+ * **必须排除 `blob:`** —— 它只在本浏览器进程内有效，后端 `resolveRefImages`
+ * 既当不了绝对路径也当不了相对路径，会被静默丢弃，表现为"参考图没生效"。
  */
 export function collectUpstreamImages(
   node: CanvasFlowNode,
@@ -68,21 +89,52 @@ export function collectUpstreamImages(
 ): string[] {
   const sourceIds = edges.filter((e) => e.target === node.id).map((e) => e.source);
   const out: string[] = [];
+  const usable = (u: string) => Boolean(u) && !u.startsWith('blob:') && !u.startsWith('file:')
+    && !u.startsWith('/luoshu/api/');   // 同源读取地址只是浏览器用的，后端要 rel 路径
   for (const id of sourceIds) {
     const up = allNodes.find((n) => n.id === id);
-    const r = up?.data?.result as { url?: string; urls?: string[] } | undefined;
-    if (r?.url) out.push(r.url);
-    if (Array.isArray(r?.urls)) out.push(...r.urls);
-    // 上传节点的文件也当作参考图
-    const p = up?.data?.params as { fileUrl?: string } | undefined;
+    const r = up?.data?.result as { url?: string; urls?: string[]; rel?: string; path?: string } | undefined;
+    // 优先后端相对路径（rel），其次 http/data URL
+    if (r?.rel) out.push(r.rel);
+    if (r?.path && usable(String(r.path))) out.push(String(r.path));
+    if (r?.url && usable(r.url)) out.push(r.url);
+    if (Array.isArray(r?.urls)) out.push(...r.urls.filter(usable));
+    // 上传节点：fileUrl 是后端 rel 路径
+    const p = up?.data?.params as { fileUrl?: string; sourcePath?: string } | undefined;
     if (p?.fileUrl) out.push(p.fileUrl);
   }
-  return out.filter(Boolean).slice(0, 9);   // H3 ref_images 上限 9
+  return [...new Set(out.filter(usable))].slice(0, 9);   // H3 ref_images 上限 9
+}
+
+/** 画布 mode（t2v/i2v/…）→ H3 编译器认识的 mode（t2va/i2va/…） */
+const CANVAS_MODE_MAP: Record<string, string> = {
+  t2v: 't2va', T2V: 't2va',
+  i2v: 'i2va', I2V: 'i2va',
+  fl2v: 'fl2va', FL2V: 'fl2va',
+  ref: 'ref2va', REF: 'ref2va', ref2v: 'ref2va', ref2va: 'ref2va',
+  l2v: 'l2va', L2V: 'l2va',
+};
+
+/** 把画布 mode 归一成 H3 编译器认识的枚举 */
+export function h3Mode(raw: unknown, hasRefImages: boolean): string {
+  const s = String(raw ?? '').trim();
+  // 带 "h3:" 前缀的档位（如 h3:T2V）取后半段
+  const bare = s.includes(':') ? s.slice(s.indexOf(':') + 1) : s;
+  const mapped = CANVAS_MODE_MAP[bare] ?? CANVAS_MODE_MAP[bare.toUpperCase()];
+  if (mapped) return mapped;
+  // 未识别：有图走全参考，无图走文生
+  return hasRefImages ? 'ref2va' : 't2va';
 }
 
 /**
  * 节点参数 → 后端 shot 结构。
  * 这是"画布节点"与"镜头卡"的桥。
+ *
+ * ⚠️ 键名必须与 nodeRegistry 的 UI 键一致：
+ *   UI 用 aspectRatio / referenceImages / firstFrameUrl，
+ *   后端 shot 用 ratio / refs.images / previz.firstFramePath。
+ *   旧实现直接读 p['ratio']，而 UI 写的是 aspectRatio → 画幅恒为 16:9；
+ *   参考图与首尾帧则被整体丢弃，只有"上游连线"能传图。
  */
 export function nodeToShot(node: CanvasFlowNode, projectId: string) {
   const p = (node.data?.params ?? {}) as Record<string, unknown>;
@@ -90,26 +142,51 @@ export function nodeToShot(node: CanvasFlowNode, projectId: string) {
 
   const backend = str(p['backend'], 'h3-local');
   const durationSec = Math.min(15, Math.max(1, num(p['durationSec'] ?? p['duration'], 5)));
-  const ratio = str(p['ratio'], '16:9');
+  const ratio = str(p['aspectRatio'] ?? p['ratio'], '16:9');
   const profile = str(p['profile'], 'P12-draft');
+
+  // 手填的参考图（UI 是换行分隔的 list）
+  const manualImages = toList(p['referenceImages']);
 
   return {
     title: str(d.title, `画布镜头 ${new Date().toLocaleTimeString('zh-CN')}`),
-    mode: str(p['mode'], 'ref2v'),
+    mode: h3Mode(p['mode'], manualImages.length > 0),
     durationSec,
     ratio,
     profile,
     backend,
     style: str(p['style'], ''),
-    description: str(p['prompt'] ?? p['description'], ''),
+    description: str(p['prompt'] ?? p['positivePrompt'] ?? p['description'], ''),
     camera: str(p['camera'], ''),
     dialogue: str(p['dialogue'], ''),
     sound: str(p['sound'], ''),
     music: str(p['music'], ''),
-    prompt: str(p['prompt'], ''),
-    refs: { images: [] as string[], videos: [], audios: [] },
+    prompt: str(p['prompt'] ?? p['positivePrompt'], ''),
+    refs: {
+      images: manualImages,
+      videos: toList(p['referenceVideos']),
+      audios: toList(p['referenceAudios']),
+    },
+    // 首尾帧：后端读 shot.previz.firstFramePath / lastFramePath
+    ...(str(p['firstFrameUrl']) || str(p['lastFrameUrl'])
+      ? {
+        previz: {
+          ...(str(p['firstFrameUrl']) ? { firstFramePath: str(p['firstFrameUrl']) } : {}),
+          ...(str(p['lastFrameUrl']) ? { lastFramePath: str(p['lastFrameUrl']) } : {}),
+        },
+      }
+      : {}),
     projectId,
   };
+}
+
+/** 把 list/textarea 参数拆成去空的字符串数组 */
+function toList(v: unknown): string[] {
+  if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
+  if (typeof v === 'string') {
+    return v.split(/[\n,，;；]/).map((s) => s.trim()).filter(Boolean);
+  }
+  return [];
 }
 
 export interface RunOptions {
@@ -126,7 +203,7 @@ export interface RunOptions {
 export interface RunResult {
   jobId: string;
   status: 'completed' | 'failed' | 'cancelled';
-  outputs: { role?: string; path?: string; bytes?: number; url?: string }[];
+  outputs: JobOutput[];
   error?: string;
 }
 
@@ -135,7 +212,7 @@ async function waitJob(
   jobId: string,
   onProgress?: (pct: number, note?: string) => void,
   opts?: { pollMs?: number; timeoutMs?: number },
-): Promise<{ status: string; outputs?: { role?: string; path?: string; bytes?: number }[]; error?: string }> {
+): Promise<{ status: string; outputs?: JobOutput[]; error?: string }> {
   const pollMs = opts?.pollMs ?? 2500;
   const timeoutAt = Date.now() + (opts?.timeoutMs ?? 40 * 60 * 1000);
   let last: string = 'queued';
@@ -148,7 +225,7 @@ async function waitJob(
     } catch {
       continue;
     }
-    const cur = (jobs as { id: string; status: string; outputs?: { role?: string; path?: string; bytes?: number }[]; error?: string }[])
+    const cur = (jobs as { id: string; status: string; outputs?: JobOutput[]; error?: string }[])
       .find((j) => j.id === jobId);
     if (!cur) continue;
     last = cur.status;
@@ -202,7 +279,7 @@ export async function runNodeGeneration(opts: RunOptions): Promise<RunResult> {
     if (final.status !== 'completed') {
       return { jobId: job.id, status: final.status as never, outputs: [], error: final.error };
     }
-    const outs = (final.outputs ?? []).map((o) => ({ ...o, url: assetUrlFromPath(o.path) }));
+    const outs = (final.outputs ?? []).map((o) => ({ ...o, url: assetUrlFromPath(o.path, o.rel) }));
     onProgress?.(100, '完成');
     return { jobId: job.id, status: 'completed', outputs: outs };
   }
@@ -210,6 +287,16 @@ export async function runNodeGeneration(opts: RunOptions): Promise<RunResult> {
   /* ---------------- 音频路线：暂无后端 ---------------- */
   if (route === 'audio') {
     throw new Error('AUDIO_BACKEND_MISSING: 音频生成后端尚未接入');
+  }
+
+  /* ---------------- 文本 / 抽取路线：走 LLM，不是本地扩散模型 ---------------- */
+  // 这些节点接的是 LLM 服务（剧本抽取、AI 文本、剧集子画布），
+  // 绝不能掉进下面的视频分支 —— 否则会用一句话当提示词去跑 H3，既慢又毫无意义。
+  if (route === 'text' || route === 'extract') {
+    throw new Error(
+      `${route.toUpperCase()}_BACKEND_MISSING: 该节点走 LLM 服务，尚未接入画布生成通道`
+      + `（现有实现只覆盖 image / video 两条本地扩散路线）`,
+    );
   }
 
   /* ---------------- 视频路线 ---------------- */
@@ -259,8 +346,8 @@ export async function runNodeGeneration(opts: RunOptions): Promise<RunResult> {
 
     if (cur.status === 'completed') {
       onProgress?.(100, '完成');
-      const outputs = ((cur.outputs ?? []) as { role?: string; path?: string; bytes?: number }[])
-        .map((o) => ({ ...o, url: assetUrlFromPath(o.path) }));
+      const outputs = ((cur.outputs ?? []) as JobOutput[])
+        .map((o) => ({ ...o, url: assetUrlFromPath(o.path, o.rel) }));
       return { jobId: job.id, status: 'completed', outputs };
     }
     if (cur.status === 'failed') {
@@ -276,15 +363,19 @@ export async function runNodeGeneration(opts: RunOptions): Promise<RunResult> {
 
 /**
  * 把后端产物路径转成可访问的 URL。
- * 产物落在 dataDir/outputs 下，通过 /luoshu/api/file 提供。
+ *
+ * 优先用后端的 `rel`（相对 dataDir），只有老数据才回退到从绝对路径里截取。
+ * `/luoshu/api/file` 只接受 dataDir 内的路径，传绝对路径会被 403。
  */
-export function assetUrlFromPath(absPath?: string): string | undefined {
+export function assetUrlFromPath(absPath?: string, rel?: string): string | undefined {
+  if (rel) return fileUrl(rel);
   if (!absPath) return undefined;
   if (/^(https?:|data:|blob:)/.test(absPath)) return absPath;
-  const m = absPath.replace(/\\/g, '/').match(/(?:^|\/)outputs\/(.+)$/);
-  if (m) return `/luoshu/api/file?path=${encodeURIComponent(`outputs/${m[1]}`)}`;
-  const a = absPath.replace(/\\/g, '/').match(/(?:^|\/)assets\/(.+)$/);
-  if (a) return `/luoshu/api/file?path=${encodeURIComponent(`assets/${a[1]}`)}`;
+  const norm = absPath.replace(/\\/g, '/');
+  const m = norm.match(/(?:^|\/)(outputs\/.+)$/);
+  if (m) return fileUrl(m[1]);
+  const a = norm.match(/(?:^|\/)(assets\/.+)$/);
+  if (a) return fileUrl(a[1]);
   return undefined;
 }
 

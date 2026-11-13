@@ -25,6 +25,7 @@ import type {
 } from './types';
 import type { NodePortSpec } from './portTypes';
 import { portsOf } from './portTypes';
+import { GENERATIVE_NODE_MAP } from './runner';
 
 /* ========================================================================== */
 /* 一、公共选项常量                                                            */
@@ -1053,6 +1054,24 @@ export function validateRegistry(): string[] {
     const keys = def.fields.map((f) => f.key);
     if (new Set(keys).size !== keys.length) {
       problems.push(`${def.type} 的参数 key 有重复`);
+    }
+  }
+
+  // 4) capabilities.generative 与 GENERATIVE_NODE_MAP 必须双向一致
+  //
+  //    这两套真源曾经漂移：7 个节点标了 generative 但 runner 不认识
+  //    （点了"运行"只弹"暂不支持"），另有 2 个节点 runner 支持但没标
+  //    generative（后端有能力却永远走不到）。这里把两边对齐关系钉死。
+  const generativeCaps = new Set<string>(DEFS.filter((d) => d.capabilities?.generative).map((d) => String(d.type)));
+  const runnerSupports = new Set<string>(Object.keys(GENERATIVE_NODE_MAP));
+  for (const t of generativeCaps) {
+    if (!runnerSupports.has(t)) {
+      problems.push(`${t} 标记了 generative，但 runner 没有对应生成路线（点了会提示"暂不支持"）`);
+    }
+  }
+  for (const t of runnerSupports) {
+    if (!generativeCaps.has(t)) {
+      problems.push(`${t} 在 runner 里有生成路线，但没标记 generative（永远走不到）`);
     }
   }
 

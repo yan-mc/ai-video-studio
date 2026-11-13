@@ -14,17 +14,71 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-/** 常见 Edge / Chrome 位置 */
-const BROWSERS = [
-  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-];
+/**
+ * 常见 Edge / Chrome 安装位置（按平台，程序化构造，不写死盘符）。
+ *
+ * 这些是**系统安装目录的候选**，不是业务配置 —— 用环境变量派生，
+ * 换盘符/换机器都能找到。用户也可用 DSH_BROWSER / CHROME_PATH 显式指定。
+ */
+function browserCandidates() {
+  if (process.platform === 'win32') {
+    const roots = [
+      process.env['ProgramFiles(x86)'],
+      process.env.ProgramFiles,
+      process.env.ProgramW6432,
+    ].filter(Boolean);
+    const out = [];
+    for (const r of roots) {
+      out.push(path.join(r, 'Microsoft', 'Edge', 'Application', 'msedge.exe'));
+      out.push(path.join(r, 'Google', 'Chrome', 'Application', 'chrome.exe'));
+    }
+    return out;
+  }
+  if (process.platform === 'darwin') {
+    return [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    ];
+  }
+  return [
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/microsoft-edge',
+  ];
+}
 
+/**
+ * 找无头浏览器。
+ *
+ * 优先级：显式环境变量 > 平台常见安装位置 > PATH 查找。
+ * 早期实现只硬编码了 Windows 四个绝对路径 —— 换平台或非默认安装就必然失败，
+ * 且失败信息只是"找不到浏览器"，用户不知道该怎么修。
+ */
 export function findBrowser() {
-  for (const p of BROWSERS) {
+  for (const key of ['DSH_BROWSER', 'CHROME_PATH', 'REA_BROWSER_EXECUTABLE', 'PUPPETEER_EXECUTABLE_PATH']) {
+    const v = process.env[key];
+    if (v) { try { if (fs.existsSync(v)) return v; } catch { /* ignore */ } }
+  }
+
+  for (const p of browserCandidates()) {
     try { if (fs.existsSync(p)) return p; } catch { /* ignore */ }
+  }
+
+  // PATH 查找
+  const names = process.platform === 'win32'
+    ? ['msedge.exe', 'chrome.exe']
+    : ['google-chrome', 'chromium', 'chromium-browser', 'microsoft-edge'];
+  const exts = process.platform === 'win32' ? (process.env.PATHEXT || '.EXE').split(';') : [''];
+  for (const dir of String(process.env.PATH || '').split(path.delimiter)) {
+    if (!dir) continue;
+    for (const n of names) {
+      for (const ext of exts) {
+        const p = path.join(dir, n + ext);
+        try { if (fs.existsSync(p)) return p; } catch { /* ignore */ }
+      }
+    }
   }
   return null;
 }
@@ -138,4 +192,4 @@ export function buildPrevizStylePrompt(basePrompt, opts = {}) {
   return parts.join('');
 }
 
-export { BROWSERS as KNOWN_BROWSERS };
+export { browserCandidates as KNOWN_BROWSERS };

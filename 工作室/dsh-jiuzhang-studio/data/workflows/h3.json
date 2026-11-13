@@ -41,6 +41,7 @@
     "inputs": {
       "clip": ["2", 0],
       "vae": ["3", 0],
+      "audio_vae": ["15", 0],
       "prompt": "{{PROMPT}}",
       "width": "{{WIDTH}}",
       "height": "{{HEIGHT}}",
@@ -69,9 +70,21 @@
     "class_type": "VAEDecode",
     "inputs": { "samples": ["11", 0], "vae": ["3", 0] }
   },
+  "15": {
+    "class_type": "VAELoader",
+    "inputs": { "vae_name": "{{AUDIO_VAE_NAME}}" }
+  },
+  "16": {
+    "class_type": "VAEDecodeAudio",
+    "inputs": { "samples": ["11", 0], "vae": ["15", 0] }
+  },
   "13": {
     "class_type": "CreateVideo",
-    "inputs": { "images": ["12", 0], "fps": "{{FPS}}" }
+    "inputs": {
+      "images": ["12", 0],
+      "audio": ["16", 0],
+      "fps": "{{FPS}}"
+    }
   },
   "14": {
     "class_type": "SaveVideo",

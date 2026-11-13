@@ -7,9 +7,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { api, describeError } from '../api/client';
+import { ScriptAnalyzerPanel } from './H3Page';
 import { useProjectStore } from '../store';
 import {
-  Alert, Badge, Button, Field, Icon, Input, Loading, Page, Panel, Select, Textarea, useToast,
+  Alert, Badge, Button, Field, Icon, Input, Loading, Page, Panel, Select, Tabs, Textarea, useToast,
 } from '../ui';
 
 interface Genre { id: string; name: string; hints: string }
@@ -19,6 +20,8 @@ interface Chapter { index: number; act: string; title: string; summary: string; 
 interface Scene { no: number; slug: string; location: string; action: string; beats: string[]; dialogue: { speaker: string; line: string }[] }
 interface Shot { index: number; sceneNo: number; location: string; shot: string; durationSec: number; description: string; camera: string; dialogue: string }
 interface Issue { level: string; kind: string; detail: string }
+
+type ScriptTab = 'write' | 'analyze';
 
 interface ScriptDoc {
   projectId?: string;
@@ -42,6 +45,7 @@ export function ScriptPage() {
 
   const [genres, setGenres] = useState<Genre[]>([]);
   const [stages, setStages] = useState<Stage[]>([]);
+  const [tab, setTab] = useState<ScriptTab>('write');
   const [doc, setDoc] = useState<ScriptDoc | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -133,14 +137,49 @@ export function ScriptPage() {
     storyboard: Boolean(doc?.storyboard?.shots?.length),
   }), [doc]);
 
-  if (loading) return <Page title="剧本创作"><Loading text="载入中" /></Page>;
+  if (loading) return <Page title="剧本"><Loading text="载入中" /></Page>;
+
+  // 剧本页有两个入口，都是"前期文本处理"：
+  //   · 5 阶段流水线：从零创作
+  //   · 剧本拆解：把已有的一集剧本切成分段 + 抽资产
+  // 之前它们是两个并列的顶级页面（"剧本" 与 "H3 工坊"），职责重叠、名字还撞车。
+  if (tab === 'analyze') {
+    return (
+      <Page
+        title="剧本"
+        subtitle="剧本拆解 · 把一集剧本切成分段，抽出角色/场景/道具清单"
+        actions={
+          <Tabs<ScriptTab>
+            items={[
+              { value: 'write', label: '5 阶段创作' },
+              { value: 'analyze', label: '剧本拆解' },
+            ]}
+            value={tab}
+            onChange={setTab}
+            ariaLabel="剧本模式"
+          />
+        }
+      >
+        <ScriptAnalyzerPanel />
+      </Page>
+    );
+  }
 
   return (
     <Page
-      title="剧本创作"
+      title="剧本"
       subtitle="5 阶段流水线 · 14 种题材 · 一致性检查"
       actions={
         <>
+          <Tabs<ScriptTab>
+            items={[
+              { value: 'write', label: '5 阶段创作' },
+              { value: 'analyze', label: '剧本拆解' },
+            ]}
+            value={tab}
+            onChange={setTab}
+            ariaLabel="剧本模式"
+          />
           <Button icon={<Icon name="refresh" size={15} />} onClick={() => void load()} disabled={busy}>刷新</Button>
           <Button variant="primary" icon={<Icon name="text" size={15} />} onClick={() => void runAll()} disabled={busy || !projectId}>
             {busy ? '生成中…' : '一键跑完'}

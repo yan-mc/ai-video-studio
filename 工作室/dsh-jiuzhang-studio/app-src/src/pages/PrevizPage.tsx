@@ -11,7 +11,8 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { api, describeError } from '../api/client';
-import { Alert, Badge, Button, Icon, Page, Tabs, useT } from '../ui';
+import { Alert, Badge, Button, Icon, Page, Panel, Tabs, useT } from '../ui';
+import { fileUrl } from '../api/url';
 
 interface PrevizHealth {
   ok?: boolean;
@@ -46,6 +47,8 @@ export function PrevizPage() {
   const [err, setErr] = useState('');
   const [reloadNonce, setReloadNonce] = useState(0);
   const [active, setActive] = useState<string>('previz');
+  const [rendering, setRendering] = useState(false);
+  const [videoResult, setVideoResult] = useState<{ rel: string; seconds: number; frames: number } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -77,6 +80,28 @@ export function PrevizPage() {
     }
   }
 
+  /**
+   * 白模 → 参考视频。
+   *
+   * 逐帧渲染预演工程生成 mp4，可直接当 H3 的参考视频。
+   * 耗时较长（282 帧约 80 秒），所以给明确的状态反馈。
+   */
+  async function handleRenderVideo() {
+    setRendering(true);
+    setErr('');
+    setVideoResult(null);
+    try {
+      const r = await api.previzVideo({ fps: 24, width: 1280, height: 720 }) as {
+        rel: string; seconds: number; frames: number;
+      };
+      setVideoResult(r);
+    } catch (e) {
+      setErr(describeError(e));
+    } finally {
+      setRendering(false);
+    }
+  }
+
   const running = Boolean(health?.running ?? health?.ok);
   const base = String(health?.url ?? 'http://127.0.0.1:4318/');
   const current = STUDIOS.find((s) => s.id === active) ?? STUDIOS[0];
@@ -98,6 +123,14 @@ export function PrevizPage() {
           >
             新窗口打开
           </Button>
+          {/* 白模 → 参考视频：把预演工程逐帧渲成 mp4，供 H3 当参考视频 */}
+          <Button
+            icon={<Icon name="video" size={15} />}
+            onClick={() => void handleRenderVideo()}
+            disabled={!running || rendering}
+          >
+            {rendering ? '渲染中…' : '导出白模视频'}
+          </Button>
           <Button variant="primary" icon={<Icon name="play" size={15} />} onClick={() => void handleStart()} disabled={busy || running}>
             {running ? '运行中' : busy ? '启动中…' : '启动服务'}
           </Button>
@@ -108,6 +141,25 @@ export function PrevizPage() {
         {err ? <Alert tone="danger">{err}</Alert> : null}
         {health && !running ? (
           <Alert tone="warn">{`导演台引擎未运行 · ${health.detail ?? '不可达'}`}</Alert>
+        ) : null}
+
+        {/* 白模视频产物：可直接拿去当 H3 的参考视频 */}
+        {videoResult ? (
+          <Panel title="白模视频已生成">
+            <div className="jz-col" style={{ gap: 8 }}>
+              <video
+                src={fileUrl(videoResult.rel)}
+                controls
+                style={{ width: '100%', maxHeight: 300, borderRadius: 6, background: '#000' }}
+              />
+              <div className="jz-xs jz-muted">
+                {videoResult.frames} 帧 · {videoResult.seconds.toFixed(2)}s · {videoResult.rel}
+              </div>
+              <div className="jz-xs jz-muted">
+                在「渲染」页把它选作参考视频即可。
+              </div>
+            </div>
+          </Panel>
         ) : null}
 
         <div className="jz-row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>

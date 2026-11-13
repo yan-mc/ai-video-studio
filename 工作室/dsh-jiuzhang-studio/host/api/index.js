@@ -21,12 +21,22 @@ import { DIRECTOR_COMMANDS, CAMERA_MOVES, DIRECTOR_FPS } from '../services/direc
 import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, H3_MODES, H3_LIMITS } from '../services/h3-prompt.js';
 import { H3_IMAGE_MODELS, H3_IMAGE_SIZES, IMAGE_VAE, IMAGE_CLIP, IMAGE_SAMPLING, checkImageModels } from '../services/h3-image.js';
 import { BREAKDOWN_LEVELS, BREAKDOWN_SIZES, buildBreakdownPrompt, breakdownLevel, breakdownSize } from '../services/breakdown.js';
+import {
+  CARD_IMAGE_SLOTS, CARD_REF_MODES, H3_MAX_REF_IMAGES,
+  readProjectCards, writeProjectCards,
+} from '../services/character-vault.js';
+import { buildRenderPlan, subjectsForPrompt, buildMediaNotes } from '../services/render-plan.js';
+import { probeMedia } from '../services/media-probe.js';
+import { renderPrevizVideo } from '../services/previz-video.js';
 import { findBrowser, screenshotPreviz, cropWithFfmpeg, buildPrevizStylePrompt } from '../services/previz-shot.js';
 import { resolveFfmpeg } from '../services/seedance-client.js';
 import { createCanvasAgent } from '../services/canvas-agent.js';
 import { getRuntime } from '../runtime.js';
 
 /* ------------------------------------------------------------- 工具函数 */
+
+/** 合法后端枚举 —— 单一真源，路由与执行器共用 */
+export const VALID_BACKENDS = new Set(['h3-local', 'h3-image', 'seedance-cloud', 'mock']);
 
 async function readJsonBody(req, limit = 4 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
@@ -112,7 +122,7 @@ function parseMultipart(buf, contentType) {
     const fileM = /filename="([^"]*)"/i.exec(headers);
     parts.push({
       name: nameM?.[1] || '',
-      filename: fileM?.[1] || null,
+      filename: fileM?.[1] ? decodeRfc2047(fileM[1]) : null,
       data: buf.subarray(bodyStart, bodyEnd),
     });
 
@@ -120,6 +130,30 @@ function parseMultipart(buf, contentType) {
     if (start >= buf.length) break;
   }
   return parts;
+}
+
+/**
+ * 解码 RFC 2047 编码的中文文件名。
+ *
+ * 为什么要做：PowerShell 的 `-Form`、以及部分 HTTP 客户端会把非 ASCII 文件名
+ * 编成 `=?utf-8?B?<base64>?=`。不过滤就会拿到一串编码字面量，
+ * `path.extname()` 取不到扩展名 → 上传报 `UNSUPPORTED_FILE_TYPE: (none)`。
+ * （实测：用 PowerShell 上传中文名立绘必失败，用 node 的 FormData 则正常。）
+ */
+function decodeRfc2047(value) {
+  if (!value || !value.includes('=?')) return value;
+  try {
+    return value.replace(/=\?([^?]+)\?([BbQq])\?([^?]*)\?=/g, (whole, charset, enc, text) => {
+      const cs = String(charset).toLowerCase();
+      if (enc.toUpperCase() === 'B') {
+        const buf = Buffer.from(text, 'base64');
+        return cs.includes('8859') ? buf.toString('latin1') : buf.toString('utf8');
+      }
+      // Q 编码：_ 代表空格
+      const raw = text.replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+      return Buffer.from(raw, 'latin1').toString('utf8');
+    });
+  } catch { return value; }
 }
 
 function parseRangeHeader(header, size) {
@@ -279,11 +313,23 @@ export async function handleApi(req, res) {
       if (!shot) return sendJson(res, 404, { error: 'SHOT_NOT_FOUND' });
 
       const backendId = body.backend || shot.backend || cfg.defaultBackend;
+      // 早失败：后端名写错要立刻报，不能等任务跑完才产出"假视频"
+      if (!VALID_BACKENDS.has(backendId)) {
+        return sendJson(res, 400, {
+          error: 'UNKNOWN_BACKEND',
+          detail: `${JSON.stringify(backendId)} 不是有效后端`,
+          valid: [...VALID_BACKENDS],
+        });
+      }
+      // ⚠️ 顺序很重要：**先**解析角色卡，**再**编译提示词。
+      //    旧写法先 compilePrompt(shot) 后注入卡，导致卡的文字永远进不了 subject_definitions
+      //    （编译时 subjects 为空，生成出空的 subject_definitions: 段）。
+      const shotWithCards = await withVaultCards(shot, pid, ctx, cfg);
       const job = newJob({
         projectId: pid,
         shotId: shot.id,
         backendId,
-        prompt: compilePrompt(shot),
+        prompt: compilePrompt(shotWithCards),
         params: {
           durationSec: shot.durationSec,
           ratio: shot.ratio,
@@ -294,8 +340,8 @@ export async function handleApi(req, res) {
       });
       await jobsStore().upsert(job);
 
-      // 异步执行，立即返回 job
-      runJob(job, (running) => executeBackend(running, shot, ctx, cfg)).catch(() => {});
+      // 角色卡已在上面解析进 shotWithCards，直接用它执行
+      runAndArchive(job, (running) => executeBackend(running, shotWithCards, ctx, cfg), ctx).catch(() => {});
       return sendJson(res, 200, job);
     }
     if (req.method === 'GET' && route === '/jobs') {
@@ -308,7 +354,8 @@ export async function handleApi(req, res) {
         const jobId = safeId(decodeURIComponent(m[1]), /^job_[A-Za-z0-9]+$/);
         if (m[2] === 'cancel') {
           const result = await cancelJob(jobId, async (job) => {
-            if (job.remoteId && String(job.backendId) === 'h3-local') {
+            // h3-image 同样走 ComfyUI，也必须能真取消（旧代码只认 h3-local）
+            if (job.remoteId && isLocalBackendOf(job.backendId)) {
               await comfy.cancelRemote(cfg, job.remoteId);
             }
           });
@@ -325,7 +372,7 @@ export async function handleApi(req, res) {
           prompt: old.prompt, params: old.params, mode: old.mode,
         });
         await jobsStore().upsert(job);
-        runJob(job, (running) => executeBackend(running, shot, ctx, cfg)).catch(() => {});
+        runAndArchive(job, (running) => executeBackend(running, shot, ctx, cfg), ctx).catch(() => {});
         return sendJson(res, 200, job);
       }
     }
@@ -487,7 +534,13 @@ export async function handleApi(req, res) {
               workflow: wf,
               job: j,
               prompt: plan.prompt,
-              shot: { refs: { images: [] }, imageSizeId: body.sizeId ?? 'sq-2048' },
+              // 角色参考图必须真的传进去：漫画要保证多格之间角色一致，
+              // 旧实现硬编码 images: [] → 每格都是纯文生图，角色必然漂移。
+              shot: {
+                refs: { images: body.refImages ?? doc.refImages ?? [] },
+                characterRefs: body.characterRefs ?? doc.characterRefs ?? [],
+                imageSizeId: body.sizeId ?? 'sq-2048',
+              },
               cfg,
             });
             const out = r.outputs?.[0];
@@ -501,7 +554,18 @@ export async function handleApi(req, res) {
                 rel, path: abs, bytes: out.bytes,
               });
             }
-            await jobsStore().upsert({ ...j, status: 'completed', outputs: r.outputs ?? [], finishedAt: Date.now() });
+            // 同时登记进素材库 —— 否则漫画产物只存在于 comic/panels/，
+            // 渲染页、角色卡仓库都引用不到。
+            const archived = await archiveBatchOutput(ctx, cfg, out, {
+              type: 'general',
+              name: `漫画_${pid}_p${plan.pageIndex}_${plan.panelIndex}`,
+              projectId: pid,
+              note: String(plan.prompt ?? '').slice(0, 200),
+            });
+            const outputsWithArchive = archived
+              ? [{ ...out, assetId: archived.id, archivedRel: archived.rel }]
+              : (r.outputs ?? []);
+            await jobsStore().upsert({ ...j, status: 'completed', outputs: outputsWithArchive, finishedAt: Date.now() });
           } catch (e) {
             // 单格失败不中断整批
             ctx.extras?.appendLog?.({ level: 'error', msg: `漫画出图失败 p${plan.pageIndex}-${plan.panelIndex}: ${String(e?.message ?? e)}` });
@@ -519,6 +583,34 @@ export async function handleApi(req, res) {
         defaultUrl: `http://127.0.0.1:${cfg.previzPort || 4318}/`,
         viewport: { width: 1600, height: 1000 },
       });
+    }
+
+    /* ---------------- 预演 → 白模视频 ---------------- */
+    //
+    // 逐帧渲染预演工程，输出 mp4。用途是把 3D 白模当 H3 的**参考视频**。
+    // 详见 host/services/previz-video.js 顶部说明（含两个引擎行为坑）。
+    if (req.method === 'POST' && route === '/previz/video') {
+      const body = await readJsonBody(req);
+      const fps = Math.max(6, Math.min(30, Number(body.fps) || 24));
+      const width = Math.max(320, Math.min(1920, Number(body.width) || 1280));
+      const height = Math.max(240, Math.min(1080, Number(body.height) || 720));
+      const stamp = `previz_${Date.now().toString(36)}`;
+      const outDir = path.join(cfg.dataDir, 'previz', stamp);
+
+      try {
+        const r = await renderPrevizVideo({
+          previzBase: `http://127.0.0.1:${cfg.previzPort || 4318}`,
+          outDir,
+          fps,
+          width,
+          height,
+          maxSeconds: Number(body.maxSeconds) || 0,
+        });
+        const rel = path.relative(cfg.dataDir, r.videoPath).replace(/\\/g, '/');
+        return sendJson(res, 200, { ...r, rel, outDir: path.relative(cfg.dataDir, outDir).replace(/\\/g, '/') });
+      } catch (e) {
+        return sendJson(res, 400, { error: String(e?.message || e) });
+      }
     }
     if (req.method === 'POST' && route === '/previz-shot/capture') {
       const body = await readJsonBody(req);
@@ -588,15 +680,205 @@ export async function handleApi(req, res) {
       job.kind = 'image';
       await jobsStore().upsert(job);
 
-      runJob(job, async (running) => runH3ImageLocal({
+      runAndArchive(job, async (running) => runH3ImageLocal({
         workflow: wf,
         job: running,
         prompt,
         shot: { refs: { images: [refAbs] }, imageSizeId: body.sizeId },
         cfg,
-      })).catch(() => {});
+      }), ctx).catch(() => {});
 
       return sendJson(res, 200, { ...job, refPath: refAbs });
+    }
+
+    /* ---------------- 角色卡仓库 ---------------- */
+    if (req.method === 'GET' && route === '/vault/meta') {
+      return sendJson(res, 200, ctx.vault.meta());
+    }
+    if (req.method === 'GET' && route === '/vault/cards') {
+      const q = url.searchParams.get('q') || '';
+      return sendJson(res, 200, await ctx.vault.list({ q }));
+    }
+    if (req.method === 'POST' && route === '/vault/cards') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, await ctx.vault.upsert(body));
+    }
+    if (req.method === 'POST' && route === '/vault/cards/delete') {
+      const body = await readJsonBody(req);
+      if (!body.id) return sendJson(res, 400, { error: 'ID_REQUIRED' });
+      return sendJson(res, 200, await ctx.vault.remove(String(body.id)));
+    }
+    {
+      const m = /^\/vault\/cards\/([A-Za-z0-9_]+)$/.exec(route);
+      if (m) {
+        const id = safeId(m[1], /^card_[A-Za-z0-9]+$/);
+        if (req.method === 'GET') {
+          const card = await ctx.vault.get(id);
+          if (!card) return sendJson(res, 404, { error: 'CARD_NOT_FOUND' });
+          return sendJson(res, 200, card);
+        }
+        if (req.method === 'POST') {
+          const body = await readJsonBody(req);
+          return sendJson(res, 200, await ctx.vault.upsert({ ...body, id }));
+        }
+      }
+    }
+    if (req.method === 'GET' && route === '/vault/plan') {
+      const projectId = url.searchParams.get('projectId');
+      const cardIds = (url.searchParams.get('cardIds') || '')
+        .split(',').map((s) => s.trim()).filter(Boolean);
+      // 项目已绑定的卡也并进来
+      const bound = projectId ? readProjectCards(projectId, cfg) : [];
+      const merged = [...new Set([...cardIds, ...bound])];
+      return sendJson(res, 200, await ctx.vault.plan({
+        cardIds: merged,
+        extraImages: (url.searchParams.get('extra') || '').split(',').map((s) => s.trim()).filter(Boolean),
+        firstLastCount: Number(url.searchParams.get('firstLast') || 0),
+      }));
+    }
+
+    /* ---------------- 项目 ⇄ 角色卡 ---------------- */
+    {
+      const m = /^\/projects\/([A-Za-z0-9_-]+)\/cards$/.exec(route);
+      if (m) {
+        const pid = safeId(m[1]);
+        if (req.method === 'GET') {
+          const ids = readProjectCards(pid, cfg);
+          const cards = [];
+          for (const id of ids) {
+            const c = await ctx.vault.get(id).catch(() => null);
+            if (c) cards.push(c);
+          }
+          return sendJson(res, 200, { projectId: pid, cardIds: ids, cards });
+        }
+        if (req.method === 'POST') {
+          const body = await readJsonBody(req);
+          const ids = writeProjectCards(pid, body.cardIds ?? [], cfg);
+          return sendJson(res, 200, { ok: true, projectId: pid, cardIds: ids });
+        }
+      }
+    }
+
+    /* ---------------- 产物归档 ---------------- */
+    //
+    // 生成产物落在 data/outputs/（临时区），画布与渲染页都看不到。
+    // 归档后变成正式素材，任何页面都能引用。
+    // 这是「画布 ↔ 渲染页」打通的桥梁。
+    if (req.method === 'POST' && route === '/assets/archive') {
+      const body = await readJsonBody(req);
+      const items = Array.isArray(body.items) ? body.items : [body];
+      const saved = [];
+      const failed = [];
+      for (const it of items) {
+        try {
+          // 接受 rel（dataDir 相对）或绝对路径
+          let abs = '';
+          if (typeof it.path === 'string' && it.path) {
+            abs = path.isAbsolute(it.path) ? it.path : safeJoin(cfg.dataDir, it.path);
+          } else if (it.rel) {
+            abs = safeJoin(cfg.dataDir, it.rel);
+          }
+          if (!abs) throw new Error('PATH_REQUIRED');
+          saved.push(await ctx.assets.archiveFile(abs, {
+            type: it.type ?? 'general',
+            name: it.name,
+            projectId: it.projectId ?? null,
+            tag: it.tag ?? 'archived',
+            note: it.note ?? '',
+          }));
+        } catch (e) {
+          failed.push({ input: it, error: String(e?.message || e) });
+        }
+      }
+      return sendJson(res, 200, { ok: failed.length === 0, saved, count: saved.length, failed });
+    }
+
+    /* ---------------- 渲染计划 ---------------- */
+    // 一个镜头的"这次要传什么"由这里统一算：参考图清单、编号、超限裁剪、
+    // 角色卡文字定义、推荐模式。前端渲染页直接消费它，不再自己算编号。
+    if (req.method === 'POST' && route === '/render/plan') {
+      const body = await readJsonBody(req);
+      const cardIds = Array.isArray(body.cardIds) ? body.cardIds.filter(Boolean) : [];
+      const cards = [];
+      for (const id of cardIds) {
+        const c = await ctx.vault.get(id).catch(() => null);
+        if (c) cards.push(c);
+      }
+      const mediaRefs = await resolveMediaRefs(ctx, cfg, body.videos ?? [], body.audios ?? []);
+      const plan = buildRenderPlan({
+        cards,
+        manualImages: body.manualImages ?? [],
+        previz: body.previz ?? null,
+        sceneImages: body.sceneImages ?? [],
+        ...mediaRefs,
+        refImageSize: body.refImageSize,
+        vram: await comfy.vramStatus(cfg),
+      });
+      return sendJson(res, 200, plan);
+    }
+
+    /* ---------------- 渲染：编译提示词（按计划编号） ---------------- */
+    //
+    // 与 /prompt/compile 的区别：这个入口接受 cardIds，**由后端算编号**，
+    // 保证提示词里的 <Picture N> 与最终上传顺序一致。
+    if (req.method === 'POST' && route === '/render/compile') {
+      const body = await readJsonBody(req);
+      const cardIds = Array.isArray(body.cardIds) ? body.cardIds.filter(Boolean) : [];
+      const cards = [];
+      for (const id of cardIds) {
+        const c = await ctx.vault.get(id).catch(() => null);
+        if (c) cards.push(c);
+      }
+      const mediaRefs = await resolveMediaRefs(ctx, cfg, body.videos ?? [], body.audios ?? []);
+      const plan = buildRenderPlan({
+        cards,
+        manualImages: body.manualImages ?? [],
+        previz: body.previz ?? null,
+        sceneImages: body.sceneImages ?? [],
+        ...mediaRefs,
+        refImageSize: body.refImageSize,
+        vram: await comfy.vramStatus(cfg),
+      });
+      const pkg = toShotInputPackage(
+        {
+          id: body.shotId ?? 'render',
+          mode: body.mode ?? plan.suggestedMode,
+          durationSec: body.durationSec ?? 5,
+          ratio: body.ratio ?? '16:9',
+          styleId: body.styleId ?? null,
+          description: body.summary ?? body.description ?? '',
+          // 这里的 images 只用于编译器统计「有几张参考图」，
+          // 真正的参考图由 plan 单独管理并接线（见 buildRenderPlan）。
+          // 不是"丢图"——图片清单在 plan.images 里。
+          refs: { images: plan.images.map((x) => x.rel) },
+        },
+        {
+          subjects: subjectsForPrompt(plan),
+          styleId: body.styleId ?? null,
+          sceneLayout: body.sceneLayout ?? '',
+        },
+      );
+      if (body.overall_soundscape) pkg.overall_soundscape = body.overall_soundscape;
+      if (body.non_diegetic_music) pkg.non_diegetic_music = body.non_diegetic_music;
+      // 自定义英文画风：直接覆盖画风预设（compileH3Prompt 里 styleEn 优先级最高）
+      if (body.styleEn) pkg.styleEn = String(body.styleEn);
+      if (body.shots) pkg.shots = body.shots;
+
+      const compiled = compileH3Prompt(pkg);
+      // 视频/音频的用途说明：H3 靠 <Video k> / <Audio j> 标签引用它们，
+      // 但模型不知道"这段是参考什么"。补一句自然语言说明，效果明显更好。
+      const mediaNotes = buildMediaNotes(plan);
+      const finalPrompt = mediaNotes.length
+        ? `reference_notes:\n${mediaNotes.join('\n')}\n\n${compiled.prompt}`
+        : compiled.prompt;
+
+      return sendJson(res, 200, {
+        ...compiled,
+        prompt: finalPrompt,
+        chars: finalPrompt.length,
+        plan,
+        package: pkg,
+      });
     }
 
     /* ---------------- 拆解图 / 人设卡 ---------------- */
@@ -653,13 +935,13 @@ export async function handleApi(req, res) {
       job.kind = 'image';
       await jobsStore().upsert(job);
 
-      runJob(job, async (running) => runH3ImageLocal({
+      runAndArchive(job, async (running) => runH3ImageLocal({
         workflow: wf,
         job: running,
         prompt,
         shot: { refs: { images: refAbs }, imageSizeId: body.sizeId },
         cfg,
-      })).catch(() => {});
+      }), ctx).catch(() => {});
 
       return sendJson(res, 200, { ...job, refCount: refAbs.length, level: lv.id });
     }
@@ -697,7 +979,7 @@ export async function handleApi(req, res) {
       job.kind = 'image';
       await jobsStore().upsert(job);
 
-      runJob(job, async (running) => runH3ImageLocal({
+      runAndArchive(job, async (running) => runH3ImageLocal({
         workflow: wf,
         job: running,
         prompt: String(body.prompt ?? ''),
@@ -706,7 +988,7 @@ export async function handleApi(req, res) {
           imageSizeId: body.sizeId,
         },
         cfg,
-      })).catch(() => {});
+      }), ctx).catch(() => {});
 
       return sendJson(res, 200, job);
     }
@@ -943,17 +1225,33 @@ export async function handleApi(req, res) {
               workflow: wf,
               job: j,
               prompt: planItem.prompt,
-              shot: { refs: { images: [] }, imageSizeId: sizeId },
+              // 参考图必须真的传进去：模特/服装的一致性全靠它。
+              // 旧实现硬编码 images: [] → 每套图都是纯文生图，形象库完全没用上。
+              shot: {
+                refs: { images: body.refImages ?? job.refImages ?? [] },
+                characterRefs: body.characterRefs ?? job.characterRefs ?? resolveMwFigureRefs(job),
+                imageSizeId: sizeId,
+              },
               cfg,
             });
+            // 登记进素材库，否则模特套图只落在 outputs/，渲染页引用不到
+            const archived = await archiveBatchOutput(ctx, cfg, r.outputs?.[0], {
+              type: 'general',
+              name: `模特_${job.name ?? jobId}_${planItem.index}`,
+              projectId: job.projectId ?? null,
+              note: String(planItem.prompt ?? '').slice(0, 200),
+            });
+            const outs = archived
+              ? [{ ...(r.outputs?.[0] ?? {}), assetId: archived.id, archivedRel: archived.rel }]
+              : (r.outputs ?? []);
             // 记进 jobs 表以便前端查询（upsert 会合并同 id）
             await jobsStore().upsert({
               ...j,
               status: 'completed',
-              outputs: r.outputs ?? [],
+              outputs: outs,
               finishedAt: Date.now(),
             });
-            return r.outputs?.[0] ?? r;
+            return outs[0] ?? r;
           });
         } catch { /* runGeneration 内部已记录失败 */ }
       })();
@@ -1018,14 +1316,45 @@ export async function handleApi(req, res) {
       const saved = [];
       for (const f of files) {
         try {
-          saved.push(await ctx.assets.saveUploaded(f.data, {
+          const item = await ctx.assets.saveUploaded(f.data, {
             filename: f.filename,
             type: fields.type,
             name: fields.name || f.filename,
             projectId: fields.projectId,
             tag: fields.tag,
             note: fields.note,
-          }));
+          });
+
+          // 上传后立刻探测媒体信息（时长 / 是否有音轨 / 分辨率）。
+          // 这样前端不用等到渲染时才发现"这段视频其实没有音轨"。
+          if (item.kind === 'video' || item.kind === 'audio') {
+            try {
+              const abs = safeJoin(cfg.dataDir, item.rel);
+              const probe = await probeMedia(abs, cfg);
+              if (probe.ok) {
+                const enriched = {
+                  ...item,
+                  durationSec: probe.durationSec,
+                  hasAudio: probe.hasAudio,
+                  mediaWidth: probe.width,
+                  mediaHeight: probe.height,
+                  fps: probe.fps,
+                  codecs: { video: probe.videoCodec, audio: probe.audioCodec },
+                  dataJson: JSON.stringify({
+                    durationSec: probe.durationSec,
+                    hasAudio: probe.hasAudio,
+                    width: probe.width,
+                    height: probe.height,
+                    fps: probe.fps,
+                  }),
+                };
+                await ctx.assets.upsertRaw(enriched);
+                saved.push(enriched);
+                continue;
+              }
+            } catch { /* 探测失败不影响上传 */ }
+          }
+          saved.push(item);
         } catch (e) {
           return sendJson(res, 400, { error: String(e.message || e), file: f.filename });
         }
@@ -1140,14 +1469,7 @@ export async function handleApi(req, res) {
       return sendJson(res, 200, await ctx.post.qc(body.path ?? body.input));
     }
     if (req.method === 'GET' && route === '/post/fonts') {
-      // 中文标注需要字体文件；给出候选列表供前端选择
-      const candidates = [
-        'C:/Windows/Fonts/msyh.ttc',
-        'C:/Windows/Fonts/simhei.ttf',
-        'C:/Windows/Fonts/simsun.ttc',
-        'C:/Windows/Fonts/msyhbd.ttc',
-      ].filter((f) => fs.existsSync(f));
-      return sendJson(res, 200, { fonts: candidates });
+      return sendJson(res, 200, { fonts: listChineseFonts() });
     }
 
     return sendJson(res, 404, { error: `UNKNOWN_ROUTE: ${req.method} ${route}` });
@@ -1158,6 +1480,264 @@ export async function handleApi(req, res) {
 }
 
 /* ------------------------------------------------------------ 辅助实现 */
+
+/**
+ * 批量出图（漫画逐格 / 模特套图）的产物归档。
+ *
+ * 这两条链路不走 `runJob`（在循环里直接调 runH3ImageLocal），所以
+ * `runAndArchive` 覆盖不到。抽一个共用函数，两处复用。
+ *
+ * 失败不抛：产物已经生成，归档只是"让它进素材库"，属于可接受的降级。
+ *
+ * @returns {object|null} 归档后的素材项；失败返回 null
+ */
+async function archiveBatchOutput(ctx, cfg, output, opts = {}) {
+  if (!output?.path) return null;
+  try {
+    return await ctx.assets.archiveFile(output.path, {
+      type: opts.type ?? 'general',
+      name: opts.name ?? path.basename(output.path),
+      projectId: opts.projectId ?? null,
+      tag: opts.tag ?? 'auto-archived',
+      note: opts.note ?? '',
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 跑一个任务，成功后把产物**自动归档进素材库**。
+ *
+ * 为什么需要：生成产物落在 `data/outputs/`（临时区），画布产物写回节点后
+ * 就没人管了；渲染页、素材库都看不到。"画布 ↔ 渲染页"打不通的根因就是这个。
+ *
+ * 统一在这里归档，所有生成入口（/generate、/image/generate、
+ * /breakdown/generate、/mw/job/generate、comic/render-panels）自动受益，
+ * 不用每个入口各写一遍。
+ *
+ * 归档失败**不影响任务结果**——产物已经生成，只是没进素材库，属于可接受的降级。
+ */
+function runAndArchive(job, run, ctx) {
+  return runJob(job, async (running) => {
+    const result = await run(running);
+    try {
+      const outs = Array.isArray(result?.outputs) ? result.outputs : [];
+      const archived = [];
+      for (const o of outs) {
+        if (!o?.path) continue;
+        try {
+          const item = await ctx.assets.archiveFile(o.path, {
+            // ASSET_TYPES 白名单里没有 'video'，视频产物用 video_segment
+            // （写 'video' 会被 asset-service 静默降级成 general）
+            type: job.kind === 'image' ? 'general' : 'video_segment',
+            name: `${job.kind === 'image' ? '图' : '片'}_${running.id}`,
+            projectId: job.projectId ?? null,
+            tag: 'auto-archived',
+            note: String(running.prompt ?? '').slice(0, 200),
+          });
+          archived.push({ id: item.id, rel: item.rel, assetId: item.id });
+        } catch { /* 单条失败不阻断 */ }
+      }
+      if (archived.length) {
+        // 把素材 id 附在产物上，前端可直接引用
+        result.outputs = outs.map((o) => {
+          const hit = archived.find((a) => o.path && a.rel && o.path.replace(/\\/g, '/').endsWith(a.rel.split('/').pop()));
+          return hit ? { ...o, assetId: hit.assetId, archivedRel: hit.rel } : o;
+        });
+      }
+    } catch { /* 归档整体失败不影响产物 */ }
+    return result;
+  });
+}
+
+/**
+ * 把项目绑定的角色卡解析进 shot。
+ *
+ * 产出 `shot.characterCards`（含 resolvedImages），供：
+ *   - resolveRefImages 取图（排在最高优先级）
+ *   - injectCardDefinitions 拼文字（算出 <Picture N> 编号）
+ *
+ * 项目级的 cardIds 与镜头级的 shot.cardIds 会合并去重，镜头级优先。
+ */
+/**
+ * 探测结果回写素材库记录。
+ *
+ * 场景：素材是外部放进来 / 从画布产物归档的，上传时没探测过。
+ * 生成时探测到了真实信息，顺手写回，下次读素材库就能直接看到。
+ *
+ * 只在**有变化**时写，避免每次生成都刷一遍 assets-index.json。
+ * 失败静默 —— 探测信息是增强，不是必需。
+ */
+async function writeBackProbe(ctx, cfg, rel, probe) {
+  if (!probe?.ok || !rel) return;
+  try {
+    const all = await ctx.assets.list();
+    const hit = all.find((a) => a.rel === rel);
+    if (!hit) return;
+    const next = {
+      ...hit,
+      hasAudio: probe.hasAudio,
+      durationSec: probe.durationSec,
+      mediaWidth: probe.width,
+      mediaHeight: probe.height,
+      fps: probe.fps,
+    };
+    // 没有实质变化就不写
+    const same = hit.hasAudio === next.hasAudio
+      && hit.durationSec === next.durationSec
+      && hit.mediaWidth === next.mediaWidth
+      && hit.mediaHeight === next.mediaHeight
+      && hit.fps === next.fps;
+    if (same) return;
+    await ctx.assets.upsertRaw(next);
+  } catch { /* 回写失败不影响生成 */ }
+}
+
+/**
+ * 解析请求体里的视频/音频引用（probe 补全 hasAudio / 时长）。
+ *
+ * ⚠️ `/render/plan`、`/render/compile`、`/generate` 三处都必须用这一份逻辑。
+ *    之前 plan/compile 各自直接读 body.videos，没做探测，导致：
+ *      - 预览说"有音轨"，实际生成时按探测结果又变成"无音轨"；
+ *      - 两个入口对同一份输入给出不同的编号。
+ *
+ * @param {object} cfg
+ * @param {Array} rawVideos
+ * @param {Array} rawAudios
+ */
+async function resolveMediaRefs(ctx, cfg, rawVideos = [], rawAudios = []) {
+  const resolveRel = (item) => {
+    if (!item) return '';
+    const rel = typeof item === 'string' ? item : (item.rel ?? '');
+    if (!rel) return '';
+    try { return safeJoin(cfg.dataDir, rel); } catch { return ''; }
+  };
+
+  const videos = [];
+  for (const v of (Array.isArray(rawVideos) ? rawVideos : [])) {
+    const abs = resolveRel(v);
+    if (!abs || !fs.existsSync(abs)) continue;
+    const rel = typeof v === 'string' ? v : (v.rel ?? '');
+    const explicit = typeof v === 'object' && typeof v.hasAudio === 'boolean' ? v.hasAudio : null;
+
+    // 无论调用方有没有给 hasAudio，都要探测 —— 时长、分辨率这些信息总要拿到，
+    // 而且探测结果要回写素材库（见 writeBackProbe）。
+    const probe = await probeMedia(abs, cfg).catch(() => null);
+
+    // ⚠️ hasAudio 必须**探测**，不能默认 true。
+    //    给无音轨的视频硬接一个空 ref_video_audios，模型会收到"有音轨但是空的"，
+    //    效果比不接更差，而且不会报错（静默降级）。
+    //    调用方显式指定时以调用方为准（比如用户手动关掉"带上音轨"）。
+    const hasAudio = explicit === null
+      ? Boolean(probe?.ok && probe.hasAudio)
+      : explicit;
+
+    // 外部放进来/归档的素材可能没有探测信息，顺手补上
+    if (probe?.ok) await writeBackProbe(ctx, cfg, rel, probe);
+
+    videos.push({
+      index: videos.length + 1,
+      abs,
+      rel,
+      name: (typeof v === 'object' && v.name) || path.basename(rel),
+      hasAudio,
+      durationSec: probe?.durationSec ?? null,
+    });
+  }
+
+  const audios = [];
+  for (const a of (Array.isArray(rawAudios) ? rawAudios : [])) {
+    const abs = resolveRel(a);
+    if (!abs || !fs.existsSync(abs)) continue;
+    const rel = typeof a === 'string' ? a : (a.rel ?? '');
+    const probe = await probeMedia(abs, cfg).catch(() => null);
+    if (probe?.ok) await writeBackProbe(ctx, cfg, rel, probe);
+    audios.push({
+      index: audios.length + 1,
+      abs,
+      rel,
+      name: (typeof a === 'object' && a.name) || path.basename(rel),
+      durationSec: probe?.durationSec ?? null,
+    });
+  }
+
+  return { videos, audios };
+}
+
+/**
+ * 把镜头要用的素材解析完整：角色卡 + 参考视频 + 参考音频。
+ *
+ * 为什么放在一处：这三类都来自「素材库/角色卡仓库」，且**编号互相耦合**
+ * （视频自带音轨会占用 <Audio> 序号，见 docs/H3参考输入契约.md）。
+ * 由同一处解析，保证编号一致。
+ *
+ * 输入形态（shot 上的字段，均为 rel 或资产 id）：
+ *   cardIds   → 角色卡 id
+ *   refs.videos → [{ rel|assetId, name, hasAudio }]
+ *   refs.audios → [{ rel|assetId, name }]
+ */
+async function withVaultCards(shot, projectId, ctx, cfg = loadConfig()) {
+  const out = { ...shot, characterCards: [] };
+  try {
+    // ---- 角色卡 ----
+    const projectCards = readProjectCards(projectId, cfg);
+    const shotCards = Array.isArray(shot.cardIds) ? shot.cardIds : [];
+    const ids = [...new Set([...shotCards, ...projectCards])];
+    if (ids.length) {
+      const cards = [];
+      for (const id of ids) {
+        const c = await ctx.vault.get(id).catch(() => null);
+        if (c) cards.push(c);
+      }
+      out.characterCards = cards;
+    }
+    // ---- 视频 / 音频 ----
+    // 与 /render/plan、/render/compile 共用**同一份**解析逻辑，
+    // 否则三个入口会对同一输入给出不同编号（踩过）。
+    const media = await resolveMediaRefs(ctx, cfg, shot?.refs?.videos ?? [], shot?.refs?.audios ?? []);
+    out.videos = media.videos;
+    out.audios = media.audios;
+  } catch {
+    /* 保底：至少保证字段存在 */
+  }
+  return out;
+}
+
+/**
+ * 列出可用的中文字体文件（ffmpeg drawtext 需要真实字体路径）。
+ *
+ * 不再硬编码盘符：用系统字体目录 + 环境变量覆盖，
+ * 这样换机器 / 换平台都不会失效。也可以用 DSH_POST_FONT 显式指定。
+ */
+function listChineseFonts() {
+  const out = [];
+  const push = (p) => {
+    try { if (p && fs.existsSync(p) && !out.includes(p)) out.push(p); } catch { /* ignore */ }
+  };
+
+  if (process.env.DSH_POST_FONT) push(process.env.DSH_POST_FONT);
+
+  const names = [
+    'msyh.ttc', 'msyhbd.ttc', 'simhei.ttf', 'simsun.ttc',   // Windows
+    'PingFang.ttc', 'Hiragino Sans GB.ttc',                 // macOS
+    'NotoSansCJK-Regular.ttc', 'wqy-zenhei.ttc', 'DejaVuSans.ttf', // Linux
+  ];
+  const dirs = [];
+  if (process.env.SystemRoot) dirs.push(path.join(process.env.SystemRoot, 'Fonts'));
+  if (process.env.WINDIR) dirs.push(path.join(process.env.WINDIR, 'Fonts'));
+  dirs.push(
+    '/System/Library/Fonts',
+    '/Library/Fonts',
+    '/usr/share/fonts',
+    '/usr/share/fonts/truetype',
+    '/usr/local/share/fonts',
+  );
+  for (const d of dirs) {
+    for (const n of names) push(path.join(d, n));
+  }
+  return out;
+}
 
 function guardNoToken(req) {
   // /token 只做 Origin 校验，不需要 token
@@ -1232,6 +1812,18 @@ export function upsertShot(projectId, shot) {
   const list = listShots(projectId);
   const next = { ...shot, updatedAt: Date.now() };
   if (!next.id) next.id = newShot().id;
+
+  // ⚠️ validateShot 以前只被 import 从未调用 —— 镜头卡保存不做任何校验，
+  //    9 张参考图上限、时长 1-15s、模式与图数匹配全都不生效。
+  //    这里做**两件事**：把硬约束夹到合法区间（避免下游跑炸），并把警告挂到返回体。
+  const raw = Number(next.durationSec);
+  if (Number.isFinite(raw)) next.durationSec = Math.min(15, Math.max(1, raw));
+  if (Array.isArray(next.refs?.images) && next.refs.images.length > 9) {
+    next.refs = { ...next.refs, images: next.refs.images.slice(0, 9) };
+  }
+  const check = validateShot(next);
+  next.validation = check;
+
   const idx = list.findIndex((s) => s.id === next.id);
   if (idx >= 0) list[idx] = { ...list[idx], ...next };
   else list.push(next);
@@ -1254,14 +1846,36 @@ export function compilePrompt(shot) {
   const useStructured = Boolean(shot.mode || shot.styleId || shot.subjects?.length || shot.h3mode);
   if (useStructured) {
     try {
+      // ⚠️ subjects 优先级：显式 subjects > 角色卡 > 从 description 猜。
+      //    早先只看 shot.subjects，导致用角色卡生成的镜头 **summary 里没有角色名**
+      //    （deriveSummary 拿不到 subjects，拼出「的一段戏。」这种残句）。
+      const cardSubjects = Array.isArray(shot.characterCards)
+        ? shot.characterCards.map((c, i) => ({
+          id: c.id ?? `C${i + 1}`,
+          name: c.name ?? `角色${i + 1}`,
+          pictureIndex: i + 1,
+          traits: Array.isArray(c.traits) ? c.traits.join('、') : (c.traits ?? ''),
+          personality: c.personality ?? '',
+          voiceDesc: c.voiceDesc ?? '',
+        }))
+        : [];
+      const subjects = shot.subjects ?? (cardSubjects.length ? cardSubjects : deriveSubjectsFromShot(shot));
+
       const pkg = toShotInputPackage(shot, {
         styleId: shot.styleId ?? null,
-        subjects: shot.subjects ?? deriveSubjectsFromShot(shot),
+        subjects,
         scenes: shot.scenes ?? undefined,
         seed: shot.seed,
       });
       // 兼容旧字段：description/camera/style 已在 toShotInputPackage 里映射
       if (shot.prompt) pkg.sceneLayout = `${pkg.sceneLayout}\n${shot.prompt}`;
+
+      // ⚠️ 环境声/配乐要显式带过去。
+      //    早先它们被 workbench 的默认值覆盖（"环境底噪" / "N/A"），
+      //    用户在镜头卡里填的真实值根本没进提示词。
+      if (shot.sound) pkg.overall_soundscape = shot.sound;
+      if (shot.music) pkg.non_diegetic_music = shot.music;
+
       const r = compileH3Prompt(pkg);
       if (r.prompt && r.prompt.length > 40) return r.prompt.slice(0, 7000);
     } catch {
@@ -1351,7 +1965,18 @@ async function executeBackend(job, shot, ctx, cfg) {
     return seedance.runSeedance({ cfg, job, shot, prompt });
   }
 
-  return seedance.runMock({ cfg, job, shot, prompt });
+  // ⚠️ 只有显式 backendId === 'mock' 才走 mock。
+  //    修掉"未知 backend 静默降级成 mock"：以前任何拼错的后端名（如写 'h3'
+  //    而不是 'h3-local'）都会落进 mock，生成 ffmpeg 占位视频且状态 completed，
+  //    用户拿到"假视频"还以为成了。
+  if (job.backendId === 'mock') {
+    return seedance.runMock({ cfg, job, shot, prompt });
+  }
+
+  throw new Error(
+    `UNKNOWN_BACKEND: ${JSON.stringify(job.backendId)} 不是有效后端。`
+    + `可选：h3-local / h3-image / seedance-cloud / mock`,
+  );
 }
 
 /** 加载图像生成工作流（带缓存） */
@@ -1364,6 +1989,27 @@ function loadImageWorkflow() {
     _imgWf = JSON.parse(fs.readFileSync(f, 'utf8'));
     return _imgWf;
   } catch { return null; }
+}
+
+/**
+ * 模特工作台 → 参考图。
+ *
+ * 形象库（figures.json）里的形象带封面图片，job 通过 figure/role/model 引用它。
+ * 旧实现从不读这些字段，形象库等于死数据；这里把它接进 characterRefs。
+ */
+function resolveMwFigureRefs(job) {
+  try {
+    const key = job?.figure ?? job?.role ?? job?.model ?? null;
+    if (!key) return [];
+    const figures = ctx.mw?.listFigureItems?.() ?? [];
+    const hit = figures.find((f) => f.id === key || f.name === key);
+    if (!hit) return [];
+    const imgs = [];
+    if (hit.rel) imgs.push(hit.rel);
+    if (hit.imageRel) imgs.push(hit.imageRel);
+    if (Array.isArray(hit.images)) imgs.push(...hit.images.filter(Boolean));
+    return imgs;
+  } catch { return []; }
 }
 
 

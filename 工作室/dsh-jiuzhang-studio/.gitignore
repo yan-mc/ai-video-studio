@@ -12,6 +12,9 @@ data/script/
 data/extras/
 data/previz-shots/
 data/selftest-*/
+data/tmp-inline/
+data/inputs/
+data/vault/
 
 # 仓库里只保留工作流模板
 !data/workflows/

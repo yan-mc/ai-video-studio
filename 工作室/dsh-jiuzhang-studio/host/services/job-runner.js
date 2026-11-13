@@ -6,10 +6,9 @@
  *
  * 并发闸门（本地后端 limit=1）沿用原实现的正确设计：按 jobId 记账、按 backendId 判定。
  */
-import { jobs as jobStore, isLocalBackendOf } from './job-store.js';
+import { jobs as jobStore, isLocalBackendOf, LOCAL_BACKENDS } from './job-store.js';
 import { loadConfig } from '../config.js';
 
-const LOCAL_BACKENDS = new Set(['mock', 'h3-local']);
 const activeLocal = new Set();
 const pending = [];                 // [{ jobId, resolve }]
 const cancelled = new Set();

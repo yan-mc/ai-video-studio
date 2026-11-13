@@ -326,7 +326,11 @@ function sceneLayoutBlock(input, refs) {
 
 /** Ref2VA 六段式 */
 function compileRef2VA({ style, subjects, refs, scenes, soundscape, music, input }) {
-  const summary = input.summary || input.description || deriveSummary(subjects, scenes);
+  // 空字符串也要走兜底：`input.description` 为空时旧写法会生成 "summary:\n\n"，
+  // 等于告诉模型"没有概要"，实测会让角色定义段失去上下文。
+  const summary = (String(input.summary ?? '').trim())
+    || (String(input.description ?? '').trim())
+    || deriveSummary(subjects, scenes);
   const retention = input.retention_analysis || deriveRetention(subjects, refs);
   return [
     styleBlock(style),
@@ -444,6 +448,20 @@ function deriveRetention(subjects, refs) {
 /** 把内部 shot 结构转成 H3 镜头输入包（对齐 schema） */
 export function toShotInputPackage(shot, opts = {}) {
   const mode = shot.mode ?? opts.mode ?? 'ref2va';
+  // 角色卡 → subjects：让 subject_definitions 自动带上卡的文字设定。
+  // pictureIndex 按卡在 refList 里的实际位置算（见 generator.js 的编号规则），
+  // 这里用卡自身的 resolvedImages 顺序占位，最终以 generator 注入的为准。
+  const cardSubjects = Array.isArray(shot.characterCards)
+    ? shot.characterCards.map((c, i) => ({
+      id: c.id ?? `C${i + 1}`,
+      name: c.name ?? `角色${i + 1}`,
+      pictureIndex: Number(opts.pictureIndexBase ?? 1) + i,
+      traits: Array.isArray(c.traits) ? c.traits.join('、') : (c.traits ?? ''),
+      personality: c.personality ?? '',
+      voiceDesc: c.voiceDesc ?? '',
+      heightCm: null,
+    }))
+    : [];
   return {
     shot_id: shot.id ?? opts.shotId ?? 'unknown',
     mode,
@@ -452,7 +470,7 @@ export function toShotInputPackage(shot, opts = {}) {
     canvas: opts.canvas ?? [864, 480],
     style: shot.style ?? '',
     styleId: opts.styleId ?? shot.styleId ?? null,
-    subjects: opts.subjects ?? [],
+    subjects: opts.subjects ?? cardSubjects,
     references: {
       images: shot.refs?.images ?? [],
       videos: shot.refs?.videos ?? [],

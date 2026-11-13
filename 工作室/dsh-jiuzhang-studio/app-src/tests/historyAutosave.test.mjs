@@ -314,3 +314,49 @@ test('buildPayload：viewport 缺省填 null（可 JSON 序列化）', () => {
   assert.equal(p.nodeCount, 0);
   assert.doesNotThrow(() => JSON.stringify(p));
 });
+/* ============================================================
+ * 回归：撤销栈必须存「编辑前」的状态
+ *
+ * 历史缺陷（用户报告"Crtl+Z 点了没反应"）：
+ *   commitGraph 先把 nodesRef 指向新状态，再 pushHistory(nextNodes…)，
+ *   于是栈里存的是编辑**后**的状态；undo() 弹出的正是当前画面本身
+ *   → 第一次撤销毫无变化，第二次才动，初始状态永久丢失。
+ *   这里用与 commitGraph 相同的调用顺序做行为断言。
+ * ============================================================ */
+
+test('撤销栈语义：push 的是编辑前状态，撤销一次即回到前一版', () => {
+  const h = new HistoryStack();
+  // 模拟 commitGraph：push(旧状态) 之后才应用新状态
+  let current = snap('A');
+  const commit = (next) => {
+    h.push(current, null);
+    current = snap(next);
+  };
+
+  commit('B');
+  commit('C');
+  assert.equal(current.label, 'C');
+
+  // 第一次撤销 → 必须回到 B（而不是"留在 C"）
+  let prev = h.undo(current);
+  assert.equal(prev?.label, 'B', `第一次撤销应回到 B，实际 ${prev?.label}`);
+  current = prev;
+
+  prev = h.undo(current);
+  assert.equal(prev?.label, 'A', `第二次撤销应回到 A，实际 ${prev?.label}`);
+  current = prev;
+
+  assert.equal(h.undo(current), null, '初始状态之后应无更多历史');
+});
+
+test('合并窗口内保留最早的撤销目标（连续输入不丢初态）', () => {
+  const h = new HistoryStack();
+  let current = snap('A');
+  // 同一 key、窗口内连续编辑：只应记录一次，且保留最早的 A
+  for (const next of ['B', 'C', 'D']) {
+    h.push(current, 'data:n1');
+    current = snap(next);
+  }
+  const prev = h.undo(current);
+  assert.equal(prev?.label, 'A', `连续编辑后撤销应回到初始 A，实际 ${prev?.label}`);
+});

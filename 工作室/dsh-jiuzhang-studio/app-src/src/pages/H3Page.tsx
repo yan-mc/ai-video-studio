@@ -5,10 +5,10 @@
  * 参数默认值对齐 host/services/h3-workshop.js 的 analyze 校验：
  *   episode 必须 >= 1 的整数；durationMin/Max 在 1—600 且 min <= max。
  */
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 
 import { api, describeError } from '../api/client';
-import type { H3Analysis, H3AnalyzeInput, H3FilmStatus } from '../api/types';
+import type { H3Analysis, H3AnalyzeInput } from '../api/types';
 import { useProjectStore, useUiStore } from '../store';
 import {
   Alert,
@@ -19,9 +19,6 @@ import {
   Icon,
   Input,
   KeyValue,
-  Loading,
-  Meter,
-  Page,
   Panel,
   Select,
   Tabs,
@@ -30,7 +27,6 @@ import {
 } from '../ui';
 import { useToast } from '../ui/Toast';
 
-type H3Tab = 'workshop' | 'film';
 type SourceKind = 'paste' | 'dir';
 
 const ASPECTS = ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'] as const;
@@ -47,7 +43,7 @@ const PLATFORMS = [
   { value: 'youtube', label: 'YouTube' },
 ] as const;
 
-export function H3Page() {
+export function ScriptAnalyzerPanel() {
   const t = useT();
   const toast = useToast();
 
@@ -59,28 +55,14 @@ export function H3Page() {
   const selectProject = useProjectStore((s) => s.selectProject);
   const profileOptions = useProjectStore((s) => s.profileOptions);
 
-  const [tab, setTab] = useState<H3Tab>('workshop');
-
+  
   /* 分析状态 */
   const [analysis, setAnalysis] = useState<H3Analysis | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState('');
 
-  /* 成片状态 */
-  const [filmStatus, setFilmStatus] = useState<H3FilmStatus | null>(null);
-  const [filmInputs, setFilmInputs] = useState('');
-  const [filmOutput, setFilmOutput] = useState('');
-  const [filmSubtitle, setFilmSubtitle] = useState('');
-  const [filmRendering, setFilmRendering] = useState(false);
-  const [filmError, setFilmError] = useState('');
 
-  useEffect(() => {
-    void api
-      .h3FilmStatus()
-      .then(setFilmStatus)
-      .catch(() => setFilmStatus(null));
-  }, []);
 
   /* ------------------------------- 分析 ------------------------------- */
   async function handleAnalyze() {
@@ -151,64 +133,22 @@ export function H3Page() {
     }
   }
 
-  /* ------------------------------- 成片 ------------------------------- */
-  async function handleFilmRender() {
-    setFilmError('');
-    const inputs = filmInputs
-      .split('\n')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (inputs.length === 0) {
-      setFilmError(t('h3.filmInputsPlaceholder'));
-      return;
-    }
-    setFilmRendering(true);
-    try {
-      const result = await api.h3FilmRender({
-        inputs,
-        ...(filmOutput.trim() ? { output: filmOutput.trim() } : {}),
-        ...(filmSubtitle.trim() ? { subtitleFile: filmSubtitle.trim() } : {}),
-      });
-      setFilmStatus(result);
-      toast.ok(result.message || t('app.ready'));
-    } catch (err) {
-      setFilmError(describeError(err));
-    } finally {
-      setFilmRendering(false);
-    }
-  }
-
   const profiles = profileOptions();
 
   return (
-    <Page
-      title={t('h3.title')}
-      subtitle={t('h3.subtitle')}
-      actions={
-        <>
-          <Tabs<H3Tab>
-            items={[
-              { value: 'workshop', label: t('h3.title') },
-              { value: 'film', label: t('h3.film') },
-            ]}
-            value={tab}
-            onChange={setTab}
-            ariaLabel={t('h3.title')}
-          />
-          <Select<string>
-            value={currentProjectId ?? ''}
-            onChange={(v) => selectProject(v || null)}
-            options={[
-              { value: '', label: t('app.none') },
-              ...projects.map((p) => ({ value: p.id, label: p.name })),
-            ]}
-            aria-label={t('assets.project')}
-          />
-        </>
-      }
-    >
-      {tab === 'workshop' ? (
-        <div className="jz-split">
+    <div className="jz-col" style={{ gap: 'var(--jz-sp-4)' }}>
+      <div className="jz-row" style={{ justifyContent: 'flex-end', gap: 8 }}>
+        <Select<string>
+          value={currentProjectId ?? ''}
+          onChange={(v) => selectProject(v || null)}
+          options={[
+            { value: '', label: t('app.none') },
+            ...projects.map((p) => ({ value: p.id, label: p.name })),
+          ]}
+          aria-label={t('assets.project')}
+        />
+      </div>
+      <div className="jz-split">
           {/* --------------------------- 参数区 --------------------------- */}
           <div className="jz-col" style={{ gap: 'var(--jz-sp-4)' }}>
             <Panel
@@ -412,103 +352,9 @@ export function H3Page() {
             )}
           </div>
         </div>
-      ) : (
-        /* ----------------------------- 成片工作台 ----------------------------- */
-        <div className="jz-split">
-          <Panel title={t('h3.filmSubtitle')}>
-            <div className="jz-col" style={{ gap: 'var(--jz-sp-3)' }}>
-              <Field label={t('h3.filmInputs')} hint="每行一个绝对路径">
-                <Textarea
-                  value={filmInputs}
-                  onChange={(e) => setFilmInputs(e.target.value)}
-                  placeholder={t('h3.filmInputsPlaceholder')}
-                  mono
-                  minRows={6}
-                />
-              </Field>
-              <Field label={t('h3.filmOutput')}>
-                <Input
-                  value={filmOutput}
-                  onChange={(e) => setFilmOutput(e.target.value)}
-                  placeholder="film.mp4"
-                  mono
-                />
-              </Field>
-              <Field label={t('h3.filmSubtitleFile')}>
-                <Input
-                  value={filmSubtitle}
-                  onChange={(e) => setFilmSubtitle(e.target.value)}
-                  placeholder="subtitles.srt"
-                  mono
-                />
-              </Field>
-
-              {filmError ? <Alert tone="danger">{filmError}</Alert> : null}
-
-              <Button
-                variant="primary"
-                loading={filmRendering}
-                icon={<Icon name="play" size={15} />}
-                onClick={() => void handleFilmRender()}
-              >
-                {filmRendering ? t('h3.filmRendering') : t('h3.filmRender')}
-              </Button>
-            </div>
-          </Panel>
-
-          <Panel title={t('h3.filmStatus')}>
-            {filmStatus ? (
-              <div className="jz-col" style={{ gap: 'var(--jz-sp-3)' }}>
-                <div className="jz-row">
-                  <Badge tone={filmStatus.ffmpeg === 'ready' ? 'ok' : 'danger'}>
-                    {filmStatus.ffmpeg === 'ready' ? t('h3.filmReady') : t('h3.filmMissing')}
-                  </Badge>
-                  <span className="jz-spacer" />
-                  <Badge
-                    tone={
-                      filmStatus.status === 'done'
-                        ? 'ok'
-                        : filmStatus.status === 'failed'
-                          ? 'danger'
-                          : filmStatus.status === 'running'
-                            ? 'accent'
-                            : 'default'
-                    }
-                  >
-                    {filmStatus.status}
-                  </Badge>
-                </div>
-                <Meter
-                  value={filmStatus.progress}
-                  label={t('h3.filmProgress')}
-                  showValue
-                  tone={
-                    filmStatus.status === 'failed'
-                      ? 'danger'
-                      : filmStatus.status === 'done'
-                        ? 'ok'
-                        : 'accent'
-                  }
-                />
-                <KeyValue
-                  rows={[
-                    { key: t('h3.filmMessage'), value: filmStatus.message || '—' },
-                    ...(filmStatus.output
-                      ? [{ key: '输出', value: filmStatus.output }]
-                      : []),
-                  ]}
-                />
-              </div>
-            ) : (
-              <Loading text={t('app.loading')} />
-            )}
-          </Panel>
-        </div>
-      )}
-    </Page>
+    </div>
   );
 }
-
 /* ------------------------------------------------------- 分析结果预览 */
 
 function AnalysisPreview({ analysis }: { analysis: H3Analysis }) {
@@ -556,4 +402,4 @@ function AnalysisPreview({ analysis }: { analysis: H3Analysis }) {
   );
 }
 
-export default H3Page;
+export default ScriptAnalyzerPanel;

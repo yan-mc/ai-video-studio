@@ -9,11 +9,12 @@ export type IconName =
   | 'plus' | 'refresh' | 'search' | 'trash' | 'check' | 'close' | 'chevronDown'
   | 'chevronRight' | 'chevronLeft' | 'play' | 'stop' | 'upload' | 'download'
   | 'folder' | 'file' | 'image' | 'video' | 'audio' | 'cube' | 'text'
-  | 'sun' | 'moon' | 'palette' | 'alert' | 'info' | 'spark' | 'layers'
+  | 'sun' | 'moon' | 'palette' | 'alert' | 'info' | 'spark' | 'layers' | 'users'
   | 'grid' | 'list' | 'external' | 'copy' | 'eye' | 'clock' | 'zap';
 
 const PATHS: Record<IconName, string> = {
   canvas: 'M3 4h7v7H3zM14 4h7v7h-7zM3 14h7v6H3zM14 14h7v6h-7z',
+  users: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75',
   assets: 'M3 5h18v14H3zM3 10h18M9 10v9',
   projects: 'M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
   h3: 'M4 5h16M4 12h10M4 19h13',

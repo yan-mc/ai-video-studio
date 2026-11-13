@@ -6,7 +6,15 @@ import path from 'node:path';
 import { collectionStore } from '../store/json-store.js';
 import { loadConfig } from '../config.js';
 
-const LOCAL_BACKENDS = new Set(['mock', 'h3-local']);
+/**
+ * 走本地 GPU 的后端 —— **单一真源**。
+ *
+ * 12GB 显存跑不了并行，所以这些后端必须串行（见 job-runner 的并发闸门）。
+ * h3-image 与 h3-local 共用同一张卡和同一份文本编码器，漏掉它会：
+ *   · 绕过并发闸门 → 视频与图像同时上卡 → OOM
+ *   · 取消时不被当作本地后端 → 远端 /interrupt 不发出
+ */
+export const LOCAL_BACKENDS = new Set(['mock', 'h3-local', 'h3-image']);
 
 export function isLocalBackendOf(id) { return LOCAL_BACKENDS.has(String(id || '')); }
 

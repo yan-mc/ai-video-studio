@@ -4,25 +4,53 @@
  *  2) 只有 6 个顶级路由，自己解析 20 行就够，少一个依赖。
  *
  * 约定：
- *   地址形如 `#/canvas`、`#/h3`，默认 `#/canvas`。
+ *   地址形如 `#/canvas`、`#/render`，默认 `#/render`。
  *   未知路由回退到 canvas 并在控制台警告（不让用户卡在白屏）。
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-export const ROUTES = ['canvas', 'assets', 'projects', 'h3', 'script', 'comic', 'mw', 'director', 'prompt', 'toolbox', 'image', 'breakdown', 'settings', 'jobs', 'previz'] as const;
+/**
+ * 路由表 —— 按「制作 / 资源 / 工具 / 系统」组织。
+ *
+ * 已移除的路由（保留在文件里做 301 回退，避免旧链接白屏）：
+ *   h3      → 剧本页的"剧本拆解" tab
+ *   prompt  → 渲染页的提示词编辑器
+ *   director→ 3D 预演（与 previz 合并）
+ *   toolbox → 拆散到设置 / 渲染
+ */
+export const ROUTES = [
+  // 制作
+  'render', 'script', 'comic', 'mw',
+  // 资源
+  'assets', 'vault', 'projects',
+  // 工具
+  'breakdown', 'previz', 'canvas', 'image',
+  // 系统
+  'jobs', 'settings',
+] as const;
 export type RouteId = (typeof ROUTES)[number];
 
-export const DEFAULT_ROUTE: RouteId = 'canvas';
+export const DEFAULT_ROUTE: RouteId = 'render';
+
+/** 旧路由 → 新路由（书签兼容） */
+const LEGACY_ROUTES: Record<string, RouteId> = {
+  h3: 'script',
+  prompt: 'render',
+  director: 'previz',
+  toolbox: 'settings',
+};
 
 export function isRouteId(v: string): v is RouteId {
   return (ROUTES as readonly string[]).includes(v);
 }
 
-/** 从 location.hash 解析路由；'#/h3?...' 这类带参形式也支持 */
+/** 从 location.hash 解析路由；旧路由自动映射到新位置 */
 export function parseHash(hash: string): RouteId {
   const raw = hash.replace(/^#/, '').replace(/^\/+/, '');
   const path = raw.split('?')[0]?.split('/')[0] ?? '';
-  return isRouteId(path) ? path : DEFAULT_ROUTE;
+  if (isRouteId(path)) return path;
+  if (LEGACY_ROUTES[path]) return LEGACY_ROUTES[path];
+  return DEFAULT_ROUTE;
 }
 
 export function routeToHash(route: RouteId): string {

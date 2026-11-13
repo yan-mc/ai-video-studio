@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '../api/client';
+import { outputUrl } from '../api/url';
 import {
   Alert, Badge, Button, Field, Icon, Input, Loading, Page, Panel, Select, Textarea, useToast,
 } from '../ui';
@@ -191,10 +192,10 @@ export function ImagePage() {
                       </Badge>
                       {j.outputs?.[0]?.bytes ? <span className="jz-xs jz-muted">{Math.round(j.outputs[0].bytes / 1024)} KB</span> : null}
                     </div>
-                    {j.outputs?.[0]?.path ? (
+                    {j.outputs?.[0] ? (
                       <Button onClick={() => {
-                        const m = String(j.outputs?.[0]?.path).replace(/\\/g, '/').match(/outputs\/(.+)$/);
-                        if (m) setPreview(`/luoshu/api/file?path=${encodeURIComponent(`outputs/${m[1]}`)}`);
+                        const u = outputUrl(j.outputs?.[0]);
+                        if (u) setPreview(u);
                       }}>查看</Button>
                     ) : null}
                   </div>

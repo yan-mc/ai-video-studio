@@ -16,7 +16,10 @@ import path from 'node:path';
 import { loadConfig, resetConfigCache } from './config.js';
 import { handleApi } from './api/index.js';
 import { serveSpa, serveStatic } from './static.js';
-import { recoverInterruptedJobs, runtimeStats } from './services/job-runner.js';
+import { recoverInterruptedJobs, runtimeStats, runJob } from './services/job-runner.js';
+import { jobs as jobsStore, newJob } from './services/job-store.js';
+import { runH3Local, runH3ImageLocal } from './services/generator.js';
+import { buildBreakdownPrompt, breakdownLevel } from './services/breakdown.js';
 import { registerTools } from './tools.js';
 import { createH3Workshop } from './services/h3-workshop.js';
 import { createPrevizController } from './services/previz-controller.js';
@@ -27,6 +30,7 @@ import { createComicService } from './services/comic-service.js';
 import { createModelWorkbench } from './services/model-workbench.js';
 import { createDirectorController } from './services/director3d.js';
 import { createCanvasAgent } from './services/canvas-agent.js';
+import { createVaultService } from './services/character-vault.js';
 import { createExtrasService } from './services/extras.js';
 import { initRuntime, attachControllers, disposeRuntime } from './runtime.js';
 
@@ -38,6 +42,18 @@ const ASSET_PREFIX = '/luoshu/assets';
 
 export function apply(ctx) {
   const root = path.resolve(import.meta.dirname, '..');
+
+  /** 加载 H3-Image 工作流（画布 Agent 的 generate_image 用） */
+  let _imgWf = null;
+  function loadImageWorkflowForGen() {
+    if (_imgWf) return _imgWf;
+    try {
+      const f = path.join(root, 'data', 'workflows', 'h3-image.json');
+      if (!fs.existsSync(f)) return null;
+      _imgWf = JSON.parse(fs.readFileSync(f, 'utf8'));
+      return _imgWf;
+    } catch { return null; }
+  }
 
   /* --------------------------- 运行时初始化 --------------------------- */
 
@@ -53,9 +69,75 @@ export function apply(ctx) {
   const comic = createComicService({ cfg });
   const mw = createModelWorkbench({ cfg });
   const director = createDirectorController({ cfg, root });
-  const canvasAgent = createCanvasAgent({ cfg });
+  const vault = createVaultService({ cfg });
+  const canvasAgent = createCanvasAgent({
+    cfg,
+    // ⚠️ 必须注入 runGenerate：旧实现没传 → generate_image / generate_video
+    //    恒抛 GENERATE_UNAVAILABLE，画布 AI 助手的"花钱"工具全废。
+    runGenerate: async ({ kind, prompt, options = {} }) => {
+      const workflow = kind === 'video' ? h3.loadWorkflow() : loadImageWorkflowForGen();
+      if (!workflow) throw new Error('WORKFLOW_MISSING');
+      const job = newJob({
+        projectId: options.projectId ?? null,
+        shotId: null,
+        backendId: kind === 'video' ? 'h3-local' : 'h3-image',
+        prompt: String(prompt ?? ''),
+        params: {
+          kind,
+          imageSizeId: options.sizeId ?? 'sq-2048',
+          seed: Number.isFinite(Number(options.seed)) ? Number(options.seed) : undefined,
+        },
+        mode: kind === 'video' ? 'ref2va' : 't2i',
+      });
+      if (kind === 'image') job.kind = 'image';
+      await jobsStore().upsert(job);
+      runJob(job, async (running) => (kind === 'video'
+        ? runH3Local({ workflow, job: running, shot: options.shot ?? {}, prompt: String(prompt ?? ''), cfg })
+        : runH3ImageLocal({
+          workflow,
+          job: running,
+          prompt: String(prompt ?? ''),
+          shot: { refs: { images: options.refImages ?? [] }, imageSizeId: options.sizeId ?? 'sq-2048' },
+          cfg,
+        }))).catch(() => {});
+      return { jobId: job.id, status: job.status, backendId: job.backendId };
+    },
+    // 画布 AI 助手调用技能 → 分发到真实服务（旧实现只回一句"已转交"的空壳）
+    runSkill: async ({ skill, args }) => {
+      switch (skill) {
+        case 'script':
+        case 'script-stage': {
+          const projectId = String(args.projectId ?? '');
+          if (!projectId) throw new Error('PROJECT_REQUIRED');
+          const stage = String(args.stage ?? 'outline');
+          return await script.runStage(projectId, stage, args);
+        }
+        case 'script-all': {
+          const projectId = String(args.projectId ?? '');
+          if (!projectId) throw new Error('PROJECT_REQUIRED');
+          return await script.runAll(projectId, args);
+        }
+        case 'comic':
+        case 'comic-plan': {
+          const projectId = String(args.projectId ?? '');
+          if (!projectId) throw new Error('PROJECT_REQUIRED');
+          return await comic.planPrompts(projectId, args);
+        }
+        case 'mw':
+        case 'model-workbench': return mw.createJob(args);
+        case 'prompt':
+        case 'h3-prompt': {
+          const lv = breakdownLevel(args.level ?? 'standard');
+          const prompt = buildBreakdownPrompt(args, lv.id);
+          return { prompt, level: lv.id, chars: prompt.length };
+        }
+        default:
+          throw new Error(`SKILL_NOT_FOUND: 未知技能 ${JSON.stringify(skill)}`);
+      }
+    },
+  });
   const extras = createExtrasService({ cfg });
-  attachControllers({ previz, h3, post, assets, script, comic, mw, director, canvasAgent, extras });
+  attachControllers({ previz, h3, post, assets, script, comic, mw, director, canvasAgent, extras, vault });
 
   /* ---------------------------- HTTP 路由 ---------------------------- */
 

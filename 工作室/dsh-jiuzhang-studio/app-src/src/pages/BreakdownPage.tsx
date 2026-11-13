@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '../api/client';
+import { outputUrl } from '../api/url';
 import {
   Alert, Badge, Button, Field, Icon, Input, Loading, Page, Panel, Select, Tabs, Textarea, useToast,
 } from '../ui';
@@ -129,15 +130,13 @@ export function BreakdownPage() {
     return () => window.clearInterval(timer);
   }, [jobId, toast]);
 
-  if (loading) return <Page title="人设卡拆解"><Loading text="载入中" /></Page>;
+  if (loading) return <Page title="立绘拆解"><Loading text="载入中" /></Page>;
 
-  const previewUrl = result?.path
-    ? `/luoshu/api/file?path=${encodeURIComponent(`outputs/${String(result.path).replace(/\\/g, '/').split('/outputs/').pop()}`)}`
-    : '';
+  const previewUrl = outputUrl(result);
 
   return (
     <Page
-      title="人设卡拆解"
+      title="立绘拆解"
       subtitle="立绘 → 全景式角色概念分解图"
       actions={
         <>
@@ -197,9 +196,9 @@ export function BreakdownPage() {
         {step === 'describe' ? (
           <div className="jz-col" style={{ gap: 'var(--jz-sp-4)' }}>
             <Panel title="角色">
-              <Field label="角色描述" hint="外貌+服装总述，会写进提示词">
+              <Field label="角色名" hint="只作为称呼使用；长相、发型、配色一律以参考图为准，无需用文字描述">
                 <Input value={character} onChange={(e) => setCharacter(e.target.value)}
-                  placeholder="银发蓝眼的少女，穿深蓝色蕾丝长裙礼服" />
+                  placeholder="角色名即可，如：三角初华（不要写外貌，长相交给参考图）" />
               </Field>
               <Field label="补充说明（可选）">
                 <Input value={notes} onChange={(e) => setNotes(e.target.value)}

@@ -230,7 +230,14 @@ export function createH3Workshop({ root, cfg }) {
     return w;
   }
 
-  /** 导入资产库（把 analyze 的结果**真正落盘**到 assets-index） */
+  /**
+   * 导入资产库（把 analyze 的结果**真正落盘**到 assets-index）。
+   *
+   * ⚠️ 这里写入的是**纯文本资产**（kind='text'、rel=null），没有图片文件。
+   *    它们只是「待办事项」：告诉你这一集出现了哪些角色/场景/道具，
+   *    以及推荐的提示词骨架。**本服务不生成任何图片。**
+   *    要得到可用的角色形象，请走「立绘拆解」或「角色卡仓库」。
+   */
   async function importAssets(body = {}) {
     const projectId = body.projectId;
     if (!projectId) throw new Error('noProject');
@@ -267,6 +274,9 @@ export function createH3Workshop({ root, cfg }) {
       projectId,
       episode: analysis.episode,
       persisted: true,
+      // 明确告诉调用方：这些资产没有图片
+      assetsAreTextOnly: true,
+      hint: '导入的是文本资产（无图片）。要得到角色形象请用「立绘拆解」生成，或在「角色卡仓库」里组装角色卡。',
       summary: {
         created: created.length,
         characters: analysis.assets?.characters?.length || 0,
@@ -307,15 +317,27 @@ export function createH3Workshop({ root, cfg }) {
 
       // 写 concat 清单
       const listFile = path.join(outputsDir, `concat_${Date.now()}.txt`);
-      const lines = inputs.map((p) => `file '${path.resolve(p).replace(/'/g, "'\\''")}'`);
+      // ⚠️ 相对路径必须按 dataDir 解析，不能按进程 cwd。
+      //    path.resolve(p) 会用进程工作目录（DSH 的 profile 目录），
+      //    导致找到 C:\Users\…\.dsh\profiles\desktop\outputs\xxx.mp4 这种不存在的路径。
+      //    ffmpeg 对 concat 清单里的相对路径也是相对**清单文件所在目录**解析，
+      //    所以这里统一转成绝对路径。
+      const lines = inputs.map((p) => {
+        const abs = path.isAbsolute(p) ? p : path.join(cfg.dataDir, p);
+        return `file '${abs.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`;
+      });
       fs.writeFileSync(listFile, lines.join('\n'), 'utf8');
       filmTask = { status: 'running', progress: 30, message: '拼接中' };
 
       const args = ['-y', '-f', 'concat', '-safe', '0', '-i', listFile];
 
       // 可选字幕烧录
-      if (body.subtitleFile && fs.existsSync(body.subtitleFile)) {
-        args.push('-vf', `subtitles='${path.resolve(body.subtitleFile).replace(/\\/g, '/').replace(/:/g, '\\:')}'`);
+      // 同样按 dataDir 解析相对路径（理由同上）
+      const subAbs = body.subtitleFile
+        ? (path.isAbsolute(body.subtitleFile) ? body.subtitleFile : path.join(cfg.dataDir, body.subtitleFile))
+        : '';
+      if (subAbs && fs.existsSync(subAbs)) {
+        args.push('-vf', `subtitles='${subAbs.replace(/\\/g, '/').replace(/:/g, '\\:')}'`);
       }
       args.push('-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', outAbs);
 

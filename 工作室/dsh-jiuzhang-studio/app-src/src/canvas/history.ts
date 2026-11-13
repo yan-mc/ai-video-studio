@@ -39,7 +39,13 @@ export class HistoryStack<T> {
 
   /**
    * 压入一份快照。
-   * @param key 合并键；相同 key 且在窗口内不会新增历史条目（只更新栈顶）
+   *
+   * ⚠️ 语义：快照是**这次编辑之前**的状态。
+   *   调用方必须在应用新状态之前，把旧状态交进来。
+   *   历史实现把"编辑后"的状态压进来，于是 undo 弹出的是当前状态本身
+   *   → 第一次撤销画面没有任何变化，第二次才动，且初始状态永久丢失。
+   *
+   * @param key 合并键；相同 key 且在窗口内不新增条目（保留最早的撤销目标）
    */
   push(snapshot: HistorySnapshot<T>, key: string | null = null): void {
     const now = Date.now();
@@ -50,9 +56,7 @@ export class HistoryStack<T> {
     this.lastAt = now;
 
     if (canMerge) {
-      // 合并：替换栈顶（保留更早的状态作为撤销目标）
-      this.past[this.past.length - 1] = snapshot;
-      // 任何新编辑都会让"重做"失效（分支被丢弃）
+      // 合并：**保留栈顶**（连续编辑期间最早的撤销目标不能丢），只让重做失效
       this.future = [];
       return;
     }

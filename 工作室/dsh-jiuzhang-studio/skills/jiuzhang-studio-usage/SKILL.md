@@ -1,6 +1,6 @@
 ---
 name: jiuzhang-studio-usage
-description: 九章工作室插件的完整操作手册，供 AI 代理调用。涵盖 16 个 Agent 工具、104 条 REST 路由、15 个前端页面的调用方式与参数。当需要通过插件生成视频/图像、管理项目资产、做剧本漫画模特、操作 3D 导演台时使用。
+description: 九章工作室插件的完整操作手册，供 AI 代理调用。涵盖 15 个 Agent 工具、108 条 REST 路由、13 个前端页面的调用方式与参数。当需要通过插件生成视频/图像（含参考图/视频/音频）、管理角色卡与素材、做剧本漫画模特、操作 3D 预演时使用。
 ---
 
 # 九章工作室 · 操作手册（AI 调用向）
@@ -14,7 +14,7 @@ description: 九章工作室插件的完整操作手册，供 AI 代理调用。
 
 | 方式 | 适用场景 | 入口 |
 |---|---|---|
-| **Agent 工具** | AI 在对话中直接调用，最简单 | `studio_*` 工具（16 个） |
+| **Agent 工具** | AI 在对话中直接调用，最简单 | `studio_*` 工具（15 个） |
 | **REST API** | 脚本/外部程序调用，粒度最细 | `http://127.0.0.1:<port>/luoshu/api/*` |
 | **前端页面** | 人工操作，可视化 | `http://127.0.0.1:<port>/luoshu/app/` |
 
@@ -28,7 +28,7 @@ const { token } = await (await fetch(`http://127.0.0.1:${port}/luoshu/api/token`
 
 ---
 
-## 1. 16 个 Agent 工具速查
+## 1. 15 个 Agent 工具速查
 
 ### 1.1 基础
 
@@ -42,8 +42,11 @@ const { token } = await (await fetch(`http://127.0.0.1:${port}/luoshu/api/token`
 | 工具 | 关键参数 | 作用 |
 |---|---|---|
 | `studio_project` | `action: list\|create\|get\|update\|delete`, `id`, `patch` | 项目 CRUD |
-| `studio_asset` | `action: list\|get\|upload\|delete`, `type`, `projectId` | 素材管理（15 类资产） |
 | `studio_toolbox` | `domain: promptTemplates\|wardrobe\|importScan\|orphans\|motionShots\|logs\|batchProgress`, `action` | 工具箱 7 个域 |
+
+> **素材没有独立工具**。素材的增删查走 REST：`/assets`、`/assets/upload`、
+> `/assets/archive`、`/assets/delete`。`studio_image` / `studio_generate` 的产物
+> 会自动归档进素材库（带 `assetId`），所以多数场景不需要手动调素材 API。
 
 ### 1.3 镜头与生成
 
@@ -68,7 +71,7 @@ const { token } = await (await fetch(`http://127.0.0.1:${port}/luoshu/api/token`
 
 ---
 
-## 2. REST API 分组（104 条）
+## 2. REST API 分组（108 条）
 
 ### 2.1 基础
 
@@ -123,7 +126,7 @@ POST /luoshu/api/image/generate     {prompt, sizeId, seed, refImages[], projectI
 
 **sizeId**：`auto`（2048²）/ `sq-2048` / `p-4x3` / `l-4x3` / `p-3x4-film` / `v-16x9` / `h-16x9` / `ecom-sq` / `ecom-45` / `comic-page` / `h3-4k-sq` / `h3-4k-169`
 
-### 2.5 人设卡拆解
+### 2.5 立绘拆解
 
 ```
 GET  /luoshu/api/breakdown/meta
@@ -256,42 +259,64 @@ GET  /luoshu/api/post/fonts
 
 ---
 
-## 3. 前端 15 页面对应关系
+## 3. 前端 13 页面对应关系
 
-| 路由 | 页面 | 主要 API |
+按「制作 / 资源 / 工具 / 系统」四组组织。
+
+| 组 | 路由 | 页面 | 主要 API |
+|---|---|---|---|
+| 制作 | `#/render` | **渲染（主入口）** 选角色卡+参考图/视频/音频 → 编译 → 渲染 → 页面内预览；含「成片合成」tab | `/render/plan`、`/render/compile`、`/generate`、`/h3/film/*` |
+| 制作 | `#/script` | 剧本 5 阶段 + **「剧本拆解」tab**（原 H3 工坊） | `/script/*`、`/h3/workshop/*` |
+| 制作 | `#/comic` | 漫画工作台 | `/comic/*` |
+| 制作 | `#/mw` | 模特工作台 | `/mw/*` |
+| 资源 | `#/assets` | 素材库（15 类） | `/assets*` |
+| 资源 | `#/vault` | **角色卡仓库** | `/vault/*` |
+| 资源 | `#/projects` | 项目（含「本项目角色卡」） | `/projects*`、`/projects/:id/cards` |
+| 工具 | `#/breakdown` | **立绘拆解**（原「人设卡」，仅工具本身） | `/breakdown/*` |
+| 工具 | `#/previz` | **3D 预演**（原 3D 导演台 + 预演合并） | `/previz/*`、`/director/*` |
+| 工具 | `#/canvas` | 画布（26 节点 + AI 助手） | `/projects/:id`、`/canvas-agent/*` |
+| 工具 | `#/image` | 图像生成 | `/image/*` |
+| 系统 | `#/jobs` | 任务中心 | `/jobs*` |
+| 系统 | `#/settings` | 设置 8 区 + **「工具」tab**（原工具箱） | `/config`、`/templates`、`/wardrobe` 等 |
+
+**旧路由自动重定向**（书签不会白屏）：`h3→script`、`prompt→render`、`director→previz`、`toolbox→settings`。
+
+### 页面职责的边界（容易搞混的三组）
+
+| 名字相似 | 实际做什么 | 不做什么 |
 |---|---|---|
-| `#/canvas` | 画布（26 节点 + AI 助手） | `/projects/:id`、`/canvas-agent/*`、`/generate`、`/image/generate` |
-| `#/assets` | 素材库（15 类） | `/assets*` |
-| `#/projects` | 项目 | `/projects*` |
-| `#/h3` | H3 工坊 | `/h3/workshop/*`、`/h3/film/*` |
-| `#/script` | 剧本 5 阶段 | `/script/*` |
-| `#/comic` | 漫画工作台 | `/comic/*` |
-| `#/mw` | 模特工作台 | `/mw/*` |
-| `#/director` | 3D 导演台 | `/director/*` |
-| `#/prompt` | 提示词编译 | `/prompt/*` |
-| `#/toolbox` | 工具箱 5 区 | `/templates|wardrobe|import|resources|logs` |
-| `#/image` | 图像生成 | `/image/*` |
-| `#/breakdown` | 人设卡拆解 | `/breakdown/*` |
-| `#/previz` | 六个导演台入口 | `/previz/*` |
-| `#/jobs` | 任务中心 | `/jobs*` |
-| `#/settings` | 设置 8 区 | `/config` |
+| 「H3 工坊」→ 剧本拆解 | 一集剧本 → 中性分段 + 抽角色/场景/道具清单 | **不出任何图**，只产文本 |
+| 「立绘拆解」 | 立绘 → 多视角设定卡图（H3-Image） | 不做剧本分析 |
+| 「角色卡」 | 存设定卡图 + 文字设定，供渲染时引用 | 不生成图 |
+
+
 
 ---
 
 ## 4. 典型调用链
 
-### 4.1 从头做一条视频
+### 4.1 从头做一条视频（推荐路径：走角色卡 + 渲染页那套）
 
 ```
-1) studio_project  {action:'create', patch:{name:'测试'}}          → 得 projectId
-2) studio_asset    {action:'list', type:'character'}                → 找角色参考图
-3) studio_shot     {action:'create', projectId, shot:{title, durationSec:5, mode:'ref2v',
-                     refs:{images:[参考图rel]}, description:'...', camera:'...'}}
-4) studio_prompt   {action:'fromShot', projectId, shotId}           → 先看提示词对不对
-5) studio_generate {projectId, shotId, backend:'h3-local'}          → 得 jobId
-6) studio_jobs     {action:'get', jobId}                            → 轮询到 completed
-7) 产物在 data/outputs/<jobId>.mp4，用 /file?path=outputs/... 取
+1) GET  /vault/cards                                  → 拿已有角色卡 id
+2) POST /render/plan  {cardIds, videos:[{rel}], audios:[{rel}], refImageSize}
+                                                      → ★ 先看「这一镜到底传什么」
+                                                        返回 images[{index,source,cardName}]、
+                                                        videos[{index,audioIndex}]、warnings、stats
+3) POST /render/compile {cardIds, ..., shots:[...]}    → 拿编译好的提示词（含 <Picture N>）
+4) studio_project {action:'create', patch:{name}}      → 得 projectId
+5) POST /projects/:id/cards {cardIds}                  → 项目级绑卡（可选，镜头级也行）
+6) studio_shot {action:'create', projectId, shot:{title, durationSec, mode:'ref2va',
+                  cardIds, refs:{images:[], videos:[{rel,hasAudio}], audios:[]},
+                  refImageSize:'match', sound, music, description, camera}}
+7) studio_generate {projectId, shotId, backend:'h3-local'}   → 得 jobId
+8) studio_jobs {action:'get', jobId}                         → 轮询到 completed
+9) 产物 data/outputs/<jobId>.mp4（**带音轨**），且已自动归档进素材库
 ```
+
+> **务必先调 `/render/plan`**。编号（`<Picture N>` / `<Video K>` / `<Audio J>`）
+> 由后端统一算，自己推极易错 —— 尤其 `<Audio>` 是**全局累加**，
+> 视频自带的音轨会先占号。
 
 ### 4.2 出一张图
 
@@ -301,12 +326,15 @@ GET  /luoshu/api/post/fonts
 3) studio_jobs  {action:'list'}                                     → 查状态
 ```
 
-### 4.3 做人设卡
+### 4.3 做角色卡（立绘 → 拆解 → 入库）
 
 ```
-1) studio_asset {action:'list', type:'character'}                   → 选立绘
-2) 调 REST POST /breakdown/preview {character, outfit[], parts[], level:'standard'}  → 先看提示词
-3) 调 REST POST /breakdown/generate 同上 + refImages + sizeId       → 出图
+1) GET  /assets?type=character                                       → 选立绘
+2) POST /breakdown/preview {character, outfit[], parts[], level}    → 先看提示词
+3) POST /breakdown/generate 同上 + refImages + sizeId               → 出设定卡图
+4) POST /assets/archive {items:[{rel, type:'character_sheet'}]}     → 设定卡入库
+5) POST /vault/cards {name, traits, images:{sheet:[rel], origin:[rel]},
+                      refPolicy:{mode:'sheet-first', maxImages:1}}  → 建卡
 ```
 
 ### 4.4 剧本 → 漫画
@@ -315,19 +343,42 @@ GET  /luoshu/api/post/fonts
 1) studio_script {action:'runAll', projectId, title, premise, genre, episodes:12}
 2) REST POST /comic/extract {projectId, text: <剧本分镜文本>, pages:2, template:'grid_2x2'}
 3) REST POST /comic/plan-prompts {projectId, style, scene}          → 零费用先看
-4) REST POST /comic/render-panels {projectId, sizeId:'sq-2048'}     → 真出图
+4) REST POST /comic/render-panels {projectId, sizeId:'sq-2048'}     → 真出图（自动归档）
 5) REST POST /comic/export/all {projectId}                          → 导出内嵌 SVG
 ```
 
-### 4.5 3D 预演控制构图
+### 4.5 3D 预演：白模 → 参考视频
 
 ```
-1) studio_director {action:'meta'}                                  → 拿 28 运镜 ID
-2) studio_director {action:'command', name:'director_apply_camera',
+1) studio_director {action:'meta'}                                   → 拿 58 动作 / 28 运镜 ID
+2) studio_director {action:'command', name:'director_create_project', args:{name}}
+3) studio_director {action:'command', name:'director_add_element',
+                    args:{kind:'prop', preset:'chair'}}              → 加道具
+4) studio_director {action:'command', name:'director_apply_action',
+                    args:{element_id, shot_id, action:'sit', start_frame:0, duration_frames:96}}
+5) studio_director {action:'command', name:'director_apply_camera',
                     args:{shot_id, move:'push'}}
-3) studio_director {action:'cameraPrompt', shotId}                  → 得「运镜：轨道推近，机位前移」
-4) REST POST /previz-shot/generate {autoCapture:true, prompt:'...'} → 白模变片
+6) REST POST /previz/video {fps:24, width:1280, height:720}          → 渲成白模 mp4
+7) POST /assets/archive {items:[{rel:'previz/xxx/control.mp4',
+                                 type:'video_segment'}]}             → 入库
 ```
+
+> **预演引擎有两个必须知道的坑**（源码没写，实测得出）：
+> 1. `/api/frame?timeSec=` **只对当前激活镜头**做时间插值，不跨镜头查找。
+>    所以每帧前必须 `director_select` 切镜头，否则整段渲染成最后一镜。
+> 2. `elementStates` 在镜头间是**共享**的，`shot_only` 实际不生效。
+>    站位只能全局一致，分镜靠**动作**区分。
+
+### 4.6 成片合成
+
+```
+1) POST /h3/film/render {inputs:['outputs/a.mp4','outputs/b.mp4'],
+                          output:'film.mp4', subtitleFile?}
+2) GET  /h3/film/status                              → 查进度
+```
+
+> `inputs` 里的相对路径按 `dataDir` 解析（不是进程 cwd）。
+> 各段的编码参数需一致才能无损 concat。
 
 ---
 

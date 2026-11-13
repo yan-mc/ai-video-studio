@@ -171,6 +171,8 @@ export interface ShotValidation {
 export interface JobOutput {
   kind?: string;
   path?: string;
+  /** 相对 dataDir 的正斜杠路径；优先用它拼读取地址（path 是绝对路径，跨机无效） */
+  rel?: string;
   url?: string;
   bytes?: number;
   [k: string]: unknown;

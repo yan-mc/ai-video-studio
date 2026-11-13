@@ -47,6 +47,25 @@ export function createDirectorController({ cfg, root }) {
     startedAt: 0,
   };
 
+  // ⚠️ 必须复用 previz-controller 的**同一个实例**。
+  //    previz-controller 把子进程句柄存在闭包里，旧实现在 start()/stop() 里各自
+  //    `createPrevizController(...)` 新建一个 → 新实例的 child 永远是 null，
+  //    stop() 根本停不掉已启动的引擎，却仍返回 {ok:true}。
+  let previzCtl = null;
+  async function sharedPreviz() {
+    if (!previzCtl) {
+      const mod = await import('./previz-controller.js');
+      previzCtl = mod.createPrevizController({ root, cfg });
+    }
+    return previzCtl;
+  }
+
+  /** 引擎地址：跟随配置端口，而不是硬编码 4318 */
+  function baseUrl() {
+    return process.env.PREVIZ_URL || `http://127.0.0.1:${Number(cfg?.previzPort) || 4318}`;
+  }
+  state.base = baseUrl();
+
   /** 低层调用：POST /api/command */
   async function command(name, args = {}, { timeoutMs = 20000 } = {}) {
     const ctrl = new AbortController();
@@ -89,12 +108,10 @@ export function createDirectorController({ cfg, root }) {
     }
   }
 
-  /** 启动引擎（复用 previz-controller 的 spawn 逻辑） */
+  /** 启动引擎（复用共享的 previz-controller 实例） */
   async function start() {
     if (state.running) return { ok: true, ...state };
-    // 委托给 previz-controller 启动（同一份引擎）
-    const previz = await import('./previz-controller.js');
-    const pc = previz.createPrevizController({ root, cfg });
+    const pc = await sharedPreviz();
     const r = await pc.start();
     state.running = Boolean(r?.running ?? true);
     state.pid = r?.pid ?? null;
@@ -103,12 +120,12 @@ export function createDirectorController({ cfg, root }) {
   }
 
   async function stop() {
-    const previz = await import('./previz-controller.js');
-    const pc = previz.createPrevizController({ root, cfg });
-    await pc.stop?.();
+    const pc = await sharedPreviz();
+    const r = await pc.stop?.();
     state.running = false;
     state.pid = null;
-    return { ok: true };
+    state.startedAt = 0;
+    return { ok: true, ...r };
   }
 
   /* --------------------------------------------------- 编排层（插件价值所在） */

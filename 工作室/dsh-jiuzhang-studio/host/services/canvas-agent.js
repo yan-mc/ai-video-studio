@@ -80,7 +80,7 @@ function text(v) {
  * 注意：不做持久化 —— 画布状态的真相源在前端，
  * 这里只负责「读 + 计算出变更」，把 diff 交回前端应用。
  */
-export function createCanvasAgent({ cfg, getProject, listAssets, runGenerate } = {}) {
+export function createCanvasAgent({ cfg, getProject, listAssets, runGenerate, runSkill } = {}) {
   /** 权限检查 */
   function need(perm, granted) {
     if (!perm) return;
@@ -291,11 +291,12 @@ export function createCanvasAgent({ cfg, getProject, listAssets, runGenerate } =
       case 'call_skill': {
         const skill = text(args.skill);
         if (!skill) throw new Error('SKILL_REQUIRED');
-        return {
-          ok: true,
-          result: { skill, note: '技能调用转交对应服务', args: args.arguments ?? {} },
-          diff: { op: 'call_skill', skill },
-        };
+        // 真实分发到对应服务，而不是返回一句"已转交"的空壳。
+        if (typeof runSkill !== 'function') {
+          throw new Error(`SKILL_UNAVAILABLE: 「${skill}」没有可用的服务实现`);
+        }
+        const r = await runSkill({ skill, args: args.arguments ?? {} });
+        return { ok: true, result: r, diff: { op: 'call_skill', skill } };
       }
 
       default:

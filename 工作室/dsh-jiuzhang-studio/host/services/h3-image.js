@@ -67,10 +67,14 @@ export function imageSize(id) {
 /**
  * 推导模型根目录。优先级：
  *  1) 配置里的 imageModelRoot（显式指定）
- *  2) 配置的 comfyInputDir 的兄弟目录 models
- *  3) 从 ComfyUI 实际路径推断（通过其 output 目录反推）
- *  4) 环境变量 H3_MODEL_ROOT
- *  5) 几个常见默认位置
+ *  2) 配置的 comfyInputDir 的兄弟/祖父目录 models
+ *  3) 环境变量 H3_MODEL_ROOT / COMFY_MODEL_ROOT
+ *  4) ComfyUI 的 extra_model_paths / 自身目录反推（通过 comfyUrl 的目录结构）
+ *  5) 从插件自身位置向上找 models / ai-runtime/models
+ *
+ * ⚠️ 这里**不允许**出现硬编码盘符路径。
+ *    旧实现写死了 `F:\AI视频\ai-runtime\models`，一旦换机器/换盘就必然找不到模型，
+ *    而且用户无从得知为什么 —— 属于典型的"在本机能用、发给别人就废"。
  */
 export function resolveModelRoot(cfg = loadConfig()) {
   const candidates = [];
@@ -82,12 +86,17 @@ export function resolveModelRoot(cfg = loadConfig()) {
     candidates.push(path.resolve(cfg.comfyInputDir, '..', '..', 'models'));
   }
 
-  if (process.env.H3_MODEL_ROOT) candidates.push(process.env.H3_MODEL_ROOT);
+  for (const envKey of ['H3_MODEL_ROOT', 'COMFY_MODEL_ROOT', 'COMFYUI_MODEL_ROOT']) {
+    const v = process.env[envKey];
+    if (v) candidates.push(v);
+  }
 
-  // 常见布局
-  candidates.push('F:\\AI视频\\ai-runtime\\models');
+  // 从 ComfyUI 的 input 目录反推（用户只需配 comfyInputDir 一处）
+  if (cfg.comfyInputDir) {
+    candidates.push(path.resolve(cfg.comfyInputDir, '..', 'models'));
+  }
 
-  // 从插件自身位置向上找 ai-runtime/models（插件可能放在任意位置）
+  // 从插件自身位置向上找（插件可能放在任意位置）
   try {
     const here = import.meta.dirname;   // .../host/services
     let dir = here;
@@ -95,6 +104,7 @@ export function resolveModelRoot(cfg = loadConfig()) {
       dir = path.dirname(dir);
       candidates.push(path.join(dir, 'models'));
       candidates.push(path.join(dir, 'ai-runtime', 'models'));
+      candidates.push(path.join(dir, 'ComfyUI', 'models'));
     }
   } catch { /* ignore */ }
 
@@ -169,15 +179,46 @@ export function checkImageModels(cfg = loadConfig()) {
 }
 
 /**
- * 出图提示词规整：H3-Image 吃长提示词（最长 4096 token），
- * 且**无负面提示词**——"不要 X" 要改写成正向约束。
+ * 出图提示词 → 最终提交文本（**传输层清洗**，不改写语义）。
+ *
+ * 这里只做三件事，都是"把文本安全地送进编码器"的必需品：
+ *   1. 去掉 Markdown 记号 —— `**粗体**`、`### 标题`、行内 `代码` 是给人看的排版，
+ *      送进模型会变成无意义字符，还会挤占 token 预算。
+ *   2. 压缩空白 —— 多个空行/行尾空格对生成没有帮助，只会让段落结构变糊。
+ *   3. 按 4096 token 的输入上限截断（模型硬约束）。
+ *
+ * ⚠️ **不做语义改写。**
+ *    曾有实现把「不要 X」正则替换成「避免 X」，依据是"H3-Image 无负面提示词"。
+ *    这个依据是错的：`MiniMaxH3ImageConditioning` 根本没有 negative 输入通道
+ *    （见 /object_info），prompt 是自由文本，编码器正常理解"不要/禁止"。
+ *    而且正则 `[^\s，。；,.;]{1,12}` 只能吃到短词，同一句里长词漏改，
+ *    结果出现「避免美化、不要改动设计」这种自相矛盾的句子 —— 比不改更糟。
+ *
+ * @param {string} prompt
+ * @param {{maxChars?: number}} [opts]
  */
-export function normalizeImagePrompt(prompt) {
-  let p = String(prompt ?? '').trim();
-  // 把常见否定句改成正向描述（模型不支持负面提示词）
-  p = p.replace(/不要([^\s，。；,.;]{1,12})/g, '避免$1');
-  p = p.replace(/禁止([^\s，。；,.;]{1,12})/g, '不出现$1');
-  return p.slice(0, 4096);
+export function normalizeImagePrompt(prompt, opts = {}) {
+  const maxChars = Number.isFinite(opts.maxChars) ? opts.maxChars : 4096;
+  let p = String(prompt ?? '');
+
+  // 1) Markdown → 纯文本
+  p = p
+    .replace(/\*\*([^*]+)\*\*/g, '$1')      // **bold**
+    .replace(/__([^_]+)__/g, '$1')          // __bold__
+    .replace(/`([^`]+)`/g, '$1')            // `code`
+    .replace(/^#{1,6}\s+/gm, '')            // # 标题
+    .replace(/^\s*[-*+]\s+/gm, '- ')        // 统一列表符号
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')   // 图片
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1'); // 链接留文字
+
+  // 2) 空白
+  p = p.replace(/\r\n/g, '\n')
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  // 3) 截断（按字符保守取，4096 token 远大于 4096 中文字符）
+  return p.slice(0, maxChars);
 }
 
 /**
@@ -205,9 +246,10 @@ export async function runH3Image({
   const W = Number.isFinite(Number(width)) && Number(width) > 0 ? Math.round(Number(width) / 32) * 32 : size.w;
   const H = Number.isFinite(Number(height)) && Number(height) > 0 ? Math.round(Number(height) / 32) * 32 : size.h;
 
-  // 参考图 → ComfyUI input（编辑模式）
+  // 参考图 → ComfyUI（编辑模式）。必须 await：图片没送进去就直接报错，
+  // 不能像旧实现那样静默退化成纯文生图。
   const staged = refImages.length
-    ? comfy.stageToComfyInput(
+    ? await comfy.stageToComfyInput(
       cfg,
       Object.fromEntries(refImages.map((abs, i) => [`{{IMG_REF_${i + 1}}}`, abs])),
       job.id,

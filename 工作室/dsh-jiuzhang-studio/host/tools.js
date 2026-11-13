@@ -61,14 +61,21 @@ export function registerTools(ctx) {
   const disposers = [];
 
   /**
-   * 幂等注册：一次失败的重载可能把上一次的注册留在 registry 里，
-   * 直接再 register 会报 "already registered"。这里先探一下同名工具，
-   * 已存在就跳过（那必然是本插件上一次注册的）。
+   * 幂等注册。
+   *
+   * 两点都修过：
+   *  1) 用本地 Set 去重，不再依赖 `ctx.tools.get` 是否存在 ——
+   *     某些 DSH 版本没有 `get`，旧实现探不到就会重复 register 并抛
+   *     "already registered"，连带整个 registerTools 失败（所有 studio_* 工具全没）。
+   *  2) 同名工具只保留第一次注册的；调用方要保证名字唯一（见下方 studio_prompt 合并）。
    */
+  const registered = new Set();
   const reg = (def) => {
-    try {
-      if (typeof ctx.tools.get === 'function' && ctx.tools.get(def.name)) return () => {};
-    } catch { /* get 可能不可用，忽略 */ }
+    if (registered.has(def.name)) {
+      // 静默跳过是旧 bug 的温床（六段式编译器就是这样被吃掉的）——这里直接报出来
+      throw new Error(`DUPLICATE_TOOL: ${def.name} 被注册了两次，请合并为单一定义`);
+    }
+    registered.add(def.name);
     return ctx.tools.register(def);
   };
 
@@ -176,27 +183,80 @@ export function registerTools(ctx) {
     },
   )));
 
-  /* ---------------------------------------------------------- 提示词 */
+  /* ---------------------------------------------------------- 提示词（已合并） */
+  // ⚠️ 原有两个 `studio_prompt`：早期这个简化版先注册，后面功能完整的六段式
+  //    编译器（action=meta|compile|fromShot）被幂等逻辑静默跳过 → 永远不可达。
+  //    现在合并成一个：保留六段式编译器的完整能力，同时兼容旧的
+  //    `{projectId, shotId}` 无 action 调用（等价于 fromShot 的简化输出）。
   disposers.push(reg(tool(
     'studio_prompt',
-    '编译镜头的 H3 提示词，并返回分辨率与帧数建议。',
+    'H3 提示词编译：按官方六段式(Ref2VA)/三段式(T2VA)规范生成结构化提示词。'
+    + 'action=meta 取画风库与模式；compile 直接编译；fromShot 从镜头卡编译；'
+    + '不带 action 时按 {projectId, shotId} 返回提示词 + 分辨率 + 帧数（兼容旧调用）。',
     {
       type: 'object',
       properties: {
+        action: { type: 'string', enum: ['meta', 'compile', 'fromShot'] },
         projectId: { type: 'string' },
         shotId: { type: 'string' },
+        mode: { type: 'string', enum: ['t2va', 'i2va', 'fl2va', 'l2va', 'ref2va'] },
+        styleId: { type: 'string', description: '画风 id（见 meta）' },
+        styleEn: { type: 'string', description: '自定义英文画风描述' },
+        durationSec: { type: 'number' },
+        sceneLayout: { type: 'string' },
+        subjects: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              name: { type: 'string' },
+              pictureIndex: { type: 'number' },
+              gender: { type: 'string' },
+              heightCm: { type: 'number' },
+              traits: { type: 'string' },
+              personality: { type: 'string' },
+              voiceDesc: { type: 'string' },
+              audioIndex: { type: 'number' },
+            },
+          },
+        },
+        shots: { type: 'array', items: { type: 'object' } },
+        references: { type: 'object' },
+        overall_soundscape: { type: 'string' },
+        non_diegetic_music: { type: 'string' },
+        summary: { type: 'string' },
       },
-      required: ['projectId', 'shotId'],
+      required: [],
       additionalProperties: false,
     },
-    async (args) => {
-      const shot = listShots(args.projectId).find((s) => s.id === args.shotId);
+    async (a) => {
+      if (a.action === 'meta') {
+        return { styles: STYLE_PRESETS, modes: H3_MODES, limits: H3_LIMITS };
+      }
+      if (a.action === 'compile') {
+        const { action, projectId, shotId, ...rest } = a;
+        void action; void projectId; void shotId;
+        return compileH3Prompt(rest);
+      }
+      // fromShot + 无 action 的兼容路径
+      if (!a.projectId || !a.shotId) throw new Error('PROJECT_AND_SHOT_REQUIRED');
+      const shot = listShots(a.projectId).find((s) => s.id === a.shotId);
       if (!shot) throw new Error('SHOT_NOT_FOUND');
-      return ({
-        prompt: compilePrompt(shot),
+      const pkg = toShotInputPackage(shot, {
+        styleId: a.styleId ?? shot.styleId ?? null,
+        subjects: a.subjects,
+        scenes: a.shots,
+      });
+      const compiled = compileH3Prompt(pkg);
+      // 兼容旧返回：附上分辨率与帧数建议
+      return {
+        ...compiled,
+        prompt: compiled.prompt || compilePrompt(shot),
         resolution: resolutionFor(shot.profile, shot.ratio),
         h3Length: h3Length(shot.durationSec),
-      });
+        package: pkg,
+      };
     },
   )));
 
@@ -272,7 +332,11 @@ export function registerTools(ctx) {
       if (args.action === 'get') return (await jobsStore().get(args.jobId));
       if (args.action === 'cancel') {
         return (await cancelJob(args.jobId, async (job) => {
-          if (job.remoteId) await comfy.cancelRemote(loadConfig(), job.remoteId);
+          // 与 API 层保持一致：只有真正提交到 ComfyUI 的本地后端才有远端可取消。
+          // 旧实现在这里不校验 backendId，对 mock / seedance 也会去调 /interrupt。
+          if (job.remoteId && isLocalBackendOf(job.backendId)) {
+            await comfy.cancelRemote(loadConfig(), job.remoteId);
+          }
         }));
       }
       throw new Error('UNKNOWN_ACTION');
@@ -282,7 +346,9 @@ export function registerTools(ctx) {
   /* ---------------------------------------------------------- H3 工坊 */
   disposers.push(reg(tool(
     'studio_h3_workshop',
-    'H3 提示词工坊：把一集剧本分析成中性分段 + 资产提示词。',
+    'H3 提示词工坊：把一集剧本分析成中性分段 + 资产提示词，并可导入资产库。'
+    + '注意：本工具**只产出文本**（分段、提示词、角色/场景/道具清单），不生成任何图片；'
+    + '要得到角色形象请用 studio_image / 立绘拆解 / 角色卡仓库。',
     {
       type: 'object',
       properties: {
@@ -491,69 +557,6 @@ export function registerTools(ctx) {
         case 'stop': return await z.director.stop();
         default: throw new Error('UNKNOWN_ACTION');
       }
-    },
-  )));
-
-  /* ---------------------------------------------------------- H3 提示词编译 */
-  disposers.push(reg(tool(
-    'studio_prompt',
-    'H3 提示词编译：按官方六段式(Ref2VA)/三段式(T2VA)规范生成结构化提示词。action=meta 取画风库与模式；compile 直接编译；fromShot 从镜头卡编译。',
-    {
-      type: 'object',
-      properties: {
-        action: { type: 'string', enum: ['meta', 'compile', 'fromShot'] },
-        projectId: { type: 'string' },
-        shotId: { type: 'string' },
-        mode: { type: 'string', enum: ['t2va', 'i2va', 'fl2va', 'l2va', 'ref2va'] },
-        styleId: { type: 'string', description: '画风 id（见 meta）' },
-        styleEn: { type: 'string', description: '自定义英文画风描述' },
-        durationSec: { type: 'number' },
-        sceneLayout: { type: 'string' },
-        subjects: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              id: { type: 'string' },
-              name: { type: 'string' },
-              pictureIndex: { type: 'number' },
-              gender: { type: 'string' },
-              heightCm: { type: 'number' },
-              traits: { type: 'string' },
-              personality: { type: 'string' },
-              voiceDesc: { type: 'string' },
-              audioIndex: { type: 'number' },
-            },
-          },
-        },
-        shots: { type: 'array', items: { type: 'object' } },
-        references: { type: 'object' },
-        overall_soundscape: { type: 'string' },
-        non_diegetic_music: { type: 'string' },
-        summary: { type: 'string' },
-      },
-      required: ['action'],
-      additionalProperties: false,
-    },
-    async (a) => {
-      if (a.action === 'meta') {
-        return { styles: STYLE_PRESETS, modes: H3_MODES, limits: H3_LIMITS };
-      }
-      if (a.action === 'compile') {
-        const { action, ...rest } = a;
-        return compileH3Prompt(rest);
-      }
-      if (a.action === 'fromShot') {
-        const shot = listShots(a.projectId || '').find((s) => s.id === a.shotId);
-        if (!shot) throw new Error('SHOT_NOT_FOUND');
-        const pkg = toShotInputPackage(shot, {
-          styleId: a.styleId ?? shot.styleId ?? null,
-          subjects: a.subjects,
-          scenes: a.shots,
-        });
-        return { ...compileH3Prompt(pkg), package: pkg };
-      }
-      throw new Error('UNKNOWN_ACTION');
     },
   )));
 

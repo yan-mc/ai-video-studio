@@ -45,7 +45,7 @@ import {
 
 import { Badge, Button, Icon, IconButton, Spinner, useToast, useT } from '../ui';
 import { useProjectStore } from '../store';
-import { api, describeError } from '../api/client';
+import { api, describeError, uploadAsset } from '../api/client';
 
 import { allNodeTypes } from './nodes';
 import { NODE_TYPE_KEYS, type NodeTypeKey } from './nodeKeys';
@@ -578,13 +578,20 @@ function CanvasInner() {
       nextEdges: CanvasEdgeShape[],
       opts?: { historyKey?: string | null; label?: string; skipHistory?: boolean; skipSave?: boolean },
     ) => {
+      // ⚠️ 压历史的顺序：必须把**编辑前**的图压进去。
+      //    历史实现先写 refs 再 pushHistory(nextNodes…)，压进去的是编辑后的状态，
+      //    undo 弹出的正是当前画面 → 第一次 Ctrl+Z 毫无反应，初始状态永久丢失。
+      if (!opts?.skipHistory) {
+        const before = nodesRef.current;
+        const beforeEdges = edgesRef.current;
+        if (before !== nextNodes || beforeEdges !== nextEdges) {
+          pushHistory(before, beforeEdges, opts?.historyKey ?? null, opts?.label ?? 'edit');
+        }
+      }
       nodesRef.current = nextNodes;
       edgesRef.current = nextEdges;
       setNodes(nextNodes);
       setEdges(nextEdges);
-      if (!opts?.skipHistory) {
-        pushHistory(nextNodes, nextEdges, opts?.historyKey ?? null, opts?.label ?? 'edit');
-      }
       if (!opts?.skipSave) scheduleSave(nextNodes, nextEdges);
     },
     [pushHistory, scheduleSave],
@@ -1050,12 +1057,34 @@ function CanvasInner() {
       input.onchange = () => {
         const file = input.files?.[0];
         if (!file) return;
-        const url = URL.createObjectURL(file);
-        // 关键：一次提交里同时写 result 与 params。
-        // 早期版本分两次 patch 且其中一次把 params 设成 undefined，会把用户已填的
-        // 参数（提示词/模型档位）整片清掉 —— 这是最难查的数据丢失，故合并成一次。
-        patchNodeFile(nodeId, { url, path: file.name }, { sourcePath: file.name });
-        toast.ok(`已载入 ${file.name}`);
+        const blobUrl = URL.createObjectURL(file);
+        // 先只写预览（blob），**不写 sourcePath**。
+        // 关键：修掉"上传失败静默降级"。
+        // 旧实现先写 path: file.name（裸 basename）再异步上传，
+        // 上传失败只弹 toast —— 预览正常（浏览器读 blob），但后端拿到
+        // "立绘.png" 去 safeJoin(dataDir, …) 必然不存在 → 静默丢图，
+        // 而且这个坏值还会被 autosave 存盘。现在失败即回滚成空。
+        patchNodeFile(nodeId, { url: blobUrl, path: file.name }, { sourcePath: '' });
+        toast.info(`正在上传 ${file.name}…`);
+
+        void (async () => {
+          try {
+            const res = await uploadAsset(file, { type: 'general', name: file.name });
+            const saved = res?.saved?.[0];
+            if (!saved?.rel) throw new Error('后端没有返回文件路径');
+            // 成功后写后端可解析的相对路径，并把预览换成同源读取地址
+            patchNodeFile(
+              nodeId,
+              { url: `/luoshu/api/assets/item?id=${encodeURIComponent(saved.id)}`, path: saved.rel },
+              { sourcePath: saved.rel, fileUrl: saved.rel, assetId: saved.id },
+            );
+            toast.ok(`${file.name} 已入库`);
+          } catch (e) {
+            // 回滚：清掉 sourcePath，避免把浏览器本地值当成后端路径用
+            patchNodeFile(nodeId, { url: blobUrl, path: '' }, { sourcePath: '', fileUrl: '' });
+            toast.error(`上传失败，该文件无法用于生成：${describeError(e)}`);
+          }
+        })();
       };
       input.click();
     },

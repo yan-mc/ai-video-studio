@@ -14,8 +14,127 @@ import { cancellableSleep, throwIfCancelled } from './job-runner.js';
 const MAX_POLL = 600;
 const POLL_MS = 3000;
 
+/**
+ * 端口自动发现。
+ *
+ * 背景：Windows 的 Hyper-V / WSL / Docker 会**动态保留**大段 TCP 端口，
+ * 被保留的端口绑定直接报 WinError 10013。而且保留范围每次重启都可能变，
+ * 所以 ComfyUI 的端口**不能写死**，也不能假设上次那个还能用。
+ *
+ * 约定：`ai-runtime/start-h3.ps1` 启动成功后把实际端口写进 `ai-runtime/.comfy-port`。
+ * 这里读它 → 插件自动跟随，用户不需要手改配置。
+ *
+ * 优先级：显式环境变量 > 端口文件 > 配置里的 comfyUrl
+ * （显式指定就是显式指定，不该被文件覆盖）
+ */
+const PORT_FILE_NAMES = ['.comfy-port'];
+
+/**
+ * 候选的 ai-runtime 目录。
+ *
+ * 不精确计算层级（插件可能被 link 到任意位置），改为从插件根向上逐层找
+ * 名为 `ai-runtime` 的兄弟目录：
+ *   <plugin>/host/services → 逐层向上，每层都试 `<dir>/ai-runtime` 与 `<dir>/../ai-runtime`
+ * 这样插件放在 `工作室/` 下、或直接放在工程根下，都能命中。
+ */
+function portFileCandidates() {
+  const out = [];
+  const push = (p) => { if (p && !out.includes(p)) out.push(p); };
+
+  if (process.env.DSH_COMFY_HOME) push(process.env.DSH_COMFY_HOME);
+  if (process.env.H3_HOME) push(process.env.H3_HOME);
+
+  try {
+    let dir = import.meta.dirname;   // <plugin>/host/services
+    for (let i = 0; i < 8; i += 1) {
+      push(path.join(dir, 'ai-runtime'));
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  } catch { /* ignore */ }
+  return out;
+}
+
+/** 读 ai-runtime/.comfy-port，返回 `http://127.0.0.1:<port>` 或空串 */
+export function discoverComfyUrl() {
+  const explicit = process.env.DSH_COMFY_URL || process.env.COMFY_URL;
+  if (explicit) return String(explicit).replace(/\/+$/, '');
+
+  for (const dir of portFileCandidates()) {
+    for (const name of PORT_FILE_NAMES) {
+      try {
+        const f = path.join(dir, name);
+        if (!fs.existsSync(f)) continue;
+        const raw = fs.readFileSync(f, 'utf8').trim();
+        const port = Number(raw);
+        if (Number.isFinite(port) && port > 0 && port < 65536) {
+          return `http://127.0.0.1:${port}`;
+        }
+      } catch { /* ignore */ }
+    }
+  }
+  return '';
+}
+
 function baseUrl(cfg = loadConfig()) {
+  const configured = String(cfg.comfyUrl || '').replace(/\/+$/, '');
+  // 端口文件优先于配置：它反映"当前实际在跑哪个端口"
+  const discovered = discoverComfyUrl();
+  return discovered || configured;
+}
+
+/**
+ * 拿一个**确认可达**的 ComfyUI 地址。
+ *
+ * 为什么需要这一步：端口文件可能是上一次运行的残留（服务已停），
+ * 直接按文件去连会得到 ECONNREFUSED，而用户只会看到"ComfyUI 不可达"，
+ * 根本想不到是端口文件过期。
+ *
+ * 顺序：候选地址逐个探 /system_stats，第一个通的就用。
+ * 候选 = [端口文件, 配置里的 comfyUrl, 常见端口扫描]
+ * 全部不通时返回首选地址（让错误信息指向最可能的那个）。
+ */
+const PROBE_CACHE = { url: '', at: 0 };
+const PROBE_TTL_MS = 5000;
+
+export async function resolveComfyUrl(cfg = loadConfig()) {
+  if (PROBE_CACHE.url && Date.now() - PROBE_CACHE.at < PROBE_TTL_MS) return PROBE_CACHE.url;
+
+  const candidates = [];
+  const push = (u) => {
+    const s = String(u || '').replace(/\/+$/, '');
+    if (s && !candidates.includes(s)) candidates.push(s);
+  };
+  push(discoverComfyUrl());
+  push(configuredUrl(cfg));
+  // 常见端口兜底（脚本挑选的候选段）
+  for (const p of [8488, 8688, 8888, 9088, 9288, 8388, 8188]) push(`http://127.0.0.1:${p}`);
+
+  for (const u of candidates) {
+    try {
+      const res = await fetch(`${u}/system_stats`, { signal: AbortSignal.timeout(1200) });
+      if (res.ok) {
+        PROBE_CACHE.url = u;
+        PROBE_CACHE.at = Date.now();
+        return u;
+      }
+    } catch { /* 继续试下一个 */ }
+  }
+  PROBE_CACHE.url = candidates[0] || '';
+  PROBE_CACHE.at = Date.now();
+  return PROBE_CACHE.url;
+}
+
+/** 只取配置值（不经端口文件） */
+function configuredUrl(cfg = loadConfig()) {
   return String(cfg.comfyUrl || '').replace(/\/+$/, '');
+}
+
+/** 清探测缓存（配置变更后调用） */
+export function resetComfyProbe() {
+  PROBE_CACHE.url = '';
+  PROBE_CACHE.at = 0;
 }
 
 async function getJson(url, opts) {
@@ -27,7 +146,7 @@ async function getJson(url, opts) {
 
 /** 健康检查 */
 export async function health(cfg = loadConfig()) {
-  const url = baseUrl(cfg);
+  const url = await resolveComfyUrl(cfg);
   if (!url) return { ok: false, detail: '未配置 comfyUrl' };
   try {
     const res = await fetch(`${url}/system_stats`, { signal: AbortSignal.timeout(2500) });
@@ -37,25 +156,129 @@ export async function health(cfg = loadConfig()) {
   }
 }
 
+/** 显存信息缓存（避免每次生成都拉一次 system_stats） */
+let vramCache = { at: 0, value: null };
+const VRAM_TTL_MS = 10_000;
+
 /**
- * 把预演产物复制进 ComfyUI 的 input 目录。
- * 文件名带 jobId → 多镜头并发不会互相覆盖（修复 H5）。
+ * 读 ComfyUI 报告的显存状态。
+ *
+ * 用 ComfyUI 自己的 `/system_stats` 而不是 nvidia-smi：
+ *  · 跨平台，不依赖 NVIDIA 驱动工具
+ *  · 反映的是**ComfyUI 这个进程**看到的可用显存，比整卡数字更贴近实际
+ *
+ * @returns {Promise<{ok:boolean, totalBytes:number, freeBytes:number, usedBytes:number, detail?:string}>}
  */
-export function stageToComfyInput(cfg, absPaths, jobId) {
+export async function vramStatus(cfg = loadConfig()) {
+  if (vramCache.value && Date.now() - vramCache.at < VRAM_TTL_MS) return vramCache.value;
+
+  const fallback = { ok: false, totalBytes: 0, freeBytes: 0, usedBytes: 0, detail: '不可用' };
+  const url = await resolveComfyUrl(cfg);
+  if (!url) { vramCache = { at: Date.now(), value: fallback }; return fallback; }
+
+  try {
+    const res = await fetch(`${url}/system_stats`, { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const j = await res.json();
+    const dev = Array.isArray(j?.devices) ? j.devices[0] : null;
+    if (!dev) throw new Error('无设备信息');
+    const totalBytes = Number(dev.vram_total) || 0;
+    const freeBytes = Number(dev.vram_free) || 0;
+    const value = {
+      ok: totalBytes > 0,
+      totalBytes,
+      freeBytes,
+      usedBytes: Math.max(0, totalBytes - freeBytes),
+      device: dev.name ?? '',
+    };
+    vramCache = { at: Date.now(), value };
+    return value;
+  } catch (e) {
+    const value = { ...fallback, detail: String(e?.message || e) };
+    vramCache = { at: Date.now(), value };
+    return value;
+  }
+}
+
+/** 清显存缓存（生成前后可主动调，确保拿到最新值） */
+export function resetVramCache() { vramCache = { at: 0, value: null }; }
+
+/** 上传名只保留安全字符 —— ComfyUI 会把它当文件名落盘。 */
+function safeStem(text) {
+  return String(text).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80) || 'img';
+}
+
+/**
+ * 把本地图片交给 ComfyUI，返回 `{ 占位符: ComfyUI 里的文件名 }`。
+ *
+ * **为什么不再只靠 cfg.comfyInputDir**（曾经的严重缺陷）：
+ *   LoadImage 只认 input 目录里的文件名，所以图片必须先到那里。
+ *   旧实现只在 `cfg.comfyInputDir` 非空且存在时做本地复制，否则**直接返回 {}**，
+ *   于是调用方拿不到名字 → 参考图接线整段被跳过 → 提交给 ComfyUI 的工作流里
+ *   根本没有图（实测：`images.image_1` / `ref_images.ref_image_1` 全缺，
+ *   立绘拆解与视频参考图都退化成纯文生图）。
+ *   而 `comfyInputDir` 默认就是空字符串，等于开箱即坏的静默失效。
+ *
+ * 现在改为优先走 ComfyUI 自己的 `POST /upload/image`：
+ *   - 不依赖插件与 ComfyUI 同机同路径，也不需要用户先配置 input 目录；
+ *   - 上传失败才退回本地复制（保留原有可离线路径）。
+ *
+ * 失败一律抛出，不再静默吞掉——静默正是这个 bug 难查的原因。
+ */
+export async function stageToComfyInput(cfg, absPaths, jobId) {
   const out = {};
+  const entries = Object.entries(absPaths || {}).filter(([, abs]) => abs);
+  if (!entries.length) return out;
+
+  const url = await resolveComfyUrl(cfg);
   const dir = cfg.comfyInputDir;
-  if (!dir || !fs.existsSync(dir)) return out;
   const tag = 'jzpreviz';
-  for (const [key, abs] of Object.entries(absPaths || {})) {
-    if (!abs || !fs.existsSync(abs)) continue;
-    try {
-      const ext = path.extname(abs) || '.png';
-      const stem = path.basename(abs, ext);
-      const name = `${tag}_${jobId}_${stem}${ext}`;
-      const dst = path.join(dir, name);
-      fs.copyFileSync(abs, dst);
-      out[key] = name;             // ComfyUI 的 LoadImage 只认 input 目录内的文件名
-    } catch { /* 单文件失败不阻断 */ }
+  const failures = [];
+
+  for (const [key, abs] of entries) {
+    if (!fs.existsSync(abs)) { failures.push(`${key}: 源文件不存在 ${abs}`); continue; }
+
+    const ext = path.extname(abs) || '.png';
+    const name = `${tag}_${jobId}_${safeStem(path.basename(abs, ext))}${ext}`;
+
+    let landed = false;
+    if (url) {
+      try {
+        const buf = fs.readFileSync(abs);
+        const form = new FormData();
+        form.append('image', new Blob([buf]), name);
+        form.append('overwrite', 'true');
+        form.append('type', 'input');
+        const res = await fetch(`${url}/upload/image`, {
+          method: 'POST',
+          body: form,
+          signal: AbortSignal.timeout(60000),
+        });
+        if (res.ok) {
+          const body = await res.json().catch(() => null);
+          // 服务端可能改名（去重追加序号），以它返回的为准
+          const remote = body?.name ? (body.subfolder ? `${body.subfolder}/${body.name}` : body.name) : '';
+          if (remote) { out[key] = remote; landed = true; }
+        }
+      } catch { /* 落到本地复制回退 */ }
+    }
+
+    if (!landed && dir && fs.existsSync(dir)) {
+      try {
+        fs.copyFileSync(abs, path.join(dir, name));
+        out[key] = name;
+        landed = true;
+      } catch (e) {
+        failures.push(`${key}: 复制进 input 目录失败（${e.message}）`);
+      }
+    }
+    if (!landed && !failures.some((f) => f.startsWith(`${key}:`))) {
+      failures.push(`${key}: 上传失败（comfyUrl=${url || '未配置'}，comfyInputDir=${dir || '未配置'}）`);
+    }
+  }
+
+  if (failures.length) {
+    throw new Error(`COMFY_STAGE_FAILED: 参考图未能送入 ComfyUI → ${failures.join('; ')}`);
   }
   return out;
 }
@@ -79,7 +302,7 @@ export function deepReplace(value, map) {
 /** 提交工作流并轮询，返回产物 */
 export async function runWorkflow({ cfg, workflow, map, job, outputsDir }) {
   const wf = deepReplace(workflow, map);
-  const url = baseUrl(cfg);
+  const url = await resolveComfyUrl(cfg);
   const submitted = await getJson(`${url}/prompt`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -134,6 +357,9 @@ export async function runWorkflow({ cfg, workflow, map, job, outputsDir }) {
       outputs: [{
         role: /\.(mp4|webm|mov)$/i.test(ext) ? 'video' : 'image',
         path: dest,
+        // rel 是相对 dataDir 的路径，前端直接拼 /luoshu/api/file?path=<rel> 即可。
+        // 旧实现只给绝对路径，逼前端用正则从 "…/outputs/xxx.png" 里抠 —— 换机器就废。
+        rel: toRel(cfg, dest),
         bytes: buf.length,
         mime: ext === '.mp4' ? 'video/mp4' : undefined,
       }],
@@ -142,12 +368,22 @@ export async function runWorkflow({ cfg, workflow, map, job, outputsDir }) {
   throw new Error('COMFY_TIMEOUT');
 }
 
+/** 绝对路径 → 相对 dataDir 的正斜杠路径（失败则返回空串，不抛） */
+export function toRel(cfg, abs) {
+  try {
+    const base = path.resolve(cfg.dataDir);
+    const rel = path.relative(base, path.resolve(abs));
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return '';
+    return rel.split(path.sep).join('/');
+  } catch { return ''; }
+}
+
 /**
  * 真取消远端任务（修复原实现"取消只停本地轮询"）。
  * ComfyUI 提供 /interrupt（中断当前执行）与 /queue（删除排队项）。
  */
 export async function cancelRemote(cfg, remoteId) {
-  const url = baseUrl(cfg);
+  const url = await resolveComfyUrl(cfg);
   if (!url) return;
   const errors = [];
   // 1) 从队列里删掉（还在排队的情况）

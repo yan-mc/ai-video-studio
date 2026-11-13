@@ -20,7 +20,18 @@ export function createPostService({ cfg }) {
     return path.join(outDir(), `post_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}${ext}`);
   }
 
-  /** 转码 / 压缩 */
+  const IMAGE_EXT = ['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tif', '.tiff'];
+  const VIDEO_EXT = ['.mp4', '.webm', '.mov', '.gif'];
+
+  /** 输入是图还是视频 —— 决定输出格式与编码参数 */
+  function kindOf(abs) {
+    const ext = path.extname(abs).toLowerCase();
+    if (IMAGE_EXT.includes(ext)) return 'image';
+    if (VIDEO_EXT.includes(ext)) return 'video';
+    return 'unknown';
+  }
+
+  /** 转码 / 压缩（视频） */
   async function transcode({ input, crf = 23, preset = 'veryfast', videoCodec = 'libx264', audioCodec = 'aac', audioBitrate = '128k' }) {
     const abs = resolveInput(input);
     const out = uniqueOut('.mp4');
@@ -33,20 +44,33 @@ export function createPostService({ cfg }) {
     return result(out);
   }
 
-  /** 缩放 */
+  /** 缩放：图片保持图片格式，视频保持视频格式（旧实现一律输出 .mp4） */
   async function scale({ input, width = 1280, height = -2 }) {
     const abs = resolveInput(input);
-    const out = uniqueOut('.mp4');
-    await runProcess(resolveFfmpeg(cfg), [
-      '-y', '-i', abs, '-vf', `scale=${Number(width)}:${Number(height)}`,
-      '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'copy', out,
-    ], 1800000);
+    const kind = kindOf(abs);
+    if (kind === 'unknown') throw new Error(`UNSUPPORTED_FORMAT: ${path.extname(abs)}`);
+    const outExt = kind === 'image'
+      ? (path.extname(abs).toLowerCase() === '.jpg' ? '.jpg' : '.png')
+      : '.mp4';
+    const out = uniqueOut(outExt);
+    const vf = `scale=${Number(width)}:${Number(height)}`;
+    const args = kind === 'image'
+      ? ['-y', '-i', abs, '-vf', vf, out]
+      : ['-y', '-i', abs, '-vf', vf, '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'copy', out];
+    await runProcess(resolveFfmpeg(cfg), args, 1800000);
     return result(out);
   }
 
-  /** 抽帧（单帧 png） */
+  /** 抽帧（单帧 png）—— 只对视频有意义 */
   async function extractFrame({ input, timeSec = 0 }) {
     const abs = resolveInput(input);
+    const kind = kindOf(abs);
+    if (kind !== 'video') {
+      // 旧实现直接扔给 ffmpeg，会冒出内部路径的 ENOENT，用户完全看不懂
+      throw new Error(
+        `NOT_A_VIDEO: 抽帧需要视频输入，当前是 ${kind === 'image' ? '图片' : path.extname(abs)}`,
+      );
+    }
     const out = uniqueOut('.png');
     await runProcess(resolveFfmpeg(cfg), [
       '-y', '-ss', String(Number(timeSec) || 0), '-i', abs, '-frames:v', '1', out,
@@ -169,15 +193,30 @@ export function createPostService({ cfg }) {
     return { ...result(out), fontFile: chosen || null };
   }
 
-  /** 默认中文字体（Windows 自带的微软雅黑） */
+  /**
+   * 默认中文字体。
+   *
+   * 用系统字体目录 + 环境变量覆盖，不硬编码盘符 —— 换机器/换平台仍可用。
+   * 可用 DSH_POST_FONT 显式指定。
+   */
   function defaultFontFile() {
-    const candidates = [
-      'C:/Windows/Fonts/msyh.ttc',
-      'C:/Windows/Fonts/msyhbd.ttc',
-      'C:/Windows/Fonts/simhei.ttf',
-      'C:/Windows/Fonts/simsun.ttc',
+    const names = [
+      'msyh.ttc', 'msyhbd.ttc', 'simhei.ttf', 'simsun.ttc',       // Windows
+      'PingFang.ttc', 'Hiragino Sans GB.ttc',                      // macOS
+      'NotoSansCJK-Regular.ttc', 'wqy-zenhei.ttc',                 // Linux
     ];
-    return candidates.find((f) => fs.existsSync(f)) ?? null;
+    const dirs = [];
+    if (process.env.DSH_POST_FONT && fs.existsSync(process.env.DSH_POST_FONT)) return process.env.DSH_POST_FONT;
+    if (process.env.SystemRoot) dirs.push(path.join(process.env.SystemRoot, 'Fonts'));
+    if (process.env.WINDIR) dirs.push(path.join(process.env.WINDIR, 'Fonts'));
+    dirs.push('/System/Library/Fonts', '/Library/Fonts', '/usr/share/fonts', '/usr/share/fonts/truetype');
+    for (const d of dirs) {
+      for (const n of names) {
+        const p = path.join(d, n);
+        try { if (fs.existsSync(p)) return p; } catch { /* ignore */ }
+      }
+    }
+    return null;
   }
 
   /** 质检（ffprobe） */

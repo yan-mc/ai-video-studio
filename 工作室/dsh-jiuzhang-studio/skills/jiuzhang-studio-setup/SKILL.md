@@ -247,7 +247,7 @@ curl.exe -s http://127.0.0.1:8188/system_stats
 | H3 视频（5 秒，Ref2VA） | 864×480 | 130 秒 | 11.5 GB |
 | H3-Image 文生图 | 2048×2048 | 45-85 秒 | 11.4 GB |
 | H3-Image 文生图 | 1024×1024 | ~9 分钟（含首次加载） | 11.4 GB |
-| 人设卡拆解图 | 2048×2048 | 80-90 秒 | 11.4 GB |
+| 立绘拆解图 | 2048×2048 | 80-90 秒 | 11.4 GB |
 | 漫画单格 | 2048×2048 | 75 秒 | 11.4 GB |
 | 预演白模→成片 | 2048×1344 | 75 秒 | 11.4 GB |
 
@@ -276,6 +276,54 @@ curl.exe -s http://127.0.0.1:8188/system_stats
 | 参考图上限 | Ref2VA 9 张；H3-Image 16 张 | 报错 |
 | 参考视频/音频 | 各 3 段，每段 2-15 秒 | 报错 |
 | 参考文件总数 | ≤ 12 | 报错 |
+| **音轨必须接线** | `SamplerCustomAdvanced → VAEDecodeAudio(audio_vae) → CreateVideo.audio` | **产物静音**（不报错，静默丢失） |
+| **AUTOGROW 用点号路径** | `ref_images.ref_image_1` / `ref_videos.ref_video_1` | 被 ComfyUI **静默忽略** |
+
+### 8.1 音轨丢失（最隐蔽的坑）
+
+H3 是**音画同步模型**：采样器输出的 LATENT 是 AV latent（音视频合一），
+只接视频 `VAEDecode` 会**把音轨整个丢掉**，而且**不报错**。
+
+工作流必须这样接：
+
+```json
+"15": { "class_type": "VAELoader",       "inputs": { "vae_name": "minimax_h3_audio_vae_fp32.safetensors" } },
+"16": { "class_type": "VAEDecodeAudio",  "inputs": { "samples": ["11",0], "vae": ["15",0] } },
+"13": { "class_type": "CreateVideo",     "inputs": { "images": ["12",0], "audio": ["16",0], "fps": 24 } },
+"9":  { "inputs": { "audio_vae": ["15",0], ... } }
+```
+
+验收方法（不要只看文件存在）：
+
+```powershell
+ffprobe -v error -print_format json -show_streams out.mp4
+# 必须同时有 video 和 audio 两条流
+ffmpeg -i out.mp4 -af volumedetect -f null -
+# mean_volume 不能是 -inf（-inf = 纯静音）
+```
+
+### 8.2 AUTOGROW 输入的写法
+
+`ref_images` / `ref_videos` / `ref_video_audios` / `ref_audios` 都是 **Autogrow** 输入，
+必须写成**带点号的平铺键**：
+
+```
+✅ "ref_images.ref_image_1": ["20", 0]
+❌ "ref_images": [["20", 0]]        ← 会被静默忽略，参考图完全不生效
+```
+
+判断是否真的生效：同一 prompt+seed，有无参考图若输出哈希完全相同，说明没接上。
+
+### 8.3 参考视频要拆成帧序列
+
+`ref_videos` 要的是 **IMAGE（帧序列）**，不是 VIDEO。必须转：
+
+```
+LoadVideo(file) → GetVideoComponents ─┬─ 0=IMAGE → ref_videos.ref_video_K
+                                       └─ 1=AUDIO → ref_video_audios.ref_video_audio_K
+```
+
+视频与其音轨**必须同号**（源码按编号配对，不按数组顺序）。
 
 ---
 

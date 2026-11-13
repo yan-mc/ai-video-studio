@@ -79,6 +79,49 @@ export function createAssetService({ cfg }) {
     return item;
   }
 
+  /**
+   * 把**已存在的文件**登记进素材库（复制一份，不动源文件）。
+   *
+   * 用途：生成产物（`data/outputs/`）本来是临时区，画布与渲染页都看不到。
+   * 归档后它变成正式资产，任何页面都能引用。
+   *
+   * 与 saveUploaded 的区别：那个接 Buffer（上传），这个接路径（已有产物）。
+   *
+   * @param {string} absPath 源文件绝对路径
+   * @param {{type?:string,name?:string,projectId?:string,tag?:string,note?:string}} opts
+   */
+  async function archiveFile(absPath, opts = {}) {
+    const src = String(absPath ?? '');
+    if (!src || !fs.existsSync(src)) throw new Error(`SOURCE_NOT_FOUND: ${src}`);
+    const ext = path.extname(src).toLowerCase();
+    if (!ALLOWED_EXT.has(ext)) throw new Error(`UNSUPPORTED_FILE_TYPE: ${ext || '(none)'}`);
+
+    const id = assets.newId();
+    const stored = `${id}${ext}`;
+    const dir = assetRootDir();
+    const abs = safeJoin(dir, stored);
+    fs.copyFileSync(src, abs);
+
+    const type = ASSET_TYPES.includes(opts.type) ? opts.type : 'general';
+    const item = {
+      id,
+      projectId: opts.projectId || null,
+      type,
+      name: String(opts.name || path.basename(src, ext)),
+      originalName: path.basename(src),
+      kind: kindOfExt(ext),
+      rel: path.relative(cfg.dataDir, abs).replace(/\\/g, '/'),
+      bytes: fs.statSync(abs).size,
+      tag: opts.tag || '',
+      note: opts.note || '',
+      dataJson: '{}',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    await assets.upsert(item);
+    return item;
+  }
+
   async function list({ type, projectId } = {}) {
     const all = await assets.list();
     return all.filter((a) => {
@@ -90,6 +133,17 @@ export function createAssetService({ cfg }) {
 
   async function get(id) {
     return assets.get(safeId(id, /^asset_[A-Za-z0-9]+$/));
+  }
+
+  /**
+   * 直接用给定的完整对象覆盖资产记录。
+   *
+   * 用途：上传/归档后补写探测出来的元数据（时长、是否有音轨、分辨率）。
+   * 与 saveUploaded 的区别：那个负责建记录，这个只负责更新已有记录。
+   */
+  async function upsertRaw(item) {
+    if (!item?.id) throw new Error('ASSET_ID_REQUIRED');
+    return assets.upsert({ ...item, updatedAt: Date.now() });
   }
 
   /** 解析资产的可读绝对路径（供静态服务用） */
@@ -113,5 +167,5 @@ export function createAssetService({ cfg }) {
     return { ok: true, removed: safe };
   }
 
-  return { saveUploaded, list, get, resolveFile, remove, kindOfExt };
+  return { saveUploaded, archiveFile, list, get, upsertRaw, resolveFile, remove, kindOfExt };
 }

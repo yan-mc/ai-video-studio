@@ -2,9 +2,9 @@
  * 项目页 —— 列表 / 新建 / 选择 / 删除。
  * 新建只需要名称与分类，其余字段（rootPath/description）选填。
  */
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
-import { describeError } from '../api/client';
+import { api, describeError } from '../api/client';
 import type { ProjectCategory } from '../api/types';
 import { useProjectStore } from '../store';
 import {
@@ -186,7 +186,7 @@ export function ProjectsPage() {
               <Input
                 value={rootPath}
                 onChange={(e) => setRootPath(e.target.value)}
-                placeholder="D:\\作品\\某项目"
+                placeholder="作品\\某项目（也可用绝对路径）"
                 mono
               />
             </Field>
@@ -213,9 +213,137 @@ export function ProjectsPage() {
             </Button>
           </div>
         </Panel>
+
+        {/* --------------------------- 右：本项目角色卡 --------------------------- */}
+        <Panel title="本项目角色卡">
+          <ProjectCardsCard
+            projectId={currentProjectId ?? ''}
+            onSaved={() => { /* 选卡后无需刷新列表 */ }}
+          />
+        </Panel>
       </div>
     </Page>
   );
 }
 
 export default ProjectsPage;
+
+/* ========================================================================== */
+/* 项目 ⇄ 角色卡选择器                                                         */
+/* ========================================================================== */
+
+interface VaultCardLite {
+  id: string; name: string; description: string;
+  imageCount: number; resolvedImages: { slot: string; rel: string }[];
+}
+
+/**
+ * 选本项目要用哪些角色卡。
+ *
+ * 关键：选完立刻显示**参考图预算**（几张 / 上限 9）。
+ * 超限是硬约束——到生成时才报错就太晚了。
+ */
+function ProjectCardsCard({ projectId, onSaved }: { projectId: string; onSaved?: () => void }) {
+  const toast = useToast();
+  const [all, setAll] = useState<VaultCardLite[]>([]);
+  const [picked, setPicked] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [limit, setLimit] = useState(9);
+
+  const load = useCallback(async () => {
+    if (!projectId) { setAll([]); setPicked([]); return; }
+    setLoading(true);
+    try {
+      const [cards, bound, meta] = await Promise.all([
+        api.vaultCards(), api.projectCards(projectId), api.vaultMeta(),
+      ]);
+      setAll(cards as VaultCardLite[]);
+      setPicked(((bound as { cardIds?: string[] }).cardIds ?? []));
+      setLimit((meta as { limits?: { maxRefImages?: number } }).limits?.maxRefImages ?? 9);
+    } catch (e) {
+      toast.error(describeError(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId, toast]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  function toggle(id: string) {
+    setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      await api.saveProjectCards(projectId, picked);
+      toast.ok('已保存本项目的角色卡');
+      onSaved?.();
+    } catch (e) {
+      toast.error(describeError(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const used = all.filter((c) => picked.includes(c.id)).reduce((n, c) => n + c.imageCount, 0);
+  const over = used > limit;
+
+  if (!projectId) {
+    return <div className="jz-sm jz-muted">先在左侧选中一个项目。</div>;
+  }
+  if (loading) return <Loading text="载入角色卡" />;
+
+  return (
+    <div className="jz-col" style={{ gap: 10 }}>
+      <Alert tone={over ? 'danger' : used > limit - 2 ? 'warn' : 'info'}>
+        参考图占用 <b>{used}</b> / {limit} 张
+        {over ? ' —— 超出上限，生成时会被强制裁剪' : ''}
+      </Alert>
+
+      {all.length === 0 ? (
+        <div className="jz-sm jz-muted">
+          仓库里还没有角色卡。去「角色卡」页新建。
+        </div>
+      ) : (
+        <div className="jz-col" style={{ gap: 6, maxHeight: 320, overflow: 'auto' }}>
+          {all.map((c) => {
+            const on = picked.includes(c.id);
+            return (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => toggle(c.id)}
+                className="jz-card"
+                style={{
+                  padding: '8px 10px', textAlign: 'left', cursor: 'pointer',
+                  borderColor: on ? 'var(--jz-accent)' : undefined,
+                  borderWidth: on ? 2 : 1,
+                }}
+              >
+                <div className="jz-row" style={{ justifyContent: 'space-between', gap: 6 }}>
+                  <b className="jz-truncate">{c.name}</b>
+                  <div className="jz-row" style={{ gap: 4 }}>
+                    <Badge>{c.imageCount} 图</Badge>
+                    {on ? <Badge tone="ok">已选</Badge> : null}
+                  </div>
+                </div>
+                <div className="jz-xs jz-muted jz-truncate" style={{ marginTop: 3 }}>
+                  {c.description || '（无描述）'}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      <Button variant="primary" block loading={saving} onClick={() => void save()} disabled={saving}>
+        保存选择
+      </Button>
+      <div className="jz-xs jz-muted">
+        保存后，本项目每个分镜生成时都会自动带上这些角色的图与文字设定。
+      </div>
+    </div>
+  );
+}

@@ -1,12 +1,12 @@
 /**
- * 工具箱页 —— 承载洛书剩余的中小功能域：
+ * 工具箱面板 —— 承载剩余的中小功能域（已并入设置页）：
  *  提示词模板 / 服化道 / 分镜导入 / 资源清理 / 动态条 / 运行日志 / 批量进度
  */
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '../api/client';
 import {
-  Alert, Badge, Button, EmptyState, Field, Icon, Input, Loading, Page, Panel, Select, Tabs, Textarea, useToast,
+  Alert, Badge, Button, EmptyState, Field, Icon, Input, Loading, Panel, Select, Tabs, Textarea, useToast,
 } from '../ui';
 
 interface Template { id: string; name: string; category: string; content: string; custom?: boolean }
@@ -22,7 +22,7 @@ interface BatchProg { total: number; done: number; failed: number; running: numb
 
 type Domain = 'templates' | 'wardrobe' | 'import' | 'resources' | 'logs';
 
-export function ToolboxPage() {
+export function ToolboxPanel() {
   const toast = useToast();
   const [domain, setDomain] = useState<Domain>('templates');
   const [loading, setLoading] = useState(true);
@@ -131,23 +131,18 @@ export function ToolboxPage() {
     finally { setBusy(false); }
   }
 
-  if (loading) return <Page title="工具箱"><Loading text="载入中" /></Page>;
+  if (loading) return <Loading text="载入中" />;
 
   return (
-    <Page
-      title="工具箱"
-      subtitle="提示词模板 · 服化道 · 分镜导入 · 资源清理"
-      actions={
-        <>
-          <Button icon={<Icon name="refresh" size={15} />} onClick={() => void load()} disabled={busy}>刷新</Button>
-          {batch ? (
-            <Badge tone={batch.failed ? 'danger' : batch.running ? 'warn' : 'ok'}>
-              任务 {batch.done}/{batch.total} · {batch.percent}%
-            </Badge>
-          ) : null}
-        </>
-      }
-    >
+    <div className="jz-col" style={{ gap: 'var(--jz-sp-4)' }}>
+      <div className="jz-row" style={{ justifyContent: 'flex-end', gap: 8 }}>
+        {batch ? (
+          <Badge tone={batch.failed ? 'danger' : batch.running ? 'warn' : 'ok'}>
+            任务 {batch.done}/{batch.total} · {batch.percent}%
+          </Badge>
+        ) : null}
+        <Button icon={<Icon name="refresh" size={15} />} onClick={() => void load()} disabled={busy}>刷新</Button>
+      </div>
       <div className="jz-col" style={{ gap: 'var(--jz-sp-4)' }}>
         <Tabs<Domain>
           items={[
@@ -232,7 +227,7 @@ export function ToolboxPage() {
           <div className="jz-col" style={{ gap: 'var(--jz-sp-4)' }}>
             <Panel title="扫描目录">
               <Field label="目录绝对路径" hint="识别 seedance / H3 产物">
-                <Input value={scanDir} onChange={(e) => setScanDir(e.target.value)} mono placeholder="F:\项目\第01集\产物" />
+                <Input value={scanDir} onChange={(e) => setScanDir(e.target.value)} mono placeholder="项目\第01集\产物 或 绝对路径" />
               </Field>
               <Button variant="primary" style={{ marginTop: 8 }} onClick={() => void doScan()} disabled={busy}>扫描</Button>
             </Panel>
@@ -307,8 +302,8 @@ export function ToolboxPage() {
           </Panel>
         ) : null}
       </div>
-    </Page>
+    </div>
   );
 }
 
-export default ToolboxPage;
+export default ToolboxPanel;

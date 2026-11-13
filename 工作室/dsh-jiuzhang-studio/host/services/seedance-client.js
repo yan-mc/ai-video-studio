@@ -11,6 +11,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { loadConfig } from '../config.js';
 import { cancellableSleep, throwIfCancelled } from './job-runner.js';
+import { toRel } from './comfy-client.js';
 
 const POLL_MS = 10000;
 const MAX_POLL = 120;
@@ -95,7 +96,7 @@ async function download({ cfg, job, url }) {
   fs.mkdirSync(dir, { recursive: true });
   const dest = path.join(dir, `${job.id}.mp4`);
   fs.writeFileSync(dest, buf);
-  return { outputs: [{ role: 'video', path: dest, bytes: buf.length, mime: 'video/mp4' }], remoteId: null };
+  return { outputs: [{ role: 'video', path: dest, rel: toRel(cfg, dest), bytes: buf.length, mime: 'video/mp4' }], remoteId: null };
 }
 
 /**
@@ -121,25 +122,54 @@ export async function runMock({ cfg, job, shot, prompt }) {
   ];
   await runProcess(ffmpeg, args, 120000);
   const bytes = fs.statSync(dest).size;
-  return { outputs: [{ role: 'video', path: dest, bytes, mime: 'video/mp4' }], remoteId: null };
+  return { outputs: [{ role: 'video', path: dest, rel: toRel(cfg, dest), bytes, mime: 'video/mp4' }], remoteId: null };
+}
+
+/**
+ * 解析内置 ffmpeg 工具目录的候选位置。
+ *
+ * 为什么需要：`cfg.ffmpegDir` 可能为空（比如测试传入 `{}`、或用户没配），
+ * 这时旧实现直接回退到裸名 `'ffmpeg'`，而 PATH 里通常没有 → 全部失败。
+ * 从插件自身位置向上找 `tools/ffmpeg`，配置缺失时也能用。
+ */
+function bundledFfmpegDirs() {
+  const dirs = [];
+  try {
+    let dir = import.meta.dirname;   // <plugin>/host/services
+    for (let i = 0; i < 6; i += 1) {
+      const base = path.join(dir, 'tools', 'ffmpeg');
+      // 内置工具有两种布局：<root>/bin/ffmpeg.exe 或 <root>/ffmpeg.exe
+      dirs.push(path.join(base, 'bin'));
+      dirs.push(base);
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  } catch { /* ignore */ }
+  return dirs;
+}
+
+function resolveTool(cfg, baseName) {
+  const exe = process.platform === 'win32' ? `${baseName}.exe` : baseName;
+  const dirs = [];
+  if (cfg?.ffmpegDir) {
+    dirs.push(path.join(cfg.ffmpegDir, 'bin'));
+    dirs.push(cfg.ffmpegDir);
+  }
+  dirs.push(...bundledFfmpegDirs());
+  for (const d of dirs) {
+    const p = path.join(d, exe);
+    try { if (fs.existsSync(p)) return p; } catch { /* ignore */ }
+  }
+  return baseName;   // 最后才退回 PATH
 }
 
 export function resolveFfmpeg(cfg = loadConfig()) {
-  const candidates = [
-    cfg.ffmpegDir ? path.join(cfg.ffmpegDir, 'bin', 'ffmpeg.exe') : null,
-    cfg.ffmpegDir ? path.join(cfg.ffmpegDir, 'ffmpeg.exe') : null,
-  ].filter(Boolean);
-  for (const c of candidates) if (fs.existsSync(c)) return c;
-  return 'ffmpeg';          // 退回 PATH
+  return resolveTool(cfg, 'ffmpeg');
 }
 
 export function resolveFfprobe(cfg = loadConfig()) {
-  const candidates = [
-    cfg.ffmpegDir ? path.join(cfg.ffmpegDir, 'bin', 'ffprobe.exe') : null,
-    cfg.ffmpegDir ? path.join(cfg.ffmpegDir, 'ffprobe.exe') : null,
-  ].filter(Boolean);
-  for (const c of candidates) if (fs.existsSync(c)) return c;
-  return 'ffprobe';
+  return resolveTool(cfg, 'ffprobe');
 }
 
 export function runProcess(exe, args, timeoutMs = 600000) {

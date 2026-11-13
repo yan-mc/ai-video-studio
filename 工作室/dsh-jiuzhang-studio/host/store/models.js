@@ -231,6 +231,10 @@ export function newShot({ title = '', episodeIndex = 1, shotIndex = 1, ...rest }
     prompt: rest.prompt || '',
     refs: { images: [], videos: [], audios: [] },
     characterRefs: [], sceneRefs: [], itemRefs: [], materialRefs: [],
+    // 角色卡仓库选中的卡（id 列表）
+    cardIds: [],
+    // 参考图缩放：match（快）| max（高保真但慢）
+    refImageSize: rest.refImageSize === 'max' ? 'max' : 'match',
     previz: null,
     createdAt: Date.now(),
     updatedAt: Date.now(),

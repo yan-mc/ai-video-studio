@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'react';
 
 import { describeError, getCachedToken } from '../api/client';
+import { ToolboxPanel } from './ToolboxPage';
 import type { BackendId } from '../api/types';
 import { useProjectStore, useUiStore } from '../store';
 import {
@@ -28,7 +29,7 @@ import {
 import { useTheme } from '../ui/theme';
 import { useToast } from '../ui/Toast';
 
-type Section = 'backend' | 'defaults' | 'promptLib' | 'appearance' | 'pricing' | 'shortcuts' | 'logs' | 'about';
+type Section = 'backend' | 'defaults' | 'promptLib' | 'appearance' | 'tools' | 'pricing' | 'shortcuts' | 'logs' | 'about';
 
 export function SettingsPage() {
   const t = useT();
@@ -118,6 +119,7 @@ export function SettingsPage() {
               { value: 'defaults', label: 'AI 默认参数' },
               { value: 'promptLib', label: '提示词库' },
               { value: 'appearance', label: '外观' },
+              { value: 'tools', label: '工具' },
               { value: 'pricing', label: '价格说明' },
               { value: 'shortcuts', label: '快捷键' },
               { value: 'logs', label: '运行日志' },
@@ -433,6 +435,11 @@ export function SettingsPage() {
             </div>
           </Panel>
         </div>
+      ) : section === 'tools' ? (
+        // 原「工具箱」页的 5 个域并入此处：
+        // 模板/服化道/分镜导入/资源清理/运行日志 —— 都是低频维护操作，
+        // 不该占一个顶级导航位。
+        <ToolboxPanel />
       ) : section === 'pricing' ? (
         <div className="jz-col" style={{ gap: 'var(--jz-sp-4)', maxWidth: 880 }}>
           <Panel title="价格说明">

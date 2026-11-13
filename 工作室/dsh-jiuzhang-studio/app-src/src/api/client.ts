@@ -276,6 +276,11 @@ export const api = {
   /* 预演 */
   previzHealth: () => request<PrevizState>('GET', '/previz/health'),
   previzStart: () => request<PrevizState>('POST', '/previz/start'),
+  /** 预演工程 → 白模 mp4（逐帧渲染，耗时较长） */
+  previzVideo: (opts?: { fps?: number; width?: number; height?: number; maxSeconds?: number }) =>
+    request<{ ok: boolean; rel: string; seconds: number; frames: number; fps: number; bytes: number }>(
+      'POST', '/previz/video', opts ?? {},
+    ),
   previzStop: () => request<PrevizState>('POST', '/previz/stop'),
   previzState: () => request<PrevizState>('GET', '/previz/state'),
   previzCommand: (name: string, args: Record<string, unknown> = {}) =>
@@ -408,10 +413,38 @@ export const api = {
   imageMeta: () => request<unknown>('GET', '/image/meta'),
   imageGenerate: (input: Record<string, unknown>) => request<unknown>('POST', '/image/generate', input),
 
-  /* 人设卡拆解 */
+  /* 立绘拆解 */
   breakdownMeta: () => request<unknown>('GET', '/breakdown/meta'),
   breakdownPreview: (input: Record<string, unknown>) => request<unknown>('POST', '/breakdown/preview', input),
   breakdownGenerate: (input: Record<string, unknown>) => request<unknown>('POST', '/breakdown/generate', input),
+
+  /* 角色卡仓库 */
+  vaultMeta: () => request<unknown>('GET', '/vault/meta'),
+  vaultCards: (q?: string) =>
+    request<unknown>('GET', `/vault/cards${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+  vaultCard: (id: string) => request<unknown>('GET', `/vault/cards/${encodeURIComponent(id)}`),
+  vaultUpsert: (input: Record<string, unknown>) => request<unknown>('POST', '/vault/cards', input),
+  vaultDelete: (id: string) => request<unknown>('POST', '/vault/cards/delete', { id }),
+  vaultPlan: (opts: { projectId?: string; cardIds?: string[]; extra?: string[]; firstLast?: number }) => {
+    const qs = new URLSearchParams();
+    if (opts.projectId) qs.set('projectId', opts.projectId);
+    if (opts.cardIds?.length) qs.set('cardIds', opts.cardIds.join(','));
+    if (opts.extra?.length) qs.set('extra', opts.extra.join(','));
+    if (opts.firstLast) qs.set('firstLast', String(opts.firstLast));
+    return request<unknown>('GET', `/vault/plan?${qs.toString()}`);
+  },
+
+  /* 项目 ⇄ 角色卡 */
+  projectCards: (projectId: string) =>
+    request<unknown>('GET', `/projects/${encodeURIComponent(projectId)}/cards`),
+  saveProjectCards: (projectId: string, cardIds: string[]) =>
+    request<unknown>('POST', `/projects/${encodeURIComponent(projectId)}/cards`, { cardIds }),
+
+  /* 渲染计划（编号 / 预算 / 超限裁剪由后端统一算） */
+  renderPlan: (input: Record<string, unknown>) =>
+    request<unknown>('POST', '/render/plan', input),
+  renderCompile: (input: Record<string, unknown>) =>
+    request<unknown>('POST', '/render/compile', input),
   mwGenerateJob: (input: Record<string, unknown>) => request<unknown>('POST', '/mw/job/generate', input),
 
   /* 漫画出图 */
