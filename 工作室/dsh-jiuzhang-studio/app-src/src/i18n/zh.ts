@@ -3,7 +3,7 @@
  *
  * 约定：
  *  - 这里只放"界面壳层"文案：导航、按钮、空态、错误提示、设置项。
- *  - 后端返回的领域标签（资产类型名、档位名等）由 GET /luoshu/api/meta 下发，
+ *  - 后端返回的领域标签（资产类型名、档位名等）由 GET /jiuzhang/api/meta 下发，
  *    不在此重复维护，避免两处漂移。
  *  - 结构按模块分区，键名用 camelCase；后续加 src/i18n/en.ts 时保持同构即可。
  */
@@ -226,8 +226,8 @@ export const zh = {
     defaultBackend: '默认后端',
     defaultProfile: '默认档位',
     maxConcurrentLocal: '本地并发数',
-    previzPort: '预演引擎端口',
-    previzAutoStart: '启动时自动拉起预演引擎',
+    blenderPath: 'Blender 路径（环境变量 DSH_BLENDER）',
+    modelNames: '模型文件名覆盖（留空=自动探测）',
     theme: '主题',
     accent: '强调色',
     locale: '界面语言',
@@ -241,8 +241,8 @@ export const zh = {
     health: '后端状态',
     healthH3: 'H3 本地',
     healthSeedance: 'Seedance',
-    healthPreviz: '预演引擎',
-    about: '九章工作室 · 把「洛书灵枢」的能力移植进 DSH 插件',
+    healthBlender: 'Blender 预演',
+    about: '九章工作室 · 本地 AI 视频/图像工作室，数据不出本机',
     aboutModules: '画布 · 素材 · 项目 · H3 工坊 · 任务中心',
   },
 

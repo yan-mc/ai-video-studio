@@ -5,6 +5,218 @@
 
 ---
 
+## [1.4.1] — 2026-11-14
+
+文档与 skill 全面对齐；清理旧引擎残留。
+
+### 变更
+
+- **skills 三件套重写**：
+  - `setup`：补 Blender 安装（§4）、控制模型下载（§3.2，4.22 GB 到 `model_patches/`）、
+    深度估计可选路径（§3.4）、Blender 许可证边界（§4.3）、11 条新排错项、
+    控制视频/AddGuide/坐标系的硬约束（§9）、更新性能基线（含 Blender 20.7s / H3 259s）
+  - `usage`：工具数 15 → **13**、路由数 108 → **101**；删 `studio_previz`/`studio_director`，
+    加 `studio_blender`；3D 章节重写为 Blender 五通道；新增
+    **§4.5 Blender 白模 → 控制视频 → 成片**（含分段串联完整流程）
+  - `prompt`：新增 **§7.6 控制视频的提示词写法**（"必须描述画面里真实存在的东西"、
+    强度区间、控制视频 vs 参考视频的区别）
+- `docs/3D预演与导演台-结构拆解.md` → 重写为 `docs/3D预演-Blender方案.md`
+- `docs/使用指南.md`：3D 预演章节重写；场景 E 改为 Blender 流程 + 分段串联
+- `README.md`：特性表加控制视频/分段串联；Blender 依赖说明
+
+### 修复
+
+- **前端调用已删除的 `/director/*` 路由**（9 个方法，会在访问时 404）
+- **`config.js` 残留三个死配置** `previzPort`/`previzAutoStart`/`previzDir`
+  （定义了但无人读取）
+- **`tests/integration.mjs` 引用已删除的 `createPrevizController`**（脚本跑不通）
+
+### 新增测试
+
+- 7 项 `B-文档` 一致性断言：工具数与文档一致、无已删工具、三个 skill 都覆盖 Blender/
+  控制模型/控制视频、文档无旧引擎残留。**这类断言能防止以后再出现"文档写 15 个实际 13 个"**。
+
+### 清理
+
+- 删除 data/previz（2462 个测试渲染文件，546 MB）
+- 删除 4 个测试用 3D 资产（mixamo_test.fbx / skinned_wave.fbx / test_actor.glb / thin_wave.fbx）
+
+### 验证
+
+- `verify-all.mjs`：**351 PASS / 0 FAIL**（含 7 项 B-文档）
+- `integration.mjs`：25 PASS
+- SPA 单测：179 pass
+- `tsc --noEmit`：0 error
+
+---
+## [1.4.0] — 2026-11-14
+
+三段白模 → H3 成片；预演页可视化；canny 通道修复。
+
+### 新增
+
+- **预演页可视化**：新增 `preview` 模式（Workbench MATERIAL 着色，彩色灰模 + 阴影 + 描边）。
+  72 帧 **4 秒**渲完，页面直接播放。
+- **在 Blender 中编辑**：`POST /blender/open` 用桌面 Blender 打开渲染时保存的 `.blend`。
+  页面负责"看"，原生窗口负责"改"。不做内嵌 WASM（需 COOP/COEP、12GB 笔记本未验证、与原生窗口功能重叠）。
+- **三段白模脚本** `host/blender/beach-trilogy.js`：《海滩》三镜（散步 → 坐下 → 亲吻），
+  含 `seamIssues()` 接缝检查（上一段 `to` 必须等于下一段 `from`）。
+- 回归测试 +9 项（`B-Blender` 共 35 项）。
+
+### 修复
+
+- **AddGuide 节点 ID 冲突（阻断）**：`guideNode` 从 70 起编号，覆盖了刚建好的
+  LoadImage（70/71），ComfyUI 报 `image, received_type(CONDITIONING)`。
+  改为从 80 起。
+- **canny 通道与 gray 产物完全相同（隐蔽）**：`renderControl` 只做 Blender 渲染，
+  没做边缘检测 —— 用户以为在控边缘，其实喂的是灰模。
+  现在 Blender 渲干净灰模 + ffmpeg `edgedetect` + `negate`（白底黑线）。
+- **preview 配色失效**：Workbench 的 MATERIAL 模式读 `material.diffuse_color`，
+  而 EEVEE 读 Principled BSDF。只设后者导致预览全灰。现在两套都设。
+
+### 验证
+
+- `verify-all.mjs`：**343 PASS / 0 FAIL**
+- 实机：《海滩》三镜 9.87 秒成片跑通（角色一致 / 场景一致 / 叙事连贯 / 接缝连续）
+
+详见 [docs/probes/blender-previz-2026-11-14/trilogy/REPORT.md](docs/probes/blender-previz-2026-11-14/trilogy/REPORT.md)。
+
+---
+## [1.3.0] — 2026-11-14
+
+结构化走位 / 模型导入 / 动作库；旧 three.js 引擎下线。
+
+### 新增
+
+- **镜头卡结构化走位**：`actors[]` / `props[]` / `camera3d` 三字段。
+  渲染页新增「3D 走位」面板（加删角色、身高、动作、XYZ）。
+  没有这些字段时 Blender 只能渲"默认两人对峙"，而那是占位不是预演。
+- **3D 模型导入**：glb / gltf / fbx / obj，按包围盒高度归一化
+  （Mixamo/Sketchfab 单位五花八门）。只重挂顶层对象，保住骨架父子关系。
+- **Mixamo 动作**：`host/blender/list_actions.py` 真的启一次 Blender 读动作名
+  （导出名形如 `Armature|Armature|walk`，用户猜不到）。
+  前端选中模型后自动加载动作列表，只有一个时自动选上。
+- API：`GET /blender/assets`、`POST /blender/actions`。
+- `studio_blender` 工具加 `assets` / `actions` 两个 action。
+- 回归测试 +20 项 `B-Blender`。
+
+### 修复
+
+- **模型文件名硬编码（严重）**：写死 fp8 版，用户装 int8 版会报
+  `Value not in list` 且错误看不出原因。现在 `resolveModelNames()`
+  向 ComfyUI 查实际列表并按量化偏好降级；`cfg.modelNames` 可覆盖。
+  控制模型缺失时自动关闭控制通道，并在 `job.params.controlSkipped` 记录原因。
+
+### 移除（旧 three.js 预演引擎下线）
+
+- 4 个 service：`previz-controller.js` / `previz-video.js` / `previz-shot.js` / `director3d.js`
+- 20 条路由：`/previz/*` + `/previz-shot/*` + `/director/*`
+- 2 个工具：`studio_previz` / `studio_director`
+- 前端：六导演台 iframe 宿主页重写为 Blender 状态页；`api.previz*` 六个方法
+- 配置项：`previzPort` / `previzAutoStart` / `previzDir`
+- 对应测试：`B-导演台` 3 项 + `R18` 4 项
+
+### 验证
+
+- `verify-all.mjs`：**334 PASS / 0 FAIL**
+- 端到端：Blender depth（真实走位）→ H3 Fun ControlNet → 成片，构图与走位跟随
+- 旧路由 `/previz/health` / `/director/meta` 返回 404
+
+详见 [docs/probes/blender-previz-2026-11-14/AUDIT.md](docs/probes/blender-previz-2026-11-14/AUDIT.md)。
+
+---
+## [1.2.0] — 2026-11-14
+
+Blender 预演接入。
+
+### 新增
+
+- **Blender 无头渲染**：`blender -b --python` 子进程直出 H3 的控制通道（depth / pose / canny / gray）。
+  **实测 124 帧 @864×480 仅 20.7 秒**（H3 一镜 217–250 秒），占比 < 10%。
+- `host/blender/render_shot.py`：11 关节人偶 + 26 种程序化动作 + 深度/剪影材质。
+- `host/services/blender-service.js`：Blender 定位（env → tools/blender-* → PATH）、镜头卡→场景 spec、渲染调度。
+- API：`GET /blender/health`、`POST /blender/render`。
+- Agent 工具：`studio_blender`（health / spec / render）。
+- 渲染页「控制视频」面板加 **Blender 现渲按钮**（depth/pose/canny/gray），渲完自动填入控制视频字段。
+- 回归测试 +10 项（`B-Blender`），总数 315 → **325**。
+
+### 许可证
+
+- `host/blender/render_shot.py` 按 **GPL-3.0-or-later** 释放（它 import bpy）。
+- 插件本体通过**子进程**调用 Blender，不构成衍生作品，保持原许可。
+- 产出的 .blend / 渲染图 / mp4 完全归用户，GPL 不传染产出物。
+
+### 实测发现（踩坑记录见报告）
+
+| 坑 | 结论 |
+|---|---|
+| Blender 5.2 合成器 API | `scene.node_tree` → `compositing_node_group`；`CompositorNodeComposite` 已移除 |
+| Workbench Depth pass | 值域只 7 个灰阶，不可用 |
+| Mist pass | Workbench 下不产生输出 |
+| 视图变换 | 必须用 `Raw`，`Standard` 会把深度压成 50–90/255 |
+| **坐标系** | Blender 是 Z-up；照抄参考产品的 y=高度会让**人偶躺平** |
+| pose 世界光 | EEVEE world 强度非零 → 整图纯白 |
+
+详见 [docs/probes/blender-previz-2026-11-14/REPORT.md](docs/probes/blender-previz-2026-11-14/REPORT.md)。
+
+---
+
+## [1.1.0] — 2026-11-14
+
+控制视频通道。H3 从「抽卡」变成「按分镜执行」：用 Fun ControlNet Union 逐帧约束结构与时序。
+
+### 新增
+
+- **控制视频（Fun ControlNet Union 2.0）**：镜头卡新增 `control` 字段，渲染页新增「控制视频（结构约束）」面板。
+  支持 8 种条件（Canny/Depth/HED/MLSD/Pose/Gray/Layout/Scribble）——模型是 Union 的，喂什么图就是什么控制。
+- **首尾帧真正生效**：Ref2VA 没有 `first_frame`/`last_frame` 输入口，改走 `MiniMaxH3AddGuide` 任意帧锚定（0 与 -1）。
+- 回归测试 +11 项（`B-控制视频`），总数 304 → **315**。
+
+### 修复
+
+- **首尾帧被静默丢弃（严重）**：`generator.js` 注入 `{{FIRST_FRAME}}`/`{{LAST_FRAME}}`，
+  但模板里 20/21 挂的是 `{{REF_IMAGE_1}}`/`{{REF_IMAGE_2}}` 且 map 里没有这两个 key ——
+  有参考图时走 Ref2VA 分支，该分支**根本没有首尾帧口**，代码不会执行。
+  结果：传进去的首尾帧既不生效也不报错。
+- 首尾帧不再复用参考图的 20/21 槽位（复用会互相覆盖），改用 70/71。
+- 模板里未被使用的 20/21 现在会被正确删除（以前留着会让 ComfyUI 报 `Invalid file: {{{{REF_IMAGE_1}}}}`）。
+
+### 实测数据
+
+| 项 | 结果 |
+|---|---|
+| Canny 控制 | 箱子出现时刻、人数、景别全部跟随 |
+| Depth 控制 | 比 Canny 更自然，透视正确 |
+| 噪声基线 | 无控制时 15 帧几乎同一张图（「抽卡」） |
+| 耗时 | 无控制 137s → 有控制 251s（124 帧 / 864×480 / 4 步） |
+| 显存 | 12GB 可跑，控制分支 staged 4304 MB |
+| AddGuide | 锚定强度过高——锚白模首帧会让整段输出都是白模，首尾帧必须是成片风格图 |
+
+详见 [docs/probes/h3-controlnet-2026-11-14/REPORT.md](docs/probes/h3-controlnet-2026-11-14/REPORT.md)。
+
+---
+
+## [1.0.3] — 2026-11-14
+
+去品牌化版本。移除对上游参考产品的名称引用，对外契约改名，功能行为不变。
+
+### 变更（对外契约）
+
+- **URL 前缀统一改为 `/jiuzhang/*`**：API、SPA、素材静态三条路由同步改名，Host、Client、SPA、skills、测试全部对齐。旧书签会 404，重启后从侧栏重新进入即可。
+- **画布模型 id 去品牌化**：图像节点的模型枚举改用 `jiuzhang-comfy/*` 与 `jiuzhang/*` 前缀。这些 id 只是节点选择器的枚举值，后端从未按它分派（实际后端由 backend 字段决定），存量画布里的旧 id 仍能正常显示与运行。
+
+### 变更（文案与注释）
+
+- 代码注释、页面文案、README、docs、两个 skill 里的产品名引用统一改为中性表述；
+- 设置页「关于」改写为工作室自述，不再提上游产品名。
+
+### 未变
+
+- 3D 预演/导演台子系统（引擎、15 条 director_* 命令、截图与白模视频渲染）行为完全不变，仅 URL 前缀跟随改名；
+- Host 304 项验收与 SPA 179 项单测全部通过。
+
+---
+
 ## [1.0.2] — 2026-11-14
 
 实机联调版。在真实 ComfyUI + H3 模型上跑通「立绘拆解 → 角色卡 → 分段出片」全链路，

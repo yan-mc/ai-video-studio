@@ -1,7 +1,7 @@
 /**
- * 漫画工作台服务 —— 对齐洛书 `comic` 域（1120 键 / 19 子域 / 15 站流水线）。
+ * 漫画工作台服务 —— 对齐参考实现 `comic` 域（1120 键 / 19 子域 / 15 站流水线）。
  *
- * 洛书核心设计（已实测确认）：
+ * 参考实现核心设计（已实测确认）：
  *  **本地渲染零费用 + 只有 LLM 抽取与出图花钱。**
  *  15 个站里有 7 个零费用：hints / layout / anchors / prompt / compose /
  *  preflight / exportSpec —— 也就是说**不接任何模型也能产出可交付的 PDF/CBZ**。
@@ -9,7 +9,7 @@
  * 本实现优先落地这 7 个零费用站，让工作台先"能用"：
  *   分镜抽取（规则版）→ 分镜板编辑 → 几何排版 → 拼版导出
  *
- * 版式模板（洛书 11 套，已提取）：
+ * 版式模板（参考实现 11 套，已提取）：
  *   splash / split_h / split_v / grid_2x2 / grid_3x1 / grid_2x3 /
  *   grid_3x2 / top_wide / bottom_wide / five_panel / strip_4
  */
@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { safeId } from '../security.js';
 
-/** 11 套版式模板（洛书实测） */
+/** 11 套版式模板（实测） */
 export const LAYOUT_TEMPLATES = Object.freeze([
   { id: 'splash', name: '整页单格', rows: 1, cols: 1 },
   { id: 'split_h', name: '横双格', rows: 2, cols: 1 },
@@ -32,7 +32,7 @@ export const LAYOUT_TEMPLATES = Object.freeze([
   { id: 'strip_4', name: '条漫四格', rows: 4, cols: 1 },
 ]);
 
-/** 15 个「站」（洛书 comic.station.*），标注是否零费用 */
+/** 15 个「站」（参考实现 comic.station.*），标注是否零费用 */
 export const STATIONS = Object.freeze([
   { id: 'extract', name: '分镜抽取', cost: 'llm', desc: '文本 → 分镜板' },
   { id: 'hints', name: '表演/越轴提示', cost: 'free', desc: '本地软检测' },
@@ -58,7 +58,7 @@ export const TASK_STATES = Object.freeze(['queued', 'running', 'waiting', 'done'
 
 /**
  * 把文本抽成分镜板（不依赖 LLM 的规则实现）。
- * 洛书这个站花 LLM，我们用规则先做出可用版本。
+ * 参考实现这个站花 LLM，我们用规则先做出可用版本。
  */
 export function extractBoardFromText(text, { pages = 1, template = 'grid_2x2' } = {}) {
   const src = String(text || '').trim();
@@ -98,7 +98,7 @@ export function extractBoardFromText(text, { pages = 1, template = 'grid_2x2' } 
 
 /**
  * 计算一格在页面里的归一化几何（0..1）。
- * 洛书有独立的 geom 编辑器，这里给出模板默认几何。
+ * 参考实现有独立的 geom 编辑器，这里给出模板默认几何。
  */
 export function panelGeometry(tpl, i) {
   const { rows, cols, special } = tpl;
@@ -172,7 +172,7 @@ function wrapText(s, width) {
 /* ------------------------------------------------------------ 发布前体检 */
 
 /**
- * 发布前体检 7 项（洛书 comic.preflight，只读零成本）。
+ * 发布前体检 7 项（参考实现 comic.preflight，只读零成本）。
  */
 export function preflight(doc) {
   const checks = [];
@@ -358,7 +358,7 @@ export function createComicService({ cfg }) {
 
   /**
    * 逐格拼装提示词。
-   * 洛书 `prompt` 站：本地运算，零费用。
+   * 参考实现 `prompt` 站：本地运算，零费用。
    * 把「画风 + 角色 + 场景 + 每格内容」拼成一致的出图提示词。
    */
   async function planPrompts(projectId, body = {}) {

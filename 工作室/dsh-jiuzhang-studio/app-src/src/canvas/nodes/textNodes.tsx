@@ -84,7 +84,7 @@ export function parseMarkdownLite(source: string): MdLine[] {
   return out;
 }
 
-/** 文本注释节点：无端口，不参与连线（与洛书一致） */
+/** 文本注释节点：无端口，不参与连线（与参考实现一致） */
 export function TextAnnotationNode(props: NodeProps) {
   const data = nodeData(props.data);
   const def = DEF_ANNOTATION;

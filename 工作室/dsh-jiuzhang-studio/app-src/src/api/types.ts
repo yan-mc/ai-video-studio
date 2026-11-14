@@ -155,8 +155,69 @@ export interface Shot {
   itemRefs: string[];
   materialRefs: string[];
   previz: unknown;
+  /** 3D 预演：演员（人偶）—— Blender 渲染的输入，无此字段只能用默认两人 */
+  actors?: ShotActor[];
+  /** 3D 预演：道具（灰盒或导入模型） */
+  props?: ShotProp[];
+  /** 3D 预演：机位（含关键帧才能渲运镜） */
+  camera3d?: ShotCamera3d;
+  /** 控制视频（Fun ControlNet） */
+  control?: ShotControl | null;
   createdAt: number;
   updatedAt: number;
+}
+
+/**
+ * 演员（人偶）。
+ * 坐标系：**(x, y=高度, z=深度)** —— 与预演引擎一致；
+ * 转 Blender 的 Z-up 由后端统一处理，前端不用管。
+ */
+export interface ShotActor {
+  name: string;
+  heightM: number;
+  color: string;
+  position: [number, number, number];
+  rotationDeg: number;
+  action: string;
+  startFrame: number;
+  durationFrames?: number;
+  from?: [number, number, number];
+  to?: [number, number, number];
+  emotion: string;
+  intensity: number;
+  /** 导入的 glb/fbx（dataDir 相对路径）；有值时替换程序化人偶 */
+  assetRel?: string;
+}
+
+export interface ShotProp {
+  kind: 'box' | 'cylinder' | 'sphere' | 'wall';
+  name: string;
+  position: [number, number, number];
+  rotationDeg: number;
+  scale: [number, number, number];
+  color: string;
+  assetRel?: string;
+}
+
+export interface ShotCamera3d {
+  position: [number, number, number];
+  target: [number, number, number];
+  fov: number;
+  keys?: Array<{
+    frame: number;
+    position?: [number, number, number];
+    target?: [number, number, number];
+    fov?: number;
+    rollDeg?: number;
+  }>;
+}
+
+export interface ShotControl {
+  type?: string;
+  videoRel: string;
+  strength: number;
+  startPercent: number;
+  endPercent: number;
 }
 
 export type ShotInput = Partial<Shot>;
@@ -252,7 +313,8 @@ export interface MonitorPayload {
   };
   h3: HealthState;
   seedance: { mode: 'real' | 'mock' };
-  previz: HealthState;
+  /** Blender 预演引擎状态（旧 three.js 引擎已下线） */
+  blender: HealthState;
   disk: { freeBytes: number; totalBytes: number } | null;
   updatedAt: number;
 }
@@ -261,7 +323,8 @@ export interface HealthPayload {
   ok: boolean;
   h3: HealthState;
   seedance: { ok?: boolean | string; detail?: string };
-  previz: HealthState;
+  /** Blender 预演引擎状态（旧 three.js 引擎已下线） */
+  blender: HealthState;
 }
 
 /* ------------------------------- H3 工坊 ------------------------------ */
@@ -383,6 +446,37 @@ export interface PrevizState {
   ok?: boolean;
   detail?: string;
   [k: string]: unknown;
+}
+
+/* ------------------------------ Blender 预演 ------------------------------ */
+
+export interface BlenderHealth {
+  ok: boolean;
+  available: boolean;
+  exe: string;
+  modes: string[];
+  script: string | null;
+  detail: string;
+}
+
+export interface BlenderRenderResult {
+  ok: boolean;
+  mode: string;
+  /** PNG 序列目录 */
+  dir: string;
+  /** 编码后的 mp4 绝对路径 */
+  mp4: string;
+  /** dataDir 相对路径 —— 可直接填进 shot.control.videoRel */
+  rel: string;
+  /** .blend 绝对路径（可在桌面 Blender 打开继续调） */
+  blend?: string;
+  /** .blend 的 dataDir 相对路径 */
+  blendRel?: string;
+  frames: number;
+  seconds: number;
+  spec: string;
+  blender: string;
+  exitCode: number;
 }
 
 /* ------------------------------ 分辨率 ------------------------------ */

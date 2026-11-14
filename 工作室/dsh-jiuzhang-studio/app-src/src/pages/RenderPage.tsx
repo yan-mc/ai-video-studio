@@ -34,6 +34,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, describeError } from '../api/client';
 import { outputUrl } from '../api/url';
 import { useProjectStore } from '../store';
+import type { ShotActor } from '../api/types';
 import {
   Alert, Badge, Button, Field, Icon, Input, KeyValue, Loading, Page, Panel,
   Select, Tabs, Textarea, useToast,
@@ -52,6 +53,11 @@ interface VaultCardLite {
 
 interface AssetItem { id: string; name: string; rel?: string; kind: string }
 interface MediaPick { rel: string; name: string; hasAudio?: boolean }
+
+/** 3D 模型资产（glb/gltf/fbx/obj） */
+interface ModelAsset { rel: string; name: string; ext: string; kind: 'actor' | 'prop'; bytes: number }
+/** 模型内置动作（Mixamo 的 Action 名形如 Armature|Armature|walk） */
+interface AssetAction { name: string; frames: [number, number]; durationFrames: number }
 
 interface PlanImage { index: number; rel: string; source: string; cardId?: string; cardName?: string; slot?: string }
 
@@ -89,6 +95,25 @@ const MODES = [
   { value: 'fl2va', label: 'FL2VA · 首尾帧' },
   { value: 'i2va', label: 'I2VA · 首帧' },
   { value: 't2va', label: 'T2VA · 纯文本' },
+];
+
+/**
+ * 走位可用动作 —— 必须与 host/store/models.js 的 ACTIONS 白名单一致。
+ * 不一致的后果：前端能选、后端会被 normalizeActors 静默改成 stand，
+ * 表现为"选了半天动作没生效"。
+ */
+const ACTOR_ACTIONS = [
+  'stand', 'wait', 'idle-breathe', 'turn',
+  'walk', 'fast-walk', 'run', 'follow', 'pass-by', 'dodge', 'step-forward', 'step-back',
+  'look-up', 'look-down', 'look-at', 'look-back', 'glance', 'inspect',
+  'speak', 'listen', 'nod', 'shake-head', 'face-to-face', 'hand-over', 'receive',
+  'reach', 'hold', 'pick-up', 'put-down', 'point', 'wave', 'raise-hand',
+  'clap', 'knock', 'phone', 'drink',
+  'sit', 'stand-up', 'crouch', 'kneel', 'lie-down', 'fall', 'get-up',
+  'bow', 'cross-arms', 'hands-on-hips',
+  'hesitate', 'hug',
+  'read', 'write', 'sew', 'open-door', 'close-door', 'push', 'pull',
+  'enter-car', 'exit-car',
 ];
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -142,6 +167,23 @@ export function RenderPage() {
   const [customStyle, setCustomStyle] = useState('');
   const [refImageSize, setRefImageSize] = useState<'match' | 'max'>('match');
 
+  /* 控制视频（H3 Fun ControlNet Union）—— 锁空间结构与时间推进 */
+  const [controlRel, setControlRel] = useState('');
+  const [controlStrength, setControlStrength] = useState('1.0');
+  const [controlStart, setControlStart] = useState('0.0');
+  const [controlEnd, setControlEnd] = useState('0.8');
+  const [blenderBusy, setBlenderBusy] = useState('');
+  const [blenderMsg, setBlenderMsg] = useState('');
+
+  /* 3D 走位（Blender 渲染的输入）
+     ⚠️ 坐标系 (x, y=高度, z=深度) —— 与预演引擎一致；后端转 Blender Z-up。
+     没有这些数据时 Blender 只能渲"默认两人对峙"，等于没用。 */
+  const [actors, setActors] = useState<ShotActor[]>([]);
+  const [stagingOpen, setStagingOpen] = useState(false);
+  /* 3D 资产库 + 每个模型内置的动作（懒加载：选模型时才启 Blender 读） */
+  const [modelAssets, setModelAssets] = useState<ModelAsset[]>([]);
+  const [assetActions, setAssetActions] = useState<Record<string, AssetAction[]>>({});
+
   /* 提示词编辑器（可折叠） */
   const [editorOpen, setEditorOpen] = useState(false);
   const [manualPrompt, setManualPrompt] = useState('');
@@ -157,17 +199,20 @@ export function RenderPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [cs, meta, as, tpl] = await Promise.all([
+      const [cs, meta, as, tpl, asts] = await Promise.all([
         api.vaultCards(),
         api.promptMeta(),
         api.listAssets({}),
         api.toolboxTemplates(),
+        // 3D 资产库拿不到不影响渲染，单独 catch 掉
+        api.blenderAssets().catch(() => ({ assets: [] })),
       ]);
       setCards(cs as VaultCardLite[]);
       setAssets((as as AssetItem[]).filter((x) => x.rel));
       setTemplates((tpl as Array<{ id: string; name: string; category: string; content: string }>) ?? []);
       const m = meta as { styles?: Array<{ id: string; name: string }> };
       setStyles(m.styles ?? []);
+      setModelAssets((asts as { assets?: ModelAsset[] })?.assets ?? []);
       if (!projects.length) await loadProjects();
     } catch (e) {
       setError(describeError(e));
@@ -243,6 +288,103 @@ export function RenderPage() {
   };
   useEffect(() => stopPolling, []);
 
+  /**
+   * 用 Blender 现渲一路控制序列。
+   *
+   * 渲完直接写进 controlRel —— 用户的心智是"给我一个控制视频"，
+   * 而不是"先去别的页面渲染，回来再选文件"。
+   *
+   * 实测耗时：124 帧 @864×480 约 20 秒（H3 本身要 3—4 分钟）。
+   */
+  /* ---------------------------- 走位编辑 ---------------------------- */
+
+  function addActor() {
+    const n = actors.length;
+    setActors([...actors, {
+      name: `角色${n + 1}`,
+      heightM: 1.7,
+      color: '#e1e3e7',
+      // 加人时左右均匀排开，避免全叠在原点（叠在一起等于只有一个人）
+      position: [n === 0 ? -0.6 : n * 0.6 - 0.6, 0, 0],
+      rotationDeg: 0,
+      action: 'stand',
+      startFrame: 0,
+      emotion: 'neutral',
+      intensity: 1,
+    }]);
+    setStagingOpen(true);
+  }
+
+  function removeActor(i: number) {
+    setActors(actors.filter((_, k) => k !== i));
+  }
+
+  function updateActor(i: number, patch: Partial<ShotActor>) {
+    setActors(actors.map((a, k) => (k === i ? { ...a, ...patch } : a)));
+  }
+
+  function updateActorPos(i: number, axis: 0 | 1 | 2, value: number) {
+    setActors(actors.map((a, k) => {
+      if (k !== i) return a;
+      const pos = [...a.position] as [number, number, number];
+      pos[axis] = value;
+      return { ...a, position: pos };
+    }));
+  }
+
+  /**
+   * 选模型时顺带把它的动作列出来。
+   *
+   * 为什么要现读：Mixamo 导出的 Action 名是 `Armature|Armature|walk` 这种，
+   * 用户不可能猜得到；与其让人试错，不如真启一次 Blender 读出来（1—3 秒）。
+   */
+  async function pickActorAsset(i: number, rel: string) {
+    updateActor(i, { assetRel: rel || undefined, action: rel ? '' : 'stand' });
+    if (!rel || assetActions[rel]) return;
+    try {
+      const r = await api.blenderActions(rel);
+      setAssetActions((prev) => ({ ...prev, [rel]: r.actions }));
+      if (r.actions.length === 1) {
+        // 只有一个动作时直接选上——少一次点击，也避免用户忘了选
+        updateActor(i, { action: r.actions[0].name });
+      }
+    } catch (e) {
+      toast.error(`读动作失败：${describeError(e)}`);
+    }
+  }
+
+  async function renderWithBlender(mode: string) {    if (!currentProjectId) { toast.error('先选一个项目'); return; }
+    setBlenderBusy(mode);
+    setBlenderMsg('');
+    try {
+      // 先把当前参数存成镜头卡 —— Blender 从镜头卡读 durationSec / ratio / actors
+      const saved = await api.saveShot(currentProjectId, {
+        title: summary.slice(0, 40) || `镜头 ${new Date().toLocaleTimeString('zh-CN')}`,
+        durationSec: Number(durationSec) || 5,
+        ratio,
+        profile,
+        backend: 'h3-local',
+        mode,
+        refImageSize,
+        description: [summary, shotAction].filter(Boolean).join('。'),
+        cardIds: pickedCards,
+        ...(actors.length ? { actors } : {}),
+      } as never) as { id?: string };
+      if (!saved?.id) throw new Error('镜头卡保存失败');
+
+      const r = await api.blenderRender({ mode, projectId: currentProjectId, shotId: saved.id });
+      setControlRel(r.rel);
+      setBlenderMsg(`已生成 ${r.frames} 帧 / ${r.seconds}s → ${r.rel}`);
+      toast.ok(`控制视频就绪（${r.seconds}s）`);
+    } catch (e) {
+      const msg = describeError(e);
+      setBlenderMsg(msg);
+      toast.error(msg);
+    } finally {
+      setBlenderBusy('');
+    }
+  }
+
   async function doRender() {
     if (!currentProjectId) { toast.error('先选一个项目'); return; }
     setBusy(true);
@@ -274,6 +416,17 @@ export function RenderPage() {
           videos: pickedVideos.map((v) => ({ rel: v.rel, name: v.name, hasAudio: v.hasAudio !== false })),
           audios: pickedAudios.map((a) => ({ rel: a.rel, name: a.name })),
         },
+        // 控制视频：只传 rel，后端 resolveControl 统一收敛强度/区间
+        control: controlRel
+          ? {
+            videoRel: controlRel,
+            strength: Number(controlStrength) || 1,
+            startPercent: Number(controlStart) || 0,
+            endPercent: Number(controlEnd) || 0.8,
+          }
+          : null,
+        // 走位：有才传，没配就不覆盖已有数据
+        ...(actors.length ? { actors } : {}),
       } as never) as { id?: string };
 
       if (!saved?.id) throw new Error('镜头卡保存失败');
@@ -539,6 +692,167 @@ export function RenderPage() {
                 <Input value={customStyle} onChange={(e) => setCustomStyle(e.target.value)}
                   placeholder="90s OVA, cel animation, high saturation" />
               </Field>
+            </Panel>
+
+            {/* 3D 走位 —— Blender 渲染的输入
+                没有这块数据时 Blender 只能渲"默认两人对峙"，等于没用。
+                坐标系 (x, y=高度, z=深度)；单位米。 */}
+            <Panel
+              title={`3D 走位（${actors.length} 人）`}
+              actions={(
+                <Button onClick={() => setStagingOpen((v) => !v)}>
+                  {stagingOpen ? '收起' : '编辑'}
+                </Button>
+              )}
+            >
+              {!actors.length ? (
+                <div className="jz-xs jz-muted">
+                  还没配走位。Blender 渲控制视频时会用「默认两人对峙」占位——
+                  那只能验证链路，不能当真实预演。点「编辑」加角色。
+                </div>
+              ) : (
+                <div className="jz-col" style={{ gap: 6 }}>
+                  {actors.map((a, i) => (
+                    <div key={i} className="jz-row" style={{ gap: 6, justifyContent: 'space-between' }}>
+                      <span className="jz-sm">
+                        {a.name} · {a.heightM}m · {a.action}
+                      </span>
+                      <span className="jz-xs jz-muted jz-mono">
+                        [{a.position.map((v) => v.toFixed(1)).join(', ')}]
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {stagingOpen ? (
+                <div className="jz-col" style={{ gap: 10, marginTop: 10 }}>
+                  {actors.map((a, i) => (
+                    <div key={i} className="jz-card" style={{ padding: 8 }}>
+                      <div className="jz-row" style={{ gap: 6, marginBottom: 6 }}>
+                        <Input
+                          value={a.name}
+                          onChange={(e) => updateActor(i, { name: e.target.value })}
+                          placeholder="角色名"
+                        />
+                        <Button variant="danger" onClick={() => removeActor(i)}>删除</Button>
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px,1fr))', gap: 6 }}>
+                        <Field label="身高(m)">
+                          <Input value={String(a.heightM)} mono
+                            onChange={(e) => updateActor(i, { heightM: Number(e.target.value) || 1.72 })} />
+                        </Field>
+                        <Field label="动作">
+                          <Select<string>
+                            value={a.action}
+                            onChange={(v) => updateActor(i, { action: v })}
+                            options={ACTOR_ACTIONS.map((v) => ({ value: v, label: v }))}
+                          />
+                        </Field>
+                        <Field label="X（左右）">
+                          <Input value={String(a.position[0])} mono
+                            onChange={(e) => updateActorPos(i, 0, Number(e.target.value) || 0)} />
+                        </Field>
+                        <Field label="Y（高度）">
+                          <Input value={String(a.position[1])} mono
+                            onChange={(e) => updateActorPos(i, 1, Number(e.target.value) || 0)} />
+                        </Field>
+                        <Field label="Z（深度）">
+                          <Input value={String(a.position[2])} mono
+                            onChange={(e) => updateActorPos(i, 2, Number(e.target.value) || 0)} />
+                        </Field>
+                      </div>
+                      {/* 导入模型（glb/fbx）—— 选中后替换程序化人偶。
+                          选了模型之后，「动作」下拉会切到该模型自带的动作列表
+                          （Mixamo 的 Action 名是 Armature|Armature|walk 这种，
+                           不给用户看名字就只能靠猜）。 */}
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px,1fr))', gap: 6, marginTop: 6 }}>
+                        <Field label="模型（可选）" hint="选 glb/fbx 后用它代替程序化人偶">
+                          <Select<string>
+                            value={a.assetRel ?? ''}
+                            onChange={(v) => void pickActorAsset(i, v)}
+                            options={[
+                              { value: '', label: '（程序化人偶）' },
+                              ...modelAssets.map((m) => ({ value: m.rel, label: m.name })),
+                            ]}
+                          />
+                        </Field>
+                        {a.assetRel ? (
+                          <Field label="模型动作" hint="导入模型自带的 Action">
+                            <Select<string>
+                              value={a.action}
+                              onChange={(v) => updateActor(i, { action: v })}
+                              options={[
+                                { value: '', label: '（不播放动作）' },
+                                ...(assetActions[a.assetRel] ?? []).map((x) => ({
+                                  value: x.name,
+                                  label: `${x.name} (${x.durationFrames}f)`,
+                                })),
+                              ]}
+                            />
+                          </Field>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                  <Button onClick={addActor}>＋ 加一个角色</Button>
+                </div>
+              ) : null}
+            </Panel>
+
+            {/* 控制视频 —— H3 Fun ControlNet Union
+                与「参考视频」的区别：参考视频只是让模型"参考"运镜，
+                控制视频是逐帧约束结构（深度/姿态/边缘），会真的跟着走。
+                实测见 docs/probes/h3-controlnet-2026-11-14/ */}
+            <Panel title="控制视频（结构约束）">
+              <Field label="控制视频" hint="留空=不启用。选中素材库里的视频，通常由 Blender/预演导出的 depth/pose 序列">
+                <Select<string>
+                  value={controlRel}
+                  onChange={setControlRel}
+                  options={[
+                    { value: '', label: '（不启用）' },
+                    ...assets
+                      .filter((a) => /\.(mp4|webm|mov)$/i.test(a.rel ?? ''))
+                      .map((a) => ({ value: a.rel ?? '', label: a.name })),
+                  ]}
+                />
+              </Field>
+
+              {/* 用 Blender 现渲一路控制序列。
+                  为什么放在这里：用户的心智是"给我一个控制视频"，
+                  而不是"先去另一个页面渲染，再回来选文件"。 */}
+              <div className="jz-row" style={{ gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
+                <span className="jz-xs jz-muted">用 Blender 现渲：</span>
+                {['depth', 'pose', 'canny', 'gray'].map((m) => (
+                  <Button
+                    key={m}
+                    disabled={Boolean(blenderBusy)}
+                    onClick={() => void renderWithBlender(m)}
+                  >
+                    {blenderBusy === m ? '渲染中…' : m}
+                  </Button>
+                ))}
+              </div>
+              {blenderMsg ? <div className="jz-xs jz-muted" style={{ marginTop: 4 }}>{blenderMsg}</div> : null}
+
+              {controlRel ? (
+                <>
+                  <Field label="控制强度" hint="1.0 起调；画面发僵往下调，控制不住往上调">
+                    <Input value={controlStrength} onChange={(e) => setControlStrength(e.target.value)} mono />
+                  </Field>
+                  <Field label="生效区间（去噪百分比）" hint="0—0.8 = 前 80% 受控，尾部留给模型补细节">
+                    <div className="jz-row" style={{ gap: 6 }}>
+                      <Input value={controlStart} onChange={(e) => setControlStart(e.target.value)} mono />
+                      <span className="jz-muted">→</span>
+                      <Input value={controlEnd} onChange={(e) => setControlEnd(e.target.value)} mono />
+                    </div>
+                  </Field>
+                  <div className="jz-xs jz-muted">
+                    控制视频会逐帧约束结构与运动；提示词请描述**画面里真实存在的东西**
+                    （人数、主要道具、机位方向），否则前几秒会被提示词抢走。
+                  </div>
+                </>
+              ) : null}
             </Panel>
 
             <Panel title="预算">

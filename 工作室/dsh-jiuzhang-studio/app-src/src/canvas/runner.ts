@@ -90,7 +90,7 @@ export function collectUpstreamImages(
   const sourceIds = edges.filter((e) => e.target === node.id).map((e) => e.source);
   const out: string[] = [];
   const usable = (u: string) => Boolean(u) && !u.startsWith('blob:') && !u.startsWith('file:')
-    && !u.startsWith('/luoshu/api/');   // 同源读取地址只是浏览器用的，后端要 rel 路径
+    && !u.startsWith('/jiuzhang/api/');   // 同源读取地址只是浏览器用的，后端要 rel 路径
   for (const id of sourceIds) {
     const up = allNodes.find((n) => n.id === id);
     const r = up?.data?.result as { url?: string; urls?: string[]; rel?: string; path?: string } | undefined;
@@ -365,7 +365,7 @@ export async function runNodeGeneration(opts: RunOptions): Promise<RunResult> {
  * 把后端产物路径转成可访问的 URL。
  *
  * 优先用后端的 `rel`（相对 dataDir），只有老数据才回退到从绝对路径里截取。
- * `/luoshu/api/file` 只接受 dataDir 内的路径，传绝对路径会被 403。
+ * `/jiuzhang/api/file` 只接受 dataDir 内的路径，传绝对路径会被 403。
  */
 export function assetUrlFromPath(absPath?: string, rel?: string): string | undefined {
   if (rel) return fileUrl(rel);

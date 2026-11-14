@@ -203,6 +203,61 @@ export async function vramStatus(cfg = loadConfig()) {
 /** 清显存缓存（生成前后可主动调，确保拿到最新值） */
 export function resetVramCache() { vramCache = { at: 0, value: null }; }
 
+/**
+ * 拉取 ComfyUI 实际可用的模型文件名（按 ComfyUI 的文件夹分类）。
+ *
+ * 为什么要问 ComfyUI 而不是扫磁盘：模型目录可能通过 extra_model_paths.yaml
+ * 配到别处，扫 dataDir 或猜路径都会漏。object_info 是**唯一权威**列表。
+ *
+ * 返回 `{ diffusion_models: [...], text_encoders: [...], vae: [...],
+ *           loras: [...], model_patches: [...] }`。
+ * 拿不到（ComfyUI 不可达 / 节点缺失）时返回空对象，调用方自行回退到默认名。
+ */
+export async function listModelFiles(cfg = loadConfig()) {
+  const base = await resolveComfyUrl(cfg).catch(() => '');
+  if (!base) return {};
+  /**
+   * 从 node schema 里取下拉选项。
+   *
+   * ⚠️ 两种形态都存在，必须都处理：
+   *   V1 节点：[ ["a.safetensors","b.safetensors"], {tooltip} ]   ← 列表在 [0]
+   *   V3 节点：[ "COMBO", {options: [...]} ]                      ← 列表在 [1].options
+   * 只按后者写的话，所有 V1 节点都会返回空 —— 表现为“模型列表永远为空、
+   * 静默退回默认名”，而这正是我们想避免的失败模式。
+   */
+  const pick = (info, nodeType, inputName) => {
+    const spec = info?.[nodeType]?.input?.required?.[inputName];
+    if (!Array.isArray(spec)) return [];
+    if (Array.isArray(spec[0])) return spec[0].filter((x) => typeof x === "string");
+    const opts = spec[1]?.options;
+    if (Array.isArray(opts)) return opts.filter((x) => typeof x === "string");
+    return [];
+  };
+  try {
+    // 一次请求拿全部节点信息比较重（1000+ 节点），但 object_info 已带 gzip；
+    // 只要这几类，分次问具体节点更省。
+    const nodes = ['UNETLoader', 'CLIPLoader', 'VAELoader', 'LoraLoaderModelOnly', 'ModelPatchLoader'];
+    const infos = await Promise.all(nodes.map(async (n) => {
+      try {
+        const r = await fetch(`${base}/object_info/${n}`, { signal: AbortSignal.timeout(15000) });
+        if (!r.ok) return [n, null];
+        return [n, await r.json()];
+      } catch { return [n, null]; }
+    }));
+    const map = Object.fromEntries(infos);
+    return {
+      diffusion_models: pick(map.UNETLoader, 'UNETLoader', 'unet_name'),
+      text_encoders: pick(map.CLIPLoader, 'CLIPLoader', 'clip_name'),
+      vae: pick(map.VAELoader, 'VAELoader', 'vae_name'),
+      loras: pick(map.LoraLoaderModelOnly, 'LoraLoaderModelOnly', 'lora_name'),
+      model_patches: pick(map.ModelPatchLoader, 'ModelPatchLoader', 'name'),
+    };
+  } catch {
+    return {};
+  }
+}
+
+
 /** 上传名只保留安全字符 —— ComfyUI 会把它当文件名落盘。 */
 function safeStem(text) {
   return String(text).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80) || 'img';
@@ -371,7 +426,7 @@ export async function runWorkflow({ cfg, workflow, map, job, outputsDir, onSubmi
       outputs: [{
         role: /\.(mp4|webm|mov)$/i.test(ext) ? 'video' : 'image',
         path: dest,
-        // rel 是相对 dataDir 的路径，前端直接拼 /luoshu/api/file?path=<rel> 即可。
+        // rel 是相对 dataDir 的路径，前端直接拼 /jiuzhang/api/file?path=<rel> 即可。
         // 旧实现只给绝对路径，逼前端用正则从 "…/outputs/xxx.png" 里抠 —— 换机器就废。
         rel: toRel(cfg, dest),
         bytes: buf.length,

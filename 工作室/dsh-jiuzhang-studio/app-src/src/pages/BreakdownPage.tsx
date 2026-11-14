@@ -178,7 +178,7 @@ export function BreakdownPage() {
                     }}
                   >
                     <img
-                      src={`/luoshu/api/assets/item?id=${encodeURIComponent(a.id)}`}
+                      src={`/jiuzhang/api/assets/item?id=${encodeURIComponent(a.id)}`}
                       alt={a.name}
                       style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', borderRadius: 4, background: 'var(--jz-bg-sunken)' }}
                     />

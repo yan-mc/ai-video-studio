@@ -1,7 +1,7 @@
 # 九章工作室 · SPA（app-src）
 
 浏览器端 SPA：**Vite 5 + React 18.3.1 + TypeScript（strict）+ Zustand**。
-由 DSH Host 插件 `dsh-jiuzhang-studio` 以 `/luoshu/app` 前缀同源服务。
+由 DSH Host 插件 `dsh-jiuzhang-studio` 以 `/jiuzhang/app` 前缀同源服务。
 
 ## 命令
 
@@ -12,7 +12,7 @@
 $env:Path = '<你的 Node 目录>;' + $env:Path
 npm install
 npm run build      # tsc --noEmit && vite build → ../dsh-jiuzhang-studio/app-dist
-npm run dev        # 开发服务器（含 /luoshu/api 代理；端口取 $env:DSH_PORT，默认 7983）
+npm run dev        # 开发服务器（含 /jiuzhang/api 代理；端口取 $env:DSH_PORT，默认 7983）
 npm run typecheck
 ```
 
@@ -23,9 +23,9 @@ Host 的 `serveSpa` 从这里读，无需二次拷贝。
 
 | 事项 | 约定 |
 | --- | --- |
-| `base` | `'./'` —— SPA 挂在 `/luoshu/app` 且 Host 端口随机，绝对路径会坏 |
+| `base` | `'./'` —— SPA 挂在 `/jiuzhang/app` 且 Host 端口随机，绝对路径会坏 |
 | 路由 | **hash 路由**（`#/canvas` `#/assets` `#/projects` `#/h3` `#/settings` `#/jobs`），不用 React Router |
-| API base | `/luoshu/api` 相对路径（同源自动适配端口） |
+| API base | `/jiuzhang/api` 相对路径（同源自动适配端口） |
 | 写鉴权 | `POST/PUT/PATCH/DELETE` 自动带 `X-JZ-Token`（从 `GET /token` 取一次并缓存） |
 | 文案 | 全部中文，集中在 `src/i18n/zh.ts` |
 | 颜色 | 只允许用 `var(--jz-*)`，令牌全在 `src/ui/tokens.css` |

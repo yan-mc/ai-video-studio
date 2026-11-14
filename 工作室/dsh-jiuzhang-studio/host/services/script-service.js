@@ -1,7 +1,7 @@
 /**
- * 剧本创作服务 —— 对齐洛书 `script` 域（160 键 / 35 子域）。
+ * 剧本创作服务 —— 对齐参考实现 `script` 域（160 键 / 35 子域）。
  *
- * 洛书核心能力：
+ * 参考实现核心能力：
  *  - 5 阶段流水线：大纲 → 人物小传 → 章节目录 → 章节正文 → 视觉分镜
  *  - 60 集长篇支持
  *  - 14 种题材模板
@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { safeId } from '../security.js';
 
-/** 14 种题材模板（洛书 script.templates 对齐） */
+/** 14 种题材模板（参考实现 script.templates 对齐） */
 export const GENRES = Object.freeze([
   { id: 'xuanhuan', name: '玄幻', hints: '修炼体系、宗门、境界突破' },
   { id: 'xianxia', name: '仙侠', hints: '仙魔对立、飞升、道心' },
@@ -36,7 +36,7 @@ export const GENRES = Object.freeze([
   { id: 'farming', name: '种田', hints: '经营、建设、慢节奏成长' },
 ]);
 
-/** 5 阶段（洛书 script.stage.*） */
+/** 5 阶段（参考实现 script.stage.*） */
 export const STAGES = Object.freeze([
   { id: 'outline', name: '大纲', desc: '一句话故事 → 三幕结构' },
   { id: 'bios', name: '人物小传', desc: '主要角色的动机、弧光、关系' },
@@ -202,7 +202,7 @@ export function buildStoryboard({ outline, body }) {
 }
 
 /**
- * 一致性检查（洛书 script.consistency，上限可调）。
+ * 一致性检查（参考实现 script.consistency，上限可调）。
  * 纯本地规则：检查命名冲突、集数缺口、角色未登场等。
  */
 export function checkConsistency({ outline, bios, chapters, bodies = [] }, { limit = 10 } = {}) {

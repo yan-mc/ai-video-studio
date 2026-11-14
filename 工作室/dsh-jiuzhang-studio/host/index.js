@@ -3,10 +3,10 @@
  *
  * 职责：
  *  1) 注册 Agent 工具（studio 系列，供模型调用）
- *  2) 注册 /luoshu/api（handler 前缀路由，带自查安全）
- *  3) 注册 /luoshu/app（SPA 静态）
- *  4) 注册 /luoshu/assets（3D 资产静态，带 Range）
- *  5) previz 子进程管理
+ *  2) 注册 /jiuzhang/api（handler 前缀路由，带自查安全）
+ *  3) 注册 /jiuzhang/app（SPA 静态）
+ *  4) 注册 /jiuzhang/assets（3D 资产静态，带 Range）
+ *  5) Blender 预演渲染（子进程，见 services/blender-service.js）
  *
  * 注意：控制器不挂到 ctx 上（Cordis 禁止未 provide 的属性），
  * 统一放 host/runtime.js 模块级单例，工具与 API 从那里取。
@@ -22,13 +22,11 @@ import { runH3Local, runH3ImageLocal } from './services/generator.js';
 import { buildBreakdownPrompt, breakdownLevel } from './services/breakdown.js';
 import { registerTools } from './tools.js';
 import { createH3Workshop } from './services/h3-workshop.js';
-import { createPrevizController } from './services/previz-controller.js';
 import { createPostService } from './services/post.js';
 import { createAssetService } from './services/asset-service.js';
 import { createScriptService } from './services/script-service.js';
 import { createComicService } from './services/comic-service.js';
 import { createModelWorkbench } from './services/model-workbench.js';
-import { createDirectorController } from './services/director3d.js';
 import { createCanvasAgent } from './services/canvas-agent.js';
 import { createVaultService } from './services/character-vault.js';
 import { createExtrasService } from './services/extras.js';
@@ -37,9 +35,9 @@ import { readWorkflowCached } from './services/workflow-paths.js';
 
 export const inject = ['tools', 'webServer'];
 
-const API_PREFIX = '/luoshu/api';
-const APP_PREFIX = '/luoshu/app';
-const ASSET_PREFIX = '/luoshu/assets';
+const API_PREFIX = '/jiuzhang/api';
+const APP_PREFIX = '/jiuzhang/app';
+const ASSET_PREFIX = '/jiuzhang/assets';
 
 export function apply(ctx) {
   const root = path.resolve(import.meta.dirname, '..');
@@ -66,14 +64,12 @@ export function apply(ctx) {
   const cfg = loadConfig();
   initRuntime({ root, cfg, webServer: ctx.webServer });
 
-  const previz = createPrevizController({ root, cfg });
   const h3 = createH3Workshop({ root, cfg });
   const post = createPostService({ cfg });
   const assets = createAssetService({ cfg });
   const script = createScriptService({ cfg });
   const comic = createComicService({ cfg });
   const mw = createModelWorkbench({ cfg });
-  const director = createDirectorController({ cfg, root });
   const vault = createVaultService({ cfg });
   const canvasAgent = createCanvasAgent({
     cfg,
@@ -143,7 +139,7 @@ export function apply(ctx) {
     },
   });
   const extras = createExtrasService({ cfg });
-  attachControllers({ previz, h3, post, assets, script, comic, mw, director, canvasAgent, extras, vault });
+  attachControllers({ h3, post, assets, script, comic, mw, canvasAgent, extras, vault });
 
   /* ---------------------------- HTTP 路由 ---------------------------- */
 
@@ -198,16 +194,12 @@ export function apply(ctx) {
         if (recovered.recovered) {
           ctx.logger?.info?.(`[jiuzhang] 恢复扫描：标记 ${recovered.recovered} 个中断任务`);
         }
-        if (c.previzAutoStart) {
-          try { await previz.start(); } catch (e) { ctx.logger?.warn?.(`[jiuzhang] 预演引擎启动失败：${e.message}`); }
-        }
       } catch (e) {
         ctx.logger?.warn?.(`[jiuzhang] 启动编排失败：${String(e?.message || e)}`);
       }
     })();
 
     return () => {
-      try { previz.stop(); } catch { /* ignore */ }
       try { h3.dispose(); } catch { /* ignore */ }
       disposeRuntime();
     };

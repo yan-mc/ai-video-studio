@@ -2,7 +2,7 @@
  * 端口类型系统 —— 26 种节点的连线语义（本任务的核心）。
  *
  * 为什么需要它：
- *   洛书的官方行为是「从某个输出口拖线到空白处，右键菜单**只列出能连上的节点**」。
+ *   参考实现的行为是「从某个输出口拖线到空白处，右键菜单**只列出能连上的节点**」。
  *   要做到这一点，光有 React Flow 的 handle 不够——必须知道每个端口"是什么类型"，
  *   并且有一张明确的兼容矩阵。否则只能全列 26 种，用户体验立刻退化。
  *
@@ -71,7 +71,7 @@ export const ACCEPTS: Readonly<Record<PortKind, readonly PortKind[]>> = Object.f
 
   // 图片端口接受：
   //   image    —— 常规图片
-  //   panorama —— 全景图本身就是一张 equirect 图片，可直接当素材用（洛书里全景图能进图片轨道）
+  //   panorama —— 全景图本身就是一张 equirect 图片，可直接当素材用（参考实现里全景图能进图片轨道）
   //   asset    —— 角色/场景/道具提取产出的资产条目**自带代表图**，可当参考图喂下游
   //   pose     —— 姿势台导出的姿势渲染图
   image: ['image', 'panorama', 'asset', 'pose'],
@@ -270,7 +270,7 @@ export const NODE_PORTS: Readonly<Record<string, NodePortSpec>> = Object.freeze(
   },
 
   /* -------------------------------- 结果 -------------------------------- */
-  // 结果节点是回流的：既能显示结果，也能把结果继续往下游递（洛书的"结果回流"）
+  // 结果节点是回流的：既能显示结果，也能把结果继续往下游递（参考实现的"结果回流"）
   exportImageNode: {
     inputs: [port('in:image', 'image', '结果图')],
     outputs: [port('out:image', 'image', '图片')],

@@ -1,14 +1,14 @@
 /**
  * REST 路由表。
  *
- * 全部挂在 /luoshu/api 前缀下（handler 路由，绕过 DSH 准入 → 必须自查 security）。
+ * 全部挂在 /jiuzhang/api 前缀下（handler 路由，绕过 DSH 准入 → 必须自查 security）。
  * 前缀刻意与 DSH 自己的 /api 区分，绝不与 /api/* 冲突（审查实证 401 vs 200）。
  */
 import path from 'node:path';
 import fs from 'node:fs';
 import { loadConfig, saveConfig, maskConfig, sanitizeConfigPatch, resetConfigCache } from '../config.js';
 import { guard, safeId, safeJoin, getWriteToken, isSameOrigin as _isSameOrigin, isLoopbackHost as _isLoopbackHost } from '../security.js';
-import { dirs, projects, newProject, newShot, validateShot, PROFILES, resolutionFor, h3Length, H3_MODEL_SLOTS, NODE_TYPES, NODE_LABELS, ASSET_TYPES, ASSET_TYPE_LABELS, PROJECT_CATEGORY_LABELS, normalizeMode } from '../store/models.js';
+import { dirs, projects, newProject, newShot, validateShot, PROFILES, resolutionFor, h3Length, H3_MODEL_SLOTS, NODE_TYPES, NODE_LABELS, ASSET_TYPES, ASSET_TYPE_LABELS, PROJECT_CATEGORY_LABELS, normalizeMode, normalizeControl, normalizeActors, normalizeProps, normalizeCamera3d } from '../store/models.js';
 import * as comfy from '../services/comfy-client.js';
 import * as seedance from '../services/seedance-client.js';
 import { runJob, cancelJob, runtimeStats, markCancelled, CancelledError } from '../services/job-runner.js';
@@ -17,7 +17,6 @@ import { runH3Local, runH3ImageLocal, jobKind } from '../services/generator.js';
 import { packGraph, unpackGraph, IMG_REF_PREFIX } from '../store/image-pool.js';
 import { SCRIPT_GENRES, SCRIPT_STAGES, checkConsistency } from '../services/script-service.js';
 import { COMIC_TEMPLATES, COMIC_STATIONS } from '../services/comic-service.js';
-import { DIRECTOR_COMMANDS, CAMERA_MOVES, DIRECTOR_FPS } from '../services/director3d.js';
 import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, H3_MODES, H3_LIMITS } from '../services/h3-prompt.js';
 import { H3_IMAGE_MODELS, H3_IMAGE_SIZES, IMAGE_VAE, IMAGE_CLIP, IMAGE_SAMPLING, checkImageModels } from '../services/h3-image.js';
 import { BREAKDOWN_LEVELS, BREAKDOWN_SIZES, buildBreakdownPrompt, breakdownLevel, breakdownSize } from '../services/breakdown.js';
@@ -27,8 +26,7 @@ import {
 } from '../services/character-vault.js';
 import { buildRenderPlan, subjectsForPrompt, buildMediaNotes } from '../services/render-plan.js';
 import { probeMedia } from '../services/media-probe.js';
-import { renderPrevizVideo } from '../services/previz-video.js';
-import { findBrowser, screenshotPreviz, cropWithFfmpeg, buildPrevizStylePrompt } from '../services/previz-shot.js';
+import { blenderStatus, buildSceneSpec, renderControl, BLENDER_MODES, listModelAssets, listAssetActions, openInBlender } from '../services/blender-service.js';
 import { resolveFfmpeg } from '../services/seedance-client.js';
 import { createCanvasAgent } from '../services/canvas-agent.js';
 import { getRuntime } from '../runtime.js';
@@ -199,12 +197,12 @@ function pipeStream(res, abs, range) {
  * 处理一次 API 请求。
  * @param {import('node:http').IncomingMessage} req
  * @param {import('node:http').ServerResponse} res
- * @param {object} ctx  插件上下文（含 previz 控制器等）
+ * @param {object} ctx  插件上下文（含各服务）
  */
 export async function handleApi(req, res) {
   const ctx = getRuntime();
   const url = new URL(req.url, 'http://127.0.0.1');
-  const route = url.pathname.replace(/^\/luoshu\/api/, '') || '/';
+  const route = url.pathname.replace(/^\/jiuzhang\/api/, '') || '/';
 
   try {
     // token 端点必须免 token（SPA / 客户端启动时取）
@@ -250,7 +248,7 @@ export async function handleApi(req, res) {
         ok: true,
         h3,
         seedance: sd,
-        previz: await previzHealth(ctx),
+        blender: blenderStatus(),
         workflows: {
           h3: { exists: wfH3.exists, dir: wfH3.dir },
           image: { exists: wfImg.exists, dir: wfImg.dir },
@@ -416,22 +414,6 @@ export async function handleApi(req, res) {
     if (req.method === 'POST' && route === '/h3/length') {
       const body = await readJsonBody(req);
       return sendJson(res, 200, { length: h3Length(body.durationSec, body.fps) });
-    }
-
-    /* ---------------- 预演 ---------------- */
-    if (req.method === 'GET' && route === '/previz/health') return sendJson(res, 200, await previzHealth(ctx));
-    if (req.method === 'POST' && route === '/previz/start') return sendJson(res, 200, await ctx.previz.start());
-    if (req.method === 'POST' && route === '/previz/stop') return sendJson(res, 200, await ctx.previz.stop());
-    if (req.method === 'GET' && route === '/previz/state') return sendJson(res, 200, await ctx.previz.state());
-    if (req.method === 'POST' && route === '/previz/command') {
-      const body = await readJsonBody(req);
-      // 与 /director/command 保持一致：引擎命令名必须匹配已知形态，
-      // 不能把任意字符串原样透传给子进程。
-      const name = String(body.name || '');
-      if (!/^director_[a-z_]+$/.test(name)) {
-        return sendJson(res, 400, { error: 'INVALID_COMMAND', name });
-      }
-      return sendJson(res, 200, await ctx.previz.command(name, body.args || {}));
     }
 
     /* ---------------- H3 工坊 / 成片 ---------------- */
@@ -613,120 +595,57 @@ export async function handleApi(req, res) {
       return sendJson(res, 200, { ok: true, queued: todo.length, total: targets.length });
     }
 
-    /* ---------------- 预演截图 → 出图 ---------------- */
-    if (req.method === 'GET' && route === '/previz-shot/meta') {
-      return sendJson(res, 200, {
-        browser: findBrowser(),
-        defaultUrl: `http://127.0.0.1:${cfg.previzPort || 4318}/`,
-        viewport: { width: 1600, height: 1000 },
-      });
-    }
-
-    /* ---------------- 预演 → 白模视频 ---------------- */
+    /* ---------------- Blender 预演渲染 ---------------- */
     //
-    // 逐帧渲染预演工程，输出 mp4。用途是把 3D 白模当 H3 的**参考视频**。
-    // 详见 host/services/previz-video.js 顶部说明（含两个引擎行为坑）。
-    if (req.method === 'POST' && route === '/previz/video') {
-      const body = await readJsonBody(req);
-      const fps = Math.max(6, Math.min(30, Number(body.fps) || 24));
-      const width = Math.max(320, Math.min(1920, Number(body.width) || 1280));
-      const height = Math.max(240, Math.min(1080, Number(body.height) || 720));
-      const stamp = `previz_${Date.now().toString(36)}`;
-      const outDir = path.join(cfg.dataDir, 'previz', stamp);
-
-      try {
-        const r = await renderPrevizVideo({
-          previzBase: `http://127.0.0.1:${cfg.previzPort || 4318}`,
-          outDir,
-          fps,
-          width,
-          height,
-          maxSeconds: Number(body.maxSeconds) || 0,
-        });
-        const rel = path.relative(cfg.dataDir, r.videoPath).replace(/\\/g, '/');
-        return sendJson(res, 200, { ...r, rel, outDir: path.relative(cfg.dataDir, outDir).replace(/\\/g, '/') });
-      } catch (e) {
-        return sendJson(res, 400, { error: String(e?.message || e) });
-      }
+    // 从镜头卡直接渲出 H3 的**控制序列**（depth / pose / canny / gray）。
+    // 与 /previz/video 的区别：那条走的是旧的 three.js 预演引擎，只能出 RGB；
+    // 这条走 Blender，能出 ControlNet 真正需要的条件通道。
+    // 见 host/services/blender-service.js 顶部说明（含 GPL 边界）。
+    if (req.method === 'GET' && route === '/blender/health') {
+      return sendJson(res, 200, blenderStatus());
     }
-    if (req.method === 'POST' && route === '/previz-shot/capture') {
+
+    // 3D 资产库（glb/gltf/fbx/obj）—— 供走位编辑与动作选择用
+    if (req.method === 'GET' && route === '/blender/assets') {
+      return sendJson(res, 200, { assets: listModelAssets(cfg) });
+    }
+
+    // 用桌面 Blender 打开最近的场景（.blend）—— 用户要"真能调"就走这条
+    if (req.method === 'POST' && route === '/blender/open') {
       const body = await readJsonBody(req);
-      const shot = await screenshotPreviz({
+      return sendJson(res, 200, await openInBlender({
+        blendPath: body.blendRel ? String(body.blendRel) : '',
         cfg,
-        url: body.url || `http://127.0.0.1:${cfg.previzPort || 4318}/`,
-        width: Number(body.width) || 1600,
-        height: Number(body.height) || 1000,
-        waitMs: Number(body.waitMs) || 8000,
-      });
-      // 裁出 3D 视口
-      let cropped = null;
-      try {
-        const ffmpeg = resolveFfmpeg(cfg);
-        const dst = shot.path.replace(/\.png$/, '_crop.png');
-        cropped = await cropWithFfmpeg(ffmpeg, shot.path, dst, {
-          width: Number(body.width) || 1600,
-          height: Number(body.height) || 1000,
-        });
-      } catch { /* 裁剪失败就用原图 */ }
-      return sendJson(res, 200, { ...shot, cropped: cropped ?? null });
+      }));
     }
-    if (req.method === 'POST' && route === '/previz-shot/generate') {
+
+    // 读某个模型内部的动作名（真的启一次 Blender 去读，不让用户猜）
+    if (req.method === 'POST' && route === '/blender/actions') {
       const body = await readJsonBody(req);
-      const wf = loadImageWorkflow();
-      if (!wf) return sendJson(res, 500, { error: 'WORKFLOW_MISSING' });
-      const models = checkImageModels(cfg);
-      if (!models.ready) return sendJson(res, 400, { error: 'IMAGE_MODEL_MISSING', missing: models.missing });
-
-      // 参考图：优先用裁好的视口
-      let refAbs = null;
-      if (body.refPath) {
-        const p = path.isAbsolute(body.refPath)
-          ? body.refPath
-          : safeJoin(cfg.dataDir, String(body.refPath));
-        if (fs.existsSync(p)) refAbs = p;
-      }
-      if (!refAbs && body.autoCapture) {
-        const shot = await screenshotPreviz({ cfg, url: body.url });
-        try {
-          const ffmpeg = resolveFfmpeg(cfg);
-          const dst = shot.path.replace(/\.png$/, '_crop.png');
-          const c = await cropWithFfmpeg(ffmpeg, shot.path, dst);
-          refAbs = c.path;
-        } catch {
-          refAbs = shot.path;
-        }
-      }
-      if (!refAbs) return sendJson(res, 400, { error: 'REF_REQUIRED', detail: '需要预演截图' });
-
-      const prompt = buildPrevizStylePrompt(body.prompt ?? '', {
-        style: body.style ?? '电影感写实风格，柔和自然光，高细节',
-      });
-
-      const job = newJob({
-        projectId: body.projectId ? safeId(String(body.projectId)) : null,
-        shotId: null,
-        backendId: 'h3-image',
-        prompt,
-        params: {
-          kind: 'image',
-          imageSizeId: body.sizeId ?? 'h-16x9',
-          seed: body.seed ?? Math.floor(Math.random() * 2147483647),
-        },
-        mode: 'edit',
-      });
-      job.kind = 'image';
-      await jobsStore().upsert(job);
-
-      runAndArchive(job, async (running) => runH3ImageLocal({
-        workflow: wf,
-        job: running,
-        prompt,
-        shot: { refs: { images: [refAbs] }, imageSizeId: body.sizeId },
-        cfg,
-      }), ctx).catch(() => {});
-
-      return sendJson(res, 200, { ...job, refPath: refAbs });
+      const rel = String(body.assetRel || '');
+      if (!rel) return sendJson(res, 400, { error: 'ASSET_REQUIRED' });
+      return sendJson(res, 200, await listAssetActions({ assetRel: rel, cfg }));
     }
+
+    if (req.method === 'POST' && route === '/blender/render') {
+      const body = await readJsonBody(req);
+      const mode = String(body.mode || 'depth');
+      const pid = body.projectId ? safeId(body.projectId) : '';
+      const shot = body.shot ?? (pid && body.shotId
+        ? listShots(pid).find((s) => s.id === body.shotId)
+        : null);
+      if (!shot) return sendJson(res, 404, { error: 'SHOT_NOT_FOUND' });
+      const spec = body.spec ?? buildSceneSpec(shot, { frames: body.frames });
+      const r = await renderControl({
+        mode,
+        spec,
+        cfg,
+        jobId: String(body.jobId || shot.id || ''),
+        timeoutMs: Math.max(30000, Math.min(900000, Number(body.timeoutMs) || 600000)),
+      });
+      return sendJson(res, 200, r);
+    }
+
 
     /* ---------------- 角色卡仓库 ---------------- */
     if (req.method === 'GET' && route === '/vault/meta') {
@@ -1028,56 +947,6 @@ export async function handleApi(req, res) {
       }), ctx).catch(() => {});
 
       return sendJson(res, 200, job);
-    }
-
-    /* ---------------- 3D 导演台 ---------------- */
-    if (req.method === 'GET' && route === '/director/meta') {
-      const [health, catalog] = await Promise.all([
-        ctx.director.health(),
-        ctx.director.catalog().catch(() => ({})),
-      ]);
-      return sendJson(res, 200, {
-        health,
-        commands: DIRECTOR_COMMANDS,
-        cameraMoves: CAMERA_MOVES,
-        fps: DIRECTOR_FPS,
-        catalog,
-      });
-    }
-    if (req.method === 'GET' && route === '/director/shots') {
-      return sendJson(res, 200, await ctx.director.listShots());
-    }
-    if (req.method === 'GET' && route === '/director/state') {
-      return sendJson(res, 200, await ctx.director.getState());
-    }
-    if (req.method === 'POST' && route === '/director/command') {
-      const body = await readJsonBody(req);
-      const name = String(body.name || '');
-      if (!/^director_[a-z_]+$/.test(name)) {
-        return sendJson(res, 400, { error: 'INVALID_COMMAND', name });
-      }
-      return sendJson(res, 200, { ok: true, result: await ctx.director.command(name, body.arguments ?? {}) });
-    }
-    if (req.method === 'POST' && route === '/director/build') {
-      const body = await readJsonBody(req);
-      // projectId 必须过 safeId：它会被拼进 shots 路径（见 shotsFile）
-      const pid = body.projectId ? safeId(String(body.projectId)) : '';
-      const shot = body.shot ?? (pid ? listShots(pid).find((s) => s.id === body.shotId) : null);
-      if (!shot) return sendJson(res, 404, { error: 'SHOT_NOT_FOUND' });
-      return sendJson(res, 200, await ctx.director.buildFromShot(shot, body));
-    }
-    if (req.method === 'POST' && route === '/director/camera-prompt') {
-      const body = await readJsonBody(req);
-      return sendJson(res, 200, await ctx.director.toCameraPrompt(body.shotId));
-    }
-    if (req.method === 'POST' && route === '/director/validate') {
-      return sendJson(res, 200, await ctx.director.validate());
-    }
-    if (req.method === 'POST' && route === '/director/start') {
-      return sendJson(res, 200, await ctx.director.start());
-    }
-    if (req.method === 'POST' && route === '/director/stop') {
-      return sendJson(res, 200, await ctx.director.stop());
     }
 
     /* ---------------- H3 提示词编译 ---------------- */
@@ -1802,6 +1671,13 @@ export function upsertShot(projectId, shot) {
   const next = {
     ...shot,
     mode: normalizeMode(shot.mode, { hasRefImages: (shot.refs?.images?.length ?? 0) > 0 }),
+    // 控制视频配置统一在落盘口收敛（REST 可直接传 body.shot，绕过 newShot）
+    control: normalizeControl(shot.control),
+    // 3D 预演结构化数据同样在落盘口收敛 —— 这三个字段决定 Blender 渲什么，
+    // 形状错了整镜渲不出来（且错误信息会很难懂）。
+    actors: normalizeActors(shot.actors),
+    props: normalizeProps(shot.props),
+    camera3d: normalizeCamera3d(shot.camera3d),
     updatedAt: Date.now(),
   };
   if (!next.id) next.id = newShot().id;
@@ -1941,7 +1817,7 @@ async function monitorPayload(ctx) {
     jobs: { total: allJobs.length, running, queued, failed, ...stats },
     h3,
     seedance: { mode: seedance.isAvailable(cfg) ? 'real' : 'mock' },
-    previz: await previzHealth(ctx),
+    blender: blenderStatus(),
     disk: diskFree(cfg.dataDir),
     updatedAt: Date.now(),
   };
@@ -1955,9 +1831,6 @@ function diskFree(dir) {
   } catch { return null; }
 }
 
-async function previzHealth(ctx) {
-  try { return await ctx.previz.health(); } catch (e) { return { ok: false, detail: String(e.message || e) }; }
-}
 
 /* --------------------------------------------------- 后端执行分发 */
 

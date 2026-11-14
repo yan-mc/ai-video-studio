@@ -2,7 +2,7 @@
  * 任务产出的读取地址。
  *
  * 后端 `outputs[]` 同时给 `rel`（相对 dataDir 的正斜杠路径）与 `path`（绝对路径）。
- * 读取只认 `rel` —— `/luoshu/api/file` 用 safeJoin 把请求限制在 dataDir 内，
+ * 读取只认 `rel` —— `/jiuzhang/api/file` 用 safeJoin 把请求限制在 dataDir 内，
  * 传绝对路径会被 403 拒绝。
  *
  * 这里兼容三种历史形态，避免各页面各写一套正则：
@@ -35,10 +35,10 @@ export function outputUrl(o: JobOutput | null | undefined): string {
 
 /** dataDir 相对路径 → 同源读取地址 */
 export function fileUrl(rel: string): string {
-  return `/luoshu/api/file?path=${encodeURIComponent(String(rel).replace(/\\/g, '/'))}`;
+  return `/jiuzhang/api/file?path=${encodeURIComponent(String(rel).replace(/\\/g, '/'))}`;
 }
 
 /** 素材读取地址 */
 export function assetUrl(id: string): string {
-  return `/luoshu/api/assets/item?id=${encodeURIComponent(String(id))}`;
+  return `/jiuzhang/api/assets/item?id=${encodeURIComponent(String(id))}`;
 }

@@ -68,7 +68,7 @@ const REQUIRED = [
   'host/api/index.js',
   'host/store/json-store.js', 'host/store/models.js',
   'host/services/job-runner.js', 'host/services/job-store.js', 'host/services/comfy-client.js',
-  'host/services/seedance-client.js', 'host/services/previz-controller.js',
+  'host/services/seedance-client.js', 'host/services/blender-service.js',
   'host/services/h3-workshop.js', 'host/services/post.js', 'host/services/asset-service.js',
   'app-dist/index.html', 'data/workflows/h3.json',
 ];
@@ -282,8 +282,8 @@ const comfy = await import('../host/services/comfy-client.js');
   const pick = (ref) => resolveRefImages({ refs: { images: [ref] } }, pcfg).length > 0;
   add('B-参考图', '相对路径可解析', pick('assets/ref.png'));
   add('B-参考图', '绝对路径可解析', pick(img));
-  // ⚠️ win32 上 path.isAbsolute('/luoshu/...') === true，必须先排除 URL 形态
-  add('B-参考图', '画布同源 /file URL 可反查', pick('/luoshu/api/file?path=' + encodeURIComponent('assets/ref.png')));
+  // ⚠️ win32 上 path.isAbsolute('/jiuzhang/...') === true，必须先排除 URL 形态
+  add('B-参考图', '画布同源 /file URL 可反查', pick('/jiuzhang/api/file?path=' + encodeURIComponent('assets/ref.png')));
   add('B-参考图', '远程 URL 被丢弃（后端取不到）', !pick('https://example.com/a.png'));
   add('B-参考图', 'blob URL 被丢弃', !pick('blob:http://127.0.0.1/x'));
 }
@@ -328,15 +328,146 @@ const comfy = await import('../host/services/comfy-client.js');
   add('B-后端', 'seedance-cloud 不是本地后端', !isLocalBackendOf('seedance-cloud'));
 }
 
-// (8) 导演台不得硬编码端口，且 stop 必须复用同一控制器实例
+
+// (8b) H3 控制视频通道（Fun ControlNet Union）
+//
+// 这条链路最危险的失败模式是**静默失效**：模板里的节点没接进采样链路、
+// 或者占位符没进 map，ComfyUI 都不会报错，只是"控制没生效"——
+// 光看产物根本分辨不出来（实测过：无控制与有控制的 prompt 完全一样也能出片）。
 {
-  const src = fs.readFileSync(path.join(ROOT, 'host/services/director3d.js'), 'utf8');
-  add('B-导演台', 'base 跟随 cfg.previzPort', src.includes('cfg?.previzPort') || src.includes('cfg.previzPort'));
-  add('B-导演台', 'start/stop 复用一个控制器实例', src.includes('sharedPreviz'));
-  add('B-导演台', 'stop 不再新建实例', !/async function stop\(\)\s*\{[\s\S]{0,120}createPrevizController\(/.test(src));
+  const wfRaw = fs.readFileSync(path.join(ROOT, 'data/workflows/h3.json'), 'utf8');
+  const wf = JSON.parse(wfRaw);
+  add('B-控制视频', '模板含 FunControlNetApply 节点', Boolean(wf['63']) && wf['63'].class_type === 'MiniMaxH3FunControlNetApply');
+  add('B-控制视频', '模板含 ModelPatchLoader 节点', Boolean(wf['62']) && wf['62'].class_type === 'ModelPatchLoader');
+  add('B-控制视频', '模板含控制视频 LoadVideo+GetVideoComponents', wf['60']?.class_type === 'LoadVideo' && wf['61']?.class_type === 'GetVideoComponents');
+  add('B-控制视频', '控制强度/区间可占位', ['strength', 'start_percent', 'end_percent'].every((k) => typeof wf['63'].inputs[k] === 'string'));
+
+  const gen = fs.readFileSync(path.join(ROOT, 'host/services/generator.js'), 'utf8');
+  add('B-控制视频', '解析入口唯一（resolveControl）', gen.includes('export function resolveControl'));
+  // 采样链路必须真的改指向 patch 节点，否则控制分支是死的
+  add('B-控制视频', '启用时 model 改指向 patch 节点', /useControl[\s\S]{0,400}\['63', 0\]/.test(gen));
+  add('B-控制视频', '禁用时整组节点被删掉', /for \(const id of \['60', '61', '62', '63'\]\) delete wfCopy\[id\]/.test(gen));
+
+  // 首尾帧：Ref2VA 没有 first_frame/last_frame 口，必须走 AddGuide
+  add('B-控制视频', '首尾帧走 AddGuide（Ref2VA 无首尾帧口）', gen.includes('MiniMaxH3AddGuide'));
+  add('B-控制视频', '首尾帧不复用参考图槽位 20/21', gen.includes("wfCopy['70']") && gen.includes("wfCopy['71']"));
+
+  // 镜头卡模型层
+  const models = fs.readFileSync(path.join(ROOT, 'host/store/models.js'), 'utf8');
+  const svcGen = fs.readFileSync(path.join(ROOT, 'host/services/generator.js'), 'utf8');
+  const cfgSrc = fs.readFileSync(path.join(ROOT, 'host/config.js'), 'utf8');
+  add('B-控制视频', '镜头卡有 control 字段', models.includes('control: normalizeControl(rest.control)'));
+  add('B-控制视频', 'strength/区间被夹到合法范围', models.includes('function normalizeControl') && models.includes('clamp01'));
 }
 
-// (9) 画布 Agent 的生成/技能工具必须真的接线
+// (8c) Blender 预演渲染
+//
+// 这条链路的失败模式同样是"静默"：Blender 无头渲染**即使成功也常返回非 0 退出码**
+// （插件/GPU 警告），所以必须"以产物为准"，不能靠退出码判断。
+// 另外 render_shot.py 是 GPL 脚本，通过子进程调用；一旦有人把它改成 import 型
+// addon，就会把整个插件拖进 GPL 传染范围 —— 这里锁住"必须是 -b --python 子进程"。
+{
+  const svc = fs.readFileSync(path.join(ROOT, 'host/services/blender-service.js'), 'utf8');
+  add('B-Blender', '四种控制通道齐备', ['depth', 'pose', 'canny', 'gray'].every((m) => svc.includes(`'${m}'`)));
+  add('B-Blender', '子进程调用（不做 addon）', svc.includes("'--factory-startup'") && svc.includes("'--python'"));
+  add('B-Blender', '以产物判断成功（不看退出码）', svc.includes('BLENDER_NO_OUTPUT'));
+  add('B-Blender', '镜头卡 → 场景 spec', svc.includes('export function buildSceneSpec'));
+  // Z-up 换算：参考产品用 y=高度，Blender 用 z=高度
+  add('B-Blender', '坐标系换算到 Blender Z-up', svc.includes('export function toBlenderVec') && svc.includes('return [n[0], -n[2], n[1]]'));
+  add('B-Blender', '可执行路径只认环境变量/内置探测', svc.includes("'DSH_BLENDER'") && svc.includes('process.env[key]') && !svc.includes('WRITABLE_CONFIG_KEYS'));
+
+  const py = fs.readFileSync(path.join(ROOT, 'host/blender/render_shot.py'), 'utf8');
+  add('B-Blender', 'Python 侧有四种输出模式', ['depth', 'pose', 'canny', 'gray'].every((m) => py.includes(`"${m}"`)));
+  // 坐标系：人偶关节必须用 Z 当高度（踩过：照抄参考产品的 y=高度 → 人偶躺平）
+  add('B-Blender', '人偶 Z-up（身高在 z 轴）', py.includes('joint("hips", root, 0, 0, 0.53 * n)'));
+  add('B-Blender', '深度用 EEVEE 视空间 Z（不是 Workbench pass）', py.includes('View Z Depth') && py.includes('ShaderNodeCameraData'));
+  add('B-Blender', '输出用 Raw 视图变换', py.includes('view_transform = "Raw"'));
+
+  // ---- 结构化走位 / 模型导入 / 动作库 ----
+  const models = fs.readFileSync(path.join(ROOT, 'host/store/models.js'), 'utf8');
+  const svcGen = fs.readFileSync(path.join(ROOT, 'host/services/generator.js'), 'utf8');
+  const cfgSrc = fs.readFileSync(path.join(ROOT, 'host/config.js'), 'utf8');
+  add('B-Blender', '镜头卡有 actors/props/camera3d', ['normalizeActors', 'normalizeProps', 'normalizeCamera3d'].every((k) => models.includes(`export function ${k}`)));
+  add('B-Blender', '走位坐标在落盘口归一化', models.includes('actors: normalizeActors(rest.actors'));
+  // 动作白名单必须与前端一致，否则前端能选、后端静默改成 stand
+  add('B-Blender', '走位动作有白名单', models.includes('const ACTIONS = new Set('));
+
+  // 模型导入：必须支持 glb/gltf/fbx/obj 四种
+  add('B-Blender', '支持 glb/gltf/fbx/obj 导入', ['import_scene.gltf', 'import_scene.fbx', 'wm.obj_import'].every((k) => py.includes(k)));
+  // 导入模型必须按包围盒归一化身高（Mixamo 单位五花八门）
+  add('B-Blender', '导入模型按包围盒归一化', py.includes('def fit_imported') && py.includes('target_height'));
+  // 不能随便改骨架的父子关系，否则动画断掉
+  add('B-Blender', '只重挂顶层对象（保住骨架）', py.includes('if ob.parent is None:'));
+
+  // 动作库
+  add('B-Blender', '列出 3D 资产库', svc.includes('export function listModelAssets'));
+  add('B-Blender', '读模型内置动作名', svc.includes('export async function listAssetActions'));
+  const probePy = fs.readFileSync(path.join(ROOT, 'host/blender/list_actions.py'), 'utf8');
+  add('B-Blender', '动作探测脚本输出可解析', probePy.includes('JZ_ACTIONS:'));
+  // Mixamo 的 Action 名不可猜，必须真的读出来
+  add('B-Blender', '动作探测走独立 Blender 进程', svc.includes("'list_actions.py'"));
+
+  // 导入模型的材质判定：必须按谱系而不是名字前缀
+  //  （glb 里对象名是 Body/Rig，跟 actor.name 无关；按名字判断会导致模型全黑）
+  add('B-Blender', 'pose 材质按谱系判定', py.includes('def _is_actor_mesh') && py.includes('node.parent'));
+
+  // ---- 模型名探测（不能写死量化版本）----
+  //
+  // 失败场景：用户装的是 int8_convrot 而非 fp8_scaled，写死名字会让
+  // ComfyUI 报 "Value not in list"，而且报错完全看不出是模型名的问题。
+  add('B-Blender', '模型名有探测入口', svcGen.includes('export function resolveModelNames'));
+  add('B-Blender', '量化版本可降级', svcGen.includes('QUANT_PREFERENCE') && svcGen.includes('export function pickModelName'));
+  add('B-Blender', '配置可覆盖模型名', cfgSrc.includes("'modelNames'"));
+  // ComfyUI 才是模型文件的权威来源（extra_model_paths 可能把目录配到别处）
+  const comfySrc = fs.readFileSync(path.join(ROOT, 'host/services/comfy-client.js'), 'utf8');
+  add('B-Blender', '向 ComfyUI 查实际模型列表', comfySrc.includes('export async function listModelFiles'));
+  add('B-Blender', '控制模型缺失时关掉控制通道', svcGen.includes('controlPatchOk'));
+
+  // ---- 分段串联（Ref2VA + AddGuide 首帧）----
+  //
+  // 这条最危险的两个失败模式：
+  //   ① AddGuide 节点 ID 与 LoadImage 抢号 → ComfyUI 报
+  //      "image, received_type(CONDITIONING)"（把 conditioning 当图用）
+  //   ② canny 通道没做边缘检测 → 与 gray 产物完全一样，但没人会发现
+  add('B-Blender', 'AddGuide 编号避开 LoadImage 槽位', svcGen.includes('let guideNode = 80'));
+  add('B-Blender', '分段用 Ref2VA + AddGuide 而非 I2VA', svcGen.includes('MiniMaxH3AddGuide') && !svcGen.includes("'MiniMaxH3ImageToVideo', inputs: { ...inputs, ref_images"));
+
+  const svcBlender = fs.readFileSync(path.join(ROOT, 'host/services/blender-service.js'), 'utf8');
+  // canny 必须走 ffmpeg edgedetect；否则和 gray 一样
+  add('B-Blender', 'canny 走边缘检测（不与 gray 同产物）', svcBlender.includes('edgedetect'));
+  add('B-Blender', 'canny 输出白底黑线', svcBlender.includes('negate'));
+  add('B-Blender', 'preview 通道供人看（不进 H3）', svcBlender.includes("'preview'") && svcBlender.includes('CONTROL_MODES'));
+  add('B-Blender', '可导出 .blend 供桌面编辑', svcBlender.includes('save_as_mainfile') || svcBlender.includes('openInBlender'));
+
+  // 三段白模脚本：接缝必须连续（上一段终点 == 下一段起点）
+  const tri = await import('../host/blender/beach-trilogy.js');
+  add('B-Blender', '三段白模齐备', tri.SHOTS.length === 3, String(tri.SHOTS.length));
+  add('B-Blender', '三段接缝无跳变', tri.seamIssues().length === 0, tri.seamIssues().join('; '));
+  add('B-Blender', '每段都有控制通道', tri.SHOTS.every((s) => s.camera3d && s.actors.length >= 2));
+
+  // ---- 文档与代码一致性（防止 skill/README 写错数字）----
+  {
+    const toolsSrc = fs.readFileSync(path.join(ROOT, "host/tools.js"), "utf8");
+    const toolCount = (toolsSrc.match(/^    'studio_[a-z_]+',/gm) || []).length;
+    const usage = fs.readFileSync(path.join(ROOT, "skills/jiuzhang-studio-usage/SKILL.md"), "utf8");
+    const setup = fs.readFileSync(path.join(ROOT, "skills/jiuzhang-studio-setup/SKILL.md"), "utf8");
+    const promptSkill = fs.readFileSync(path.join(ROOT, "skills/jiuzhang-studio-prompt/SKILL.md"), "utf8");
+
+    // 工具数量必须与文档一致（曾经写着 15 但实际 13）
+    add("B-文档", "usage skill 工具数与代码一致", usage.includes(toolCount + " 个"), "code=" + toolCount);
+    // 已删除的工具不能再出现在文档里
+    add("B-文档", "usage skill 无已删工具", !usage.includes("studio_previz") && !usage.includes("studio_director"));
+    // 新能力必须被三个 skill 覆盖
+    add("B-文档", "usage 覆盖 Blender", usage.includes("studio_blender") && usage.includes("/blender/render"));
+    add("B-文档", "setup 覆盖 Blender 安装", setup.includes("blender-5.2.4") || setup.includes("download.blender.org"));
+    add("B-文档", "setup 覆盖控制模型下载", setup.includes("model_patches") && setup.includes("fun_controlnet_union"));
+    add("B-文档", "prompt skill 覆盖控制视频写法", promptSkill.includes("控制视频") && promptSkill.includes("真实存在"));
+
+    // 旧引擎的配置项/文件不能再被文档提起
+    add("B-文档", "文档无旧引擎残留", !usage.includes("previzPort") && !usage.includes("/director/"));
+  }
+}
+
 {
   const idx = fs.readFileSync(path.join(ROOT, 'host/index.js'), 'utf8');
   add('B-画布Agent', '注入 runGenerate', idx.includes('runGenerate:'));
@@ -919,7 +1050,9 @@ const comfy = await import('../host/services/comfy-client.js');
   // ---- R11 死配置清理 + imageSteps 生效 ----
   {
     add('B-回归', 'R11 assetRoot 已移除', !('assetRoot' in loadConfig()));
-    add('B-回归', 'R11 workflowDir/previzDir 已加入', ('workflowDir' in loadConfig()) && ('previzDir' in loadConfig()));
+    add('B-回归', 'R11 workflowDir/modelNames 已加入', ('workflowDir' in loadConfig()) && ('modelNames' in loadConfig()));
+    // 旧 three.js 预演引擎已下线，三个 previz 配置项必须一起消失
+    add('B-回归', 'R11 旧 previz 配置已清除', !('previzDir' in loadConfig()) && !('previzPort' in loadConfig()) && !('previzAutoStart' in loadConfig()));
     const imgSrc = fs.readFileSync(path.join(ROOT, 'host/services/h3-image.js'), 'utf8');
     add('B-回归', 'R11 imageSteps 真的被读取', /cfg\?\.imageSteps/.test(imgSrc));
   }
@@ -986,40 +1119,6 @@ const comfy = await import('../host/services/comfy-client.js');
     add('B-回归', 'R17 listShots 对非法 id 返回空', Array.isArray(listShots('../../etc')) && listShots('../../etc').length === 0);
   }
 
-  // ---- R18 previz 引擎缺失时给出可操作信息 ----
-  {
-    const { createPrevizController } = await import('../host/services/previz-controller.js');
-    // 构造一个"哪里都找不到引擎"的环境：目录指向不存在的路径，
-    // 且临时清掉可能存在的环境变量覆盖。
-    const savedEnv = { PREVIZ_HOME: process.env.PREVIZ_HOME, DSH_PREVIZ_DIR: process.env.DSH_PREVIZ_DIR };
-    delete process.env.PREVIZ_HOME;
-    delete process.env.DSH_PREVIZ_DIR;
-    const emptyRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jz-nopreviz-'));
-    const emptyData = fs.mkdtempSync(path.join(os.tmpdir(), 'jz-noprevizdata-'));
-    try {
-      const pc = createPrevizController({
-        root: emptyRoot,
-        cfg: { ...cfg, previzDir: '', dataDir: emptyData, previzPort: 43998 },
-      });
-      add('B-回归', 'R18 找不到引擎时 resolveEngineDir 为空', pc.resolveEngineDir() === '');
-      const h = await pc.health();
-      // 若本机恰好在 43998 上跑着引擎，那属于外部引擎，不做断言
-      if (!h.ok) {
-        add('B-回归', 'R18 未装引擎时 available=false', h.available === false, JSON.stringify(h.detail));
-        add('B-回归', 'R18 给出可操作提示', typeof h.hint === 'string' && h.hint.includes('previz'), h.hint);
-      } else {
-        skip('B-回归', 'R18 端口上已有外部引擎，跳过未安装断言', h.url);
-      }
-      const started = await pc.start();
-      add('B-回归', 'R18 未装引擎时 start 不抛、返回可读原因',
-        started.ok === true || (started.ok === false && Boolean(started.hint || started.detail)), JSON.stringify(started.detail));
-    } finally {
-      if (savedEnv.PREVIZ_HOME !== undefined) process.env.PREVIZ_HOME = savedEnv.PREVIZ_HOME;
-      if (savedEnv.DSH_PREVIZ_DIR !== undefined) process.env.DSH_PREVIZ_DIR = savedEnv.DSH_PREVIZ_DIR;
-      fs.rmSync(emptyRoot, { recursive: true, force: true });
-      fs.rmSync(emptyData, { recursive: true, force: true });
-    }
-  }
   // ---- R19 提交后 remoteId 必须立即可见（否则窗口期取消打不到远端）----
   {
     const { runJob, cancelJob } = await import('../host/services/job-runner.js');
@@ -1263,7 +1362,6 @@ const comfy = await import('../host/services/comfy-client.js');
 const { initRuntime, attachControllers } = await import('../host/runtime.js');
 const { handleApi } = await import('../host/api/index.js');
 const { serveSpa } = await import('../host/static.js');
-const { createPrevizController } = await import('../host/services/previz-controller.js');
 const { createH3Workshop } = await import('../host/services/h3-workshop.js');
 const { createPostService } = await import('../host/services/post.js');
 const { createAssetService } = await import('../host/services/asset-service.js');
@@ -1271,7 +1369,6 @@ const { createAssetService } = await import('../host/services/asset-service.js')
 let port = 0;
 initRuntime({ root: ROOT, cfg, webServer: { getOrigin: () => `http://127.0.0.1:${port}` } });
 attachControllers({
-  previz: createPrevizController({ root: ROOT, cfg }),
   h3: createH3Workshop({ root: ROOT, cfg }),
   post: createPostService({ cfg }),
   assets: createAssetService({ cfg }),
@@ -1284,8 +1381,8 @@ fs.writeFileSync(path.join(distTmp, 'a.txt'), 'static-ok');
 
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
-  if (u.pathname.startsWith('/luoshu/api')) return handleApi(req, res).catch((e) => { res.writeHead(500); res.end(String(e)); });
-  if (u.pathname.startsWith('/luoshu/app')) return serveSpa(req, res, { prefix: '/luoshu/app', distDir: distTmp }).catch(() => res.end());
+  if (u.pathname.startsWith('/jiuzhang/api')) return handleApi(req, res).catch((e) => { res.writeHead(500); res.end(String(e)); });
+  if (u.pathname.startsWith('/jiuzhang/app')) return serveSpa(req, res, { prefix: '/jiuzhang/app', distDir: distTmp }).catch(() => res.end());
   res.writeHead(404); res.end();
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -1302,52 +1399,52 @@ async function call(method, p, body, headers = {}) {
   return { status: r.status, json: j, text: t };
 }
 
-const tokRes = await call('GET', '/luoshu/api/token');
+const tokRes = await call('GET', '/jiuzhang/api/token');
 const TOKEN = tokRes.json?.token;
 add('C-HTTP', 'GET /token 返回 token', Boolean(TOKEN));
 add('C-HTTP', 'GET /token 注入 origin', tokRes.json?.origin === base);
 
-add('C-HTTP', '无 token 写被拒', (await call('POST', '/luoshu/api/projects', { name: 'x' })).status === 403);
-add('C-HTTP', '跨源读被拒', (await call('GET', '/luoshu/api/projects', null, { Origin: 'http://evil.example' })).status === 403);
+add('C-HTTP', '无 token 写被拒', (await call('POST', '/jiuzhang/api/projects', { name: 'x' })).status === 403);
+add('C-HTTP', '跨源读被拒', (await call('GET', '/jiuzhang/api/projects', null, { Origin: 'http://evil.example' })).status === 403);
 
-const proj = await call('POST', '/luoshu/api/projects', { name: 'V项目', category: 'drama' }, { 'X-JZ-Token': TOKEN });
+const proj = await call('POST', '/jiuzhang/api/projects', { name: 'V项目', category: 'drama' }, { 'X-JZ-Token': TOKEN });
 add('C-HTTP', '带 token 建项目', proj.status === 200 && Boolean(proj.json?.id));
-add('C-HTTP', '项目读回', (await call('GET', '/luoshu/api/projects')).json?.length === 1);
+add('C-HTTP', '项目读回', (await call('GET', '/jiuzhang/api/projects')).json?.length === 1);
 
 const pid = proj.json.id;
-const shot = await call('POST', `/luoshu/api/projects/${pid}/shots`,
+const shot = await call('POST', `/jiuzhang/api/projects/${pid}/shots`,
   { shot: { title: 'V镜头', durationSec: 3, ratio: '16:9', profile: 'P12-draft', backend: 'mock', style: '电影感' } },
   { 'X-JZ-Token': TOKEN });
 add('C-HTTP', '建镜头', shot.status === 200 && Boolean(shot.json?.id));
 
-const meta = await call('GET', '/luoshu/api/meta');
+const meta = await call('GET', '/jiuzhang/api/meta');
 add('C-HTTP', 'meta 26 节点', meta.json?.nodeTypes?.length === 26);
 add('C-HTTP', 'meta 19 槽位', meta.json?.h3Slots?.length === 19);
 
-const an = await call('POST', '/luoshu/api/h3/workshop/analyze',
+const an = await call('POST', '/jiuzhang/api/h3/workshop/analyze',
   { text: '林晚：走。\n陈默：不。', episode: 1, durationMin: 4, durationMax: 10 }, { 'X-JZ-Token': TOKEN });
 add('C-HTTP', '工坊 analyze', an.status === 200 && an.json?.segments?.length >= 1);
 
-const imp = await call('POST', '/luoshu/api/h3/workshop/import', { projectId: pid, analysis: an.json }, { 'X-JZ-Token': TOKEN });
+const imp = await call('POST', '/jiuzhang/api/h3/workshop/import', { projectId: pid, analysis: an.json }, { 'X-JZ-Token': TOKEN });
 add('C-HTTP', '工坊 import 建资产', (imp.json?.summary?.created ?? 0) > 0);
 
-add('C-HTTP', '未知路由 404', (await call('GET', '/luoshu/api/nope')).status === 404);
-add('C-HTTP', '坏集数报错', (await call('POST', '/luoshu/api/h3/workshop/analyze', { text: 'x', episode: 0 }, { 'X-JZ-Token': TOKEN })).status === 500);
+add('C-HTTP', '未知路由 404', (await call('GET', '/jiuzhang/api/nope')).status === 404);
+add('C-HTTP', '坏集数报错', (await call('POST', '/jiuzhang/api/h3/workshop/analyze', { text: 'x', episode: 0 }, { 'X-JZ-Token': TOKEN })).status === 500);
 
 // SPA 服务
-const sp = await fetch(base + '/luoshu/app/');
+const sp = await fetch(base + '/jiuzhang/app/');
 add('C-SPA', 'index 200', sp.status === 200);
-add('C-SPA', '静态资源可取', (await fetch(base + '/luoshu/app/a.txt')).status === 200);
-add('C-SPA', '穿越被挡', !(await (await fetch(base + '/luoshu/app/../../../etc/passwd')).text()).includes('root:'));
+add('C-SPA', '静态资源可取', (await fetch(base + '/jiuzhang/app/a.txt')).status === 200);
+add('C-SPA', '穿越被挡', !(await (await fetch(base + '/jiuzhang/app/../../../etc/passwd')).text()).includes('root:'));
 
 // 生成（mock，真出片）
-const gen = await call('POST', '/luoshu/api/generate', { projectId: pid, shotId: shot.json.id, backend: 'mock' }, { 'X-JZ-Token': TOKEN });
+const gen = await call('POST', '/jiuzhang/api/generate', { projectId: pid, shotId: shot.json.id, backend: 'mock' }, { 'X-JZ-Token': TOKEN });
 add('C-生成', '提交 mock 任务', gen.status === 200 && Boolean(gen.json?.id));
 const jobId = gen.json.id;
 let finalJob = null;
 for (let i = 0; i < 40; i++) {
   await new Promise((r) => setTimeout(r, 500));
-  const list = (await call('GET', '/luoshu/api/jobs')).json || [];
+  const list = (await call('GET', '/jiuzhang/api/jobs')).json || [];
   finalJob = list.find((j) => j.id === jobId);
   if (finalJob && ['completed', 'failed', 'cancelled'].includes(finalJob.status)) break;
 }

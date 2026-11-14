@@ -1,7 +1,7 @@
 /**
- * 画布内置 Agent —— 对齐洛书内置的 17 个画布工具 + 4 个权限位。
+ * 画布内置 Agent —— 对齐参考实现内置的 17 个画布工具 + 4 个权限位。
  *
- * 洛书实测（bundle）：
+ * 实测（bundle）：
  *  17 工具：resolve / list_refs / project_overview / list_nodes / get_node /
  *           read_document / search_assets / list_skills / image_job_status /
  *           skill_task_status / update_node / insert_image / batch /
@@ -10,7 +10,7 @@
  *  沙箱 run_script：10 秒、无网络、无 DOM
  *
  * 定位差异（重要）：
- *  洛书这 17 个是**画布内** Agent 工具 —— 用户在画布上与 AI 对话，
+ *  参考实现这 17 个是**画布内** Agent 工具 —— 用户在画布上与 AI 对话，
  *  AI 直接改画布（增删节点/插入图片/触发生成）。
  *  插件原有的 studio_* 是 **Agent 侧**工具（模型调用插件）。
  *  两者不是同一层，本模块补的是前者。
@@ -22,7 +22,7 @@
  */
 import crypto from 'node:crypto';
 
-/** 4 个权限位（洛书实测） */
+/** 4 个权限位（实测） */
 export const CANVAS_PERMISSIONS = Object.freeze([
   { id: 'canWriteCanvas', name: '可改画布', desc: '增删改节点、连线、分组' },
   { id: 'canSpend', name: '可花钱', desc: '触发图片/视频生成（消耗额度）' },
@@ -30,7 +30,7 @@ export const CANVAS_PERMISSIONS = Object.freeze([
   { id: 'autoRun', name: '自动执行', desc: '不需要逐步确认即可连续执行' },
 ]);
 
-/** 17 个画布工具（洛书实测名单） */
+/** 17 个画布工具（实测名单） */
 export const CANVAS_TOOLS = Object.freeze([
   { name: 'resolve', desc: '把引用解析成实际对象（@nodeId / #assetId）', perm: null, kind: 'read' },
   { name: 'list_refs', desc: '列出可引用的对象（节点/资产/镜头）', perm: null, kind: 'read' },

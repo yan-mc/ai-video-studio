@@ -16,7 +16,6 @@ const cfg = loadConfig();
 const { handleApi } = await import('../host/api/index.js');
 const { initRuntime } = await import('../host/runtime.js');
 const { serveSpa, serveStatic } = await import('../host/static.js');
-const { createPrevizController } = await import('../host/services/previz-controller.js');
 const { createH3Workshop } = await import('../host/services/h3-workshop.js');
 const { createPostService } = await import('../host/services/post.js');
 const { createAssetService } = await import('../host/services/asset-service.js');
@@ -32,7 +31,6 @@ initRuntime({ root: path.resolve(import.meta.dirname, '..'), cfg, webServer: { g
 {
   const { attachControllers } = await import('../host/runtime.js');
   attachControllers({
-    previz: createPrevizController({ root: import.meta.dirname, cfg }),
     h3: createH3Workshop({ root: import.meta.dirname, cfg }),
     post: createPostService({ cfg }),
     assets: createAssetService({ cfg }),
@@ -41,8 +39,8 @@ initRuntime({ root: path.resolve(import.meta.dirname, '..'), cfg, webServer: { g
 
 const server = http.createServer((req, res) => {
   const u = new URL(req.url, 'http://x');
-  if (u.pathname.startsWith('/luoshu/api')) return handleApi(req, res).catch((e) => { res.writeHead(500); res.end(String(e)); });
-  if (u.pathname.startsWith('/luoshu/app')) return serveSpa(req, res, { prefix: '/luoshu/app', distDir: appDist }).catch(() => res.end());
+  if (u.pathname.startsWith('/jiuzhang/api')) return handleApi(req, res).catch((e) => { res.writeHead(500); res.end(String(e)); });
+  if (u.pathname.startsWith('/jiuzhang/app')) return serveSpa(req, res, { prefix: '/jiuzhang/app', distDir: appDist }).catch(() => res.end());
   res.writeHead(404); res.end();
 });
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -69,53 +67,53 @@ function check(name, cond, extra) {
 }
 
 /* 1) token 端点：免 token，返回 origin */
-const tok = await call('GET', '/luoshu/api/token');
+const tok = await call('GET', '/jiuzhang/api/token');
 check('GET /token 200', tok.status === 200, tok.status);
 check('token 有值', typeof tok.json?.token === 'string' && tok.json.token.length > 10);
 check('origin 注入', tok.json?.origin === base, tok.json?.origin);
 const TOKEN = tok.json?.token;
 
 /* 2) 无 token 的写操作被拒 */
-const w1 = await call('POST', '/luoshu/api/projects', { name: 'x' });
+const w1 = await call('POST', '/jiuzhang/api/projects', { name: 'x' });
 check('无 token 写被拒 403', w1.status === 403, w1.status + ' ' + w1.text.slice(0, 80));
 
 /* 3) 带 token 的写操作成功 */
-const w2 = await call('POST', '/luoshu/api/projects', { name: '测试项目', category: 'drama' }, { 'X-JZ-Token': TOKEN });
+const w2 = await call('POST', '/jiuzhang/api/projects', { name: '测试项目', category: 'drama' }, { 'X-JZ-Token': TOKEN });
 check('带 token 写成功', w2.status === 200 && w2.json?.id, w2.text.slice(0, 120));
 const projId = w2.json?.id;
 
 /* 4) 读操作免 token */
-const r1 = await call('GET', '/luoshu/api/projects');
+const r1 = await call('GET', '/jiuzhang/api/projects');
 check('GET /projects 200', r1.status === 200 && Array.isArray(r1.json));
 check('项目已持久化', r1.json?.length === 1 && r1.json[0].name === '测试项目');
 
 /* 5) 跨源被拒 */
-const x1 = await call('GET', '/luoshu/api/projects', null, { Origin: 'http://evil.example' });
+const x1 = await call('GET', '/jiuzhang/api/projects', null, { Origin: 'http://evil.example' });
 check('跨源 Origin 403', x1.status === 403, x1.status);
 
 /* 6) meta / monitor */
-const meta = await call('GET', '/luoshu/api/meta');
+const meta = await call('GET', '/jiuzhang/api/meta');
 check('meta 26 节点', meta.json?.nodeTypes?.length === 26, meta.json?.nodeTypes?.length);
 check('meta 19 H3 槽位', meta.json?.h3Slots?.length === 19);
-const mon = await call('GET', '/luoshu/api/monitor');
+const mon = await call('GET', '/jiuzhang/api/monitor');
 check('monitor 200', mon.status === 200 && mon.json?.jobs, mon.text.slice(0, 100));
 
 /* 7) 镜头 + 提示词编译 */
-const sh = await call('POST', `/luoshu/api/projects/${projId}/shots`, {
+const sh = await call('POST', `/jiuzhang/api/projects/${projId}/shots`, {
   shot: { title: '测试镜头', style: '电影感', description: '雨夜街道', durationSec: 5, ratio: '16:9', profile: 'P24-quality' },
 }, { 'X-JZ-Token': TOKEN });
 check('创建镜头', sh.status === 200 && sh.json?.id, sh.text.slice(0, 100));
-const shots = await call('GET', `/luoshu/api/projects/${projId}/shots`);
+const shots = await call('GET', `/jiuzhang/api/projects/${projId}/shots`);
 check('镜头列表', Array.isArray(shots.json) && shots.json.length === 1);
 
 /* 8) 分辨率 / 帧数 */
-const rs = await call('POST', '/luoshu/api/resolution', { profile: 'P24-quality', ratio: '9:16' }, { 'X-JZ-Token': TOKEN });
+const rs = await call('POST', '/jiuzhang/api/resolution', { profile: 'P24-quality', ratio: '9:16' }, { 'X-JZ-Token': TOKEN });
 check('分辨率 9:16', rs.json?.width === 608 && rs.json?.height === 1056, JSON.stringify(rs.json));
-const ln = await call('POST', '/luoshu/api/h3/length', { durationSec: 5 }, { 'X-JZ-Token': TOKEN });
+const ln = await call('POST', '/jiuzhang/api/h3/length', { durationSec: 5 }, { 'X-JZ-Token': TOKEN });
 check('帧数 5s=124', ln.json?.length === 124, JSON.stringify(ln.json));
 
 /* 9) H3 工坊 analyze */
-const an = await call('POST', '/luoshu/api/h3/workshop/analyze', {
+const an = await call('POST', '/jiuzhang/api/h3/workshop/analyze', {
   action: 'analyze', text: '林晚：我不等了。\n陈默：你没有选择。',
   episode: 1, durationMin: 4, durationMax: 10, style: '冷色调',
 }, { 'X-JZ-Token': TOKEN });
@@ -124,28 +122,28 @@ check('分段产生', (an.json?.segments?.length ?? 0) >= 1, an.json?.segments?.
 check('角色抽取', (an.json?.assets?.characters?.length ?? 0) === 2, JSON.stringify(an.json?.assets?.characters?.map(c => c.name)));
 
 /* 10) H3 工坊 import */
-const im = await call('POST', '/luoshu/api/h3/workshop/import', {
+const im = await call('POST', '/jiuzhang/api/h3/workshop/import', {
   projectId: projId, analysis: an.json,
 }, { 'X-JZ-Token': TOKEN });
 check('工坊 import 200', im.status === 200, im.text.slice(0, 150));
 check('资产已创建', (im.json?.summary?.created ?? 0) > 0, JSON.stringify(im.json?.summary));
 
 /* 11) 错误路径：坏 episode */
-const bad = await call('POST', '/luoshu/api/h3/workshop/analyze', { text: 'x', episode: 0 }, { 'X-JZ-Token': TOKEN });
+const bad = await call('POST', '/jiuzhang/api/h3/workshop/analyze', { text: 'x', episode: 0 }, { 'X-JZ-Token': TOKEN });
 check('坏集数报错', bad.status === 500 && /badEpisode/.test(bad.text), bad.text.slice(0, 100));
 
 /* 12) 静态 SPA */
-const sp = await fetch(base + '/luoshu/app/');
+const sp = await fetch(base + '/jiuzhang/app/');
 check('SPA index 200', sp.status === 200, sp.status);
-const st = await fetch(base + '/luoshu/app/hello.txt');
+const st = await fetch(base + '/jiuzhang/app/hello.txt');
 check('静态文件', st.status === 200 && (await st.text()) === 'hello-static');
 
 /* 13) 路径穿越 */
-const trav = await fetch(base + '/luoshu/app/../../../etc/passwd');
+const trav = await fetch(base + '/jiuzhang/app/../../../etc/passwd');
 check('穿越被挡（不返回 passwd）', !(await trav.text()).includes('root:'), trav.status);
 
 /* 14) 未知路由 */
-const un = await call('GET', '/luoshu/api/nope');
+const un = await call('GET', '/jiuzhang/api/nope');
 check('未知路由 404', un.status === 404, un.status + ' ' + un.text.slice(0, 80));
 
 server.close();

@@ -1075,7 +1075,7 @@ function CanvasInner() {
             // 成功后写后端可解析的相对路径，并把预览换成同源读取地址
             patchNodeFile(
               nodeId,
-              { url: `/luoshu/api/assets/item?id=${encodeURIComponent(saved.id)}`, path: saved.rel },
+              { url: `/jiuzhang/api/assets/item?id=${encodeURIComponent(saved.id)}`, path: saved.rel },
               { sourcePath: saved.rel, fileUrl: saved.rel, assetId: saved.id },
             );
             toast.ok(`${file.name} 已入库`);

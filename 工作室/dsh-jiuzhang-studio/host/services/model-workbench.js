@@ -1,7 +1,7 @@
 /**
- * 模特工作台服务 —— 对齐洛书 `mw` 域（270 键 / 35 子域）。
+ * 模特工作台服务 —— 对齐参考实现 `mw` 域（270 键 / 35 子域）。
  *
- * 洛书核心设计：
+ * 参考实现核心设计：
  *  - **双模式**：电商拍摄（ecom）/ 影视角色（film）
  *  - 电商套件：主品先出图 → 过检 → 并行其余
  *  - 影视套件：定妆照先行锁定 → 三视图 → 表情/姿态（13 张 / 10 张）
@@ -23,7 +23,7 @@ export const MW_MODES = Object.freeze([
   { id: 'film', name: '影视角色', hint: '一个角色的整套形象图：定妆 → 三视图 → 表情/姿态' },
 ]);
 
-/** 作业状态机（洛书 mw.status） */
+/** 作业状态机（参考实现 mw.status） */
 export const MW_STATUS = Object.freeze([
   { id: 'draft', name: '草稿' },
   { id: 'queued', name: '排队中' },
@@ -35,7 +35,7 @@ export const MW_STATUS = Object.freeze([
   { id: 'failed', name: '失败' },
 ]);
 
-/** 电商 · 6 风格预设（洛书 mw.styleLabel「风格 · 6 预设」） */
+/** 电商 · 6 风格预设（参考实现 mw.styleLabel「风格 · 6 预设」） */
 export const ECOM_STYLES = Object.freeze([
   { id: 'studio-clean', name: '棚拍白底', hint: '纯净白底，柔和顶光，商品主体清晰' },
   { id: 'lifestyle', name: '生活场景', hint: '居家/街景，自然光，人物自然互动' },
@@ -45,7 +45,7 @@ export const ECOM_STYLES = Object.freeze([
   { id: 'minimal', name: '极简高级', hint: '低饱和，几何构图，克制留白' },
 ]);
 
-/** 影视 · 10 风格预设（洛书 mw.styleLabelFilm「画风 · 10 预设」） */
+/** 影视 · 10 风格预设（参考实现 mw.styleLabelFilm「画风 · 10 预设」） */
 export const FILM_STYLES = Object.freeze([
   { id: 'ink-wuxia', name: '水墨仙侠', hint: '水墨质感，冷冽雾气，留白' },
   { id: 'ancient', name: '古风写实', hint: '汉服质感，暖金光线，细腻皮肤' },
@@ -73,7 +73,7 @@ export const MW_SIZES = Object.freeze([
 
 /**
  * 电商套件：默认 6 张（正面/背面/侧面/细节/搭配/特写）。
- * 洛书 countHint：「改张数，镜头清单自动换成对应套数」。
+ * 参考实现 countHint：「改张数，镜头清单自动换成对应套数」。
  */
 export function ecomShots(count = 6) {
   const base = [
@@ -93,7 +93,7 @@ export function ecomShots(count = 6) {
 /**
  * 影视套件：人物 13 张（定妆 1 + 三视图 4 + 表情 8）；
  *           神兽 10 张（定妆 1 + 三视图 3 + 姿态 6）。
- * 洛书 suitePerson / suiteBeast 原文即此。
+ * 参考实现 suitePerson / suiteBeast 原文即此。
  */
 export function filmShots(kind = 'person') {
   const isPerson = kind !== 'beast';
@@ -140,7 +140,7 @@ export function suiteShots({ mode = 'ecom', count, kind = 'person' } = {}) {
 
 /**
  * 把「模式 + 风格 + 尺寸 + 镜头」拼成逐张提示词。
- * 洛书在 gen.stepPlan「拍摄规划 · 每张的提示词已拼好」这一步做同样的事。
+ * 参考实现在 gen.stepPlan「拍摄规划 · 每张的提示词已拼好」这一步做同样的事。
  */
 export function planPrompts(job) {
   const mode = job.mode ?? 'ecom';
@@ -188,7 +188,7 @@ export function planPrompts(job) {
 /* --------------------------------------------------------------- 硬伤检查 */
 
 /**
- * 硬伤检查（洛书「有硬伤自动重出一次」）。
+ * 硬伤检查（参考实现「有硬伤自动重出一次」）。
  * 无图像模型时用规则检查：文件存在、尺寸对、非空白。
  */
 export function checkFlaws(shotResult, expect) {
@@ -379,7 +379,7 @@ export function createModelWorkbench({ cfg }) {
   }
 
   /**
-   * 执行出图（洛书设计：主图先行 → 过检 → 并行其余）。
+   * 执行出图（参考实现设计：主图先行 → 过检 → 并行其余）。
    *
    * 由于 12GB 显存 + 单 worker，这里用**串行**代替"并行"，
    * 保证稳定性（并行会 OOM）。流程与语义保持一致：
@@ -433,7 +433,7 @@ export function createModelWorkbench({ cfg }) {
       let ok = false;
       let lastErr = null;
 
-      // 硬伤自动重出，最多 3 次（洛书 capReached: '已达 3 次上限'）
+      // 硬伤自动重出，最多 3 次（参考实现 capReached: '已达 3 次上限'）
       while (attempts < 3 && !ok) {
         attempts += 1;
         try {

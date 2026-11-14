@@ -1,5 +1,5 @@
 /**
- * 领域数据模型 —— 字段与洛书 1.0.59 实测模型对齐。
+ * 领域数据模型 —— 字段与参考实现 1.0.59 实测模型对齐。
  *
  * 来源证据：
  *  - 项目记录字段：1.0.19 报告 §7.1（id/name/createdAt/updatedAt/nodeCount/rootPath/category/
@@ -18,7 +18,7 @@ import { loadConfig } from '../config.js';
 
 /* ------------------------------------------------------------------ 常量 */
 
-/** 14 类资产（洛书 Ke 枚举） */
+/** 14 类资产（参考实现 Ke 枚举） */
 export const ASSET_TYPES = Object.freeze([
   'general', 'character', 'character_sheet', 'scene', 'item', 'reference',
   'video_segment', 'voice_tone', 'shot', 'control', 'motion_shot',
@@ -44,13 +44,13 @@ export const ASSET_TYPE_LABELS = Object.freeze({
   weapon: '武器',
 });
 
-/** 项目分类（洛书 project.category） */
+/** 项目分类（参考实现 project.category） */
 export const PROJECT_CATEGORIES = Object.freeze(['drama', 'comic', 'ecommerce', 'free', 'uncategorized']);
 export const PROJECT_CATEGORY_LABELS = Object.freeze({
   drama: '短剧', comic: '漫剧', ecommerce: '电商', free: '自由创作', uncategorized: '未分类',
 });
 
-/** 26 种画布节点 type key（洛书 node-types.json + 报告 §4.1） */
+/** 26 种画布节点 type key（参考实现 node-types.json + 报告 §4.1） */
 export const NODE_TYPES = Object.freeze([
   'uploadNode', 'audioUploadNode', 'uploadVideoNode',
   'agentGenNode', 'imageNode', 'aiTextNode',
@@ -127,13 +127,13 @@ export function modeImageRequirement(mode) {
   return 0;
 }
 
-/** 结果节点子类型（洛书 resultKind） */
+/** 结果节点子类型（参考实现 resultKind） */
 export const RESULT_KINDS = Object.freeze([
   'generic', 'storyboardGenOutput', 'storyboardSplitExport',
   'storyboardFrameEdit', 'videoGeneratorOutput',
 ]);
 
-/** 任务状态（洛书任务状态机 + 本地扩展） */
+/** 任务状态（参考实现任务状态机 + 本地扩展） */
 export const JOB_STATUS = Object.freeze([
   'queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted',
 ]);
@@ -190,12 +190,12 @@ export function h3Length(durationSec, fps = 24) {
   return Math.min(3600, 5 + k * 17);
 }
 
-/** 19 档 H3 模型常量（1.0.59 LUOSHU_COMFY_H3_* 映射，去品牌为 JZ_*） */
+/** 19 档 H3 模型常量（1.0.59 的 COMFY_H3_* 槽位映射，本地常量前缀 JZ_*） */
 export const H3_MODEL_SLOTS = Object.freeze([
   { slot: 'T2V',      label: '文生视频' },
   { slot: 'I2V',      label: '图生视频' },
   { slot: 'FLF',      label: '首尾帧' },
-  { slot: '5SEG',     label: '五段流（洛书特色）' },
+  { slot: '5SEG',     label: '五段流（分段续写）' },
   { slot: 'U04',      label: '专项 U04' },
   { slot: 'U05',      label: '专项 U05' },
   { slot: 'U07',      label: '专项 U07' },
@@ -346,8 +346,174 @@ export function newShot({ title = '', episodeIndex = 1, shotIndex = 1, ...rest }
     // 参考图缩放：match（快）| max（高保真但慢）
     refImageSize: rest.refImageSize === 'max' ? 'max' : 'match',
     previz: null,
+    // 控制视频（H3 Fun ControlNet Union）—— 锁空间结构与时间推进。
+    // 未配置时为 null；配置后由 generator.resolveControl 统一解析并接线。
+    //   { type, videoRel, strength, startPercent, endPercent }
+    control: normalizeControl(rest.control),
+    // ---- 3D 预演结构化数据（Blender 渲染的输入）----
+    // 没有这些字段时，Blender 只能渲"默认两人对峙"，等于没用。
+    // 见 docs/3D预演与导演台-结构拆解.md 与 blender-previz REPORT §8。
+    actors: normalizeActors(rest.actors ?? rest.staging?.actors),
+    props: normalizeProps(rest.props ?? rest.staging?.props),
+    camera3d: normalizeCamera3d(rest.camera3d ?? rest.staging?.camera3d),
     createdAt: Date.now(),
     updatedAt: Date.now(),
+  };
+}
+
+/* ============================================================ 3D 预演数据结构 */
+
+/**
+ * 规范化演员（人偶）列表。
+ *
+ * 坐标系约定：**镜头卡用 (x, y=高度, z=深度)**，与预演引擎/参考产品一致；
+ * 转成 Blender 的 Z-up 由 blender-service.buildSceneSpec 负责。
+ * 在这里统一成 y=高度 可以让"镜头卡"这一层不被 Blender 的约定污染。
+ *
+ * 每个演员：
+ *   { name, heightM, color, position:[x,y,z], rotationDeg,
+ *     action, startFrame, durationFrames, from:[x,y,z], to:[x,y,z],
+ *     emotion, intensity, assetRel }
+ *
+ * assetRel 有值时用导入的 glb 模型代替程序化人偶（见 blender-service）。
+ */
+export function normalizeActors(input) {
+  if (!Array.isArray(input)) return [];
+  const vec3 = (v, d = [0, 0, 0]) => {
+    if (!Array.isArray(v) || v.length < 3) return [...d];
+    const n = v.map((x) => Number(x));
+    return n.every((x) => Number.isFinite(x)) ? n : [...d];
+  };
+  const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+  const ACTIONS = new Set([
+    'stand', 'wait', 'idle-breathe', 'stop', 'turn',
+    'walk', 'fast-walk', 'run', 'follow', 'pass-by', 'dodge',
+    'step-forward', 'step-back',
+    'look-up', 'look-down', 'look-at', 'look-back', 'glance', 'inspect',
+    'speak', 'listen', 'nod', 'shake-head', 'face-to-face', 'hand-over', 'receive',
+    'reach', 'hold', 'pick-up', 'put-down', 'point', 'wave', 'raise-hand',
+    'clap', 'knock', 'phone', 'drink',
+    'sit', 'sit-down', 'stand-up', 'crouch', 'kneel', 'lie-down', 'fall', 'get-up',
+    'bow', 'cross-arms', 'hands-on-hips',
+    'hesitate', 'hug',
+    'read', 'write', 'sew', 'open-door', 'close-door', 'push', 'pull',
+    'enter-car', 'exit-car',
+  ]);
+  const EMOTIONS = new Set(['neutral', 'tender', 'intimate', 'tense', 'joyful', 'grief', 'menacing']);
+
+  return input
+    .filter((a) => a && typeof a === 'object')
+    .slice(0, 12)                       // 预演超过 12 人没有意义，也渲不动
+    .map((a, i) => {
+      const pos = vec3(a.position ?? a.from);
+      const action = String(a.action || 'stand');
+      return {
+        name: String(a.name || `Actor${i + 1}`).slice(0, 40),
+        heightM: Math.min(3, Math.max(0.4, num(a.heightM, 1.72))),
+        color: /^#[0-9a-f]{3,8}$/i.test(String(a.color || '')) ? String(a.color) : '#e1e3e7',
+        position: pos,
+        rotationDeg: num(a.rotationDeg, 0),
+        action: ACTIONS.has(action) ? action : 'stand',
+        startFrame: Math.max(0, Math.round(num(a.startFrame, 0))),
+        // 未给时不写入 —— buildSceneSpec 会回落到"整段时长"。
+        // 写死成 1 会让动作只跳一帧（踩过）。
+        ...(Number.isFinite(Number(a.durationFrames)) && Number(a.durationFrames) > 0
+          ? { durationFrames: Math.round(Number(a.durationFrames)) }
+          : {}),
+        from: a.from ? vec3(a.from) : undefined,
+        to: a.to ? vec3(a.to) : undefined,
+        emotion: EMOTIONS.has(String(a.emotion || '')) ? String(a.emotion) : 'neutral',
+        intensity: Math.min(3, Math.max(0.1, num(a.intensity, 1))),
+        // 导入模型（glb/gltf/fbx）：有值时代替程序化人偶
+        assetRel: typeof a.assetRel === 'string' && a.assetRel ? String(a.assetRel) : undefined,
+      };
+    });
+}
+
+/** 规范化道具（灰盒或导入模型） */
+export function normalizeProps(input) {
+  if (!Array.isArray(input)) return [];
+  const vec3 = (v, d) => {
+    if (!Array.isArray(v) || v.length < 3) return [...d];
+    const n = v.map((x) => Number(x));
+    return n.every((x) => Number.isFinite(x)) ? n : [...d];
+  };
+  const KINDS = new Set(['box', 'cylinder', 'sphere', 'wall']);
+  return input
+    .filter((p) => p && typeof p === 'object')
+    .slice(0, 40)
+    .map((p, i) => ({
+      kind: KINDS.has(String(p.kind || '')) ? String(p.kind) : 'box',
+      name: String(p.name || `Prop${i + 1}`).slice(0, 40),
+      position: vec3(p.position, [0, 0, 0]),
+      rotationDeg: Number(p.rotationDeg) || 0,
+      scale: vec3(p.scale, [1, 1, 1]),
+      color: /^#[0-9a-f]{3,8}$/i.test(String(p.color || '')) ? String(p.color) : '#9aa0a6',
+      assetRel: typeof p.assetRel === 'string' && p.assetRel ? String(p.assetRel) : undefined,
+    }));
+}
+
+/**
+ * 规范化 3D 机位。
+ *
+ * `keys` 是机位关键帧 —— 有它才能渲"运镜"，否则只能渲固定机位。
+ * 帧号用**绝对帧**（0 起），与 durationSec×24 对齐。
+ */
+export function normalizeCamera3d(input) {
+  if (!input || typeof input !== 'object') return null;
+  const vec3 = (v, d) => {
+    if (!Array.isArray(v) || v.length < 3) return [...d];
+    const n = v.map((x) => Number(x));
+    return n.every((x) => Number.isFinite(x)) ? n : [...d];
+  };
+  const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+  const out = {
+    position: vec3(input.position, [0, -4.2, 1.6]),
+    target: vec3(input.target, [0, 0, 0.95]),
+    fov: Math.min(140, Math.max(5, num(input.fov, 45))),
+  };
+  if (Array.isArray(input.keys) && input.keys.length >= 2) {
+    out.keys = input.keys
+      .filter((k) => k && typeof k === 'object')
+      .slice(0, 32)
+      .map((k) => ({
+        frame: Math.max(0, Math.round(num(k.frame, 0))),
+        ...(Array.isArray(k.position) ? { position: vec3(k.position, out.position) } : {}),
+        ...(Array.isArray(k.target) ? { target: vec3(k.target, out.target) } : {}),
+        ...(Number.isFinite(Number(k.fov)) ? { fov: Math.min(140, Math.max(5, Number(k.fov))) } : {}),
+        ...(Number.isFinite(Number(k.rollDeg)) ? { rollDeg: Number(k.rollDeg) } : {}),
+      }))
+      .sort((a, b) => a.frame - b.frame);
+  }
+  return out;
+}
+
+/**
+ * 规范化控制视频配置。
+ *
+ * 只做形状与范围收敛，不做存在性校验 —— 文件是否真的存在由 generator 在
+ * staging 阶段判断（不存在就当没配，不让整镜失败）。
+ *
+ * 默认值来自实测（docs/probes/h3-controlnet-2026-11-14/REPORT.md）：
+ * strength 1.0 / 0—0.8 区间是「控制明显生效、尾部仍保留生成自由度」的起点。
+ */
+export function normalizeControl(input) {
+  if (!input || typeof input !== 'object') return null;
+  const rel = typeof input.videoRel === 'string' ? input.videoRel.trim() : '';
+  if (!rel) return null;
+  const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+  const clamp01 = (v) => Math.min(1, Math.max(0, v));
+  const start = clamp01(num(input.startPercent, 0));
+  const end = clamp01(num(input.endPercent, 0.8));
+  return {
+    // Union 模型不区分类型，这里只作展示与提示词提示
+    type: ['depth', 'pose', 'canny', 'hed', 'mlsd', 'gray', 'layout', 'scribble'].includes(input.type)
+      ? input.type
+      : '',
+    videoRel: rel,
+    strength: Math.min(10, Math.max(0, num(input.strength, 1))),
+    startPercent: Math.min(start, end),
+    endPercent: Math.max(start, end),
   };
 }
 

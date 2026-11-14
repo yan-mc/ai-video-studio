@@ -1,12 +1,12 @@
 /* 九章工作室 —— DSH Client 插件
  *
  * 职责：在 DSH 里当「启动器 + 监测器」。
- * 真正的画布在浏览器全屏 SPA 里（/luoshu/app），因为 DSH 侧栏会挤压可用宽度。
+ * 真正的画布在浏览器全屏 SPA 里（/jiuzhang/app），因为 DSH 侧栏会挤压可用宽度。
  *
  * 关键实现约束（已从 DSH 源码核实）：
  *  - Desktop 的窗口 origin 是 dsh-app://app，window.open 只放行 http(s) 绝对 URL；
  *  - 端口是 --port 0 随机的，客户端拿不到 location.port；
- *  - 所以 origin 必须由 Host 注入：GET /luoshu/api/token 的响应里带 origin 字段。
+ *  - 所以 origin 必须由 Host 注入：GET /jiuzhang/api/token 的响应里带 origin 字段。
  */
 window.__ModuleLoader__.load({
   id: '@local/dsh-jiuzhang-studio',
@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
     const { useEffect, useState, useCallback } = React;
     const h = React.createElement;
 
-    const API = '/luoshu/api';
+    const API = '/jiuzhang/api';
 
     /* ------------------------------- 文案 ------------------------------- */
     const T = {
@@ -159,7 +159,7 @@ window.__ModuleLoader__.load({
           setErr('拿不到 Host origin（请重试或检查 Host 是否注入）');
           return;
         }
-        const url = `${base.replace(/\/$/, '')}/luoshu/app/#${hash || '/canvas'}`;
+        const url = `${base.replace(/\/$/, '')}/jiuzhang/app/#${hash || '/canvas'}`;
         window.open(url, '_blank', 'noopener,noreferrer');
       }, [origin]);
 

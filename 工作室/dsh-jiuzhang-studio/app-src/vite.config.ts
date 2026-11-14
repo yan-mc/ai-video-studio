@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react';
 /**
  * 九章工作室 SPA 构建配置。
  *
- * 为什么 `base: './'`：SPA 由 Host 以 `/luoshu/app` 前缀挂载（见 host/static.js 的
+ * 为什么 `base: './'`：SPA 由 Host 以 `/jiuzhang/app` 前缀挂载（见 host/static.js 的
  * serveSpa），构建时无法预知部署前缀与 DSH 随机端口，只有相对基路径能同时适配。
  *
  * 为什么 outDir 指向插件目录：构建产物直接落进 dsh-jiuzhang-studio/app-dist，
@@ -31,7 +31,7 @@ export default defineConfig({
     // 所以这里从环境变量取，取不到才用 7983 这个常见默认值。
     //   PowerShell: $env:DSH_PORT = '7983'; npm run dev
     proxy: {
-      '/luoshu/api': {
+      '/jiuzhang/api': {
         target: `http://127.0.0.1:${DEV_HOST_PORT}`,
         changeOrigin: false,
       },

@@ -1,7 +1,7 @@
 /**
  * 结构化提取节点：extractVoiceNode / extractCharacterNode / extractSceneNode / extractItemNode。
  *
- * 洛书行为（报告 §4.1）：文本 → 结构化资产条目，节点里有「全部添加到资产库 / 全部生成到画布」。
+ * 参考实现行为（报告 §4.1）：文本 → 结构化资产条目，节点里有「全部添加到资产库 / 全部生成到画布」。
  * 四个节点结构完全一致，只有"条目种类"不同，所以共用一个渲染器 + 四种条目预览。
  */
 import type { NodeProps } from '@xyflow/react';

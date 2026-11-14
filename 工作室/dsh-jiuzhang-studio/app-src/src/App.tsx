@@ -129,7 +129,7 @@ function TopBar({ route }: { route: RouteId }) {
   const monitor = useUiStore((s) => s.monitor);
 
   const h3Ok = monitor?.h3?.ok;
-  const previzOk = monitor?.previz?.ok;
+  const previzOk = monitor?.blender?.ok;
   const seedanceMode = monitor?.seedance?.mode;
   const currentLabel = t(NAV.find((n) => n.key === route)?.labelKey ?? 'nav.canvas');
 
@@ -166,9 +166,9 @@ function TopBar({ route }: { route: RouteId }) {
           <i className={seedanceMode === 'real' ? 'jz-dot jz-dot--ok' : 'jz-dot jz-dot--mid'} />
           Seedance {seedanceMode === 'real' ? '' : 'Mock'}
         </span>
-        <span className="jz-status__item" title={t('settings.healthPreviz')}>
+        <span className="jz-status__item" title={t('settings.healthBlender')}>
           <i className={dot(previzOk)} />
-          {t('settings.healthPreviz')}
+          {t('settings.healthBlender')}
         </span>
       </div>
 

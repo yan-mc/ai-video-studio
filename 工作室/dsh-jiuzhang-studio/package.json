@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-jiuzhang-studio",
-  "version": "1.0.2",
+  "version": "1.4.1",
   "private": true,
   "type": "module",
   "license": "UNLICENSED",
@@ -13,6 +13,7 @@
   },
   "files": [
     "host/**/*.js",
+    "host/blender/**/*.py",
     "client.js",
     "cordis.patch.yml",
     "locale/*.json",

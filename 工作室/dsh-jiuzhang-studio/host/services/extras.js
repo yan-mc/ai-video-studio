@@ -1,5 +1,5 @@
 /**
- * 剩余功能域服务 —— 一次补齐洛书里剩下的中小域。
+ * 剩余功能域服务 —— 一次补齐参考实现里剩下的中小域。
  *
  * 覆盖：
  *  - `promptTemplate`（21 键）提示词模板管理
@@ -16,7 +16,7 @@ import path from 'node:path';
 
 /* ------------------------------------------------------- 提示词模板 */
 
-/** 20 条内置系统模板（洛书 tWe 注册表规模） */
+/** 20 条内置系统模板（参考实现 tWe 注册表规模） */
 export const SYSTEM_PROMPT_TEMPLATES = Object.freeze([
   { id: 'tpl-cinematic-shot', name: '电影感镜头描述', category: '文字', content: '描述一个电影感镜头的画面、光线、构图与情绪。要求：明确景别、主体动作、光线方向、色调倾向。' },
   { id: 'tpl-char-lock', name: '角色外观固化', category: '角色', content: '把角色外观写成可复用的英文提示词：发色、发型、瞳色、服装、配饰、身高、体态。' },
@@ -42,7 +42,7 @@ export const SYSTEM_PROMPT_TEMPLATES = Object.freeze([
 
 /* ------------------------------------------------------- 服化道 */
 
-/** 服化道 4 类（洛书 wardrobe：服装/饰品/武器/道具） */
+/** 服化道 4 类（参考实现 wardrobe：服装/饰品/武器/道具） */
 export const WARDROBE_KINDS = Object.freeze([
   { id: 'costume', name: '服装', desc: '衣服、鞋帽、制服' },
   { id: 'accessory', name: '饰品', desc: '首饰、发饰、眼镜、包' },
@@ -52,7 +52,7 @@ export const WARDROBE_KINDS = Object.freeze([
 
 /* ------------------------------------------------------- 分镜导入 */
 
-/** 可识别的产物类型（洛书 storyboardImport） */
+/** 可识别的产物类型（参考实现 storyboardImport） */
 export const IMPORT_SOURCES = Object.freeze([
   { id: 'seedance-meta', name: 'Seedance 元数据', pattern: /seedance.*\.json$/i, kind: 'seedance' },
   { id: 'seedance-storyboard', name: 'Seedance 分镜', pattern: /storyboard.*\.(json|md)$/i, kind: 'seedance' },

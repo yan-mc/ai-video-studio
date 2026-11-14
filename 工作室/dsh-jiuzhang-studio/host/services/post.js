@@ -108,7 +108,7 @@ export function createPostService({ cfg }) {
 
   /**
    * 切割分镜：把一张图按 rows×cols 切成多张。
-   * 洛书对应 `split` 工具（切割结果节点）。
+   * 参考实现对应 `split` 工具（切割结果节点）。
    * @returns {Promise<{ok:boolean, files:{path:string,rel:string,bytes:number,index:number}[]}>}
    */
   async function split({ input, rows = 2, cols = 2 }) {

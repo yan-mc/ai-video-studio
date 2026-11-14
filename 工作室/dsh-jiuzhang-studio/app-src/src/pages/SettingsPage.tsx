@@ -68,7 +68,6 @@ export function SettingsPage() {
       defaultBackend: config.defaultBackend ?? 'h3-local',
       defaultProfile: config.defaultProfile ?? 'P12-draft',
       maxConcurrentLocal: config.maxConcurrentLocal ?? 1,
-      previzAutoStart: config.previzAutoStart ?? true,
     });
   }, [config]);
 
@@ -84,7 +83,6 @@ export function SettingsPage() {
         defaultBackend: String(draft['defaultBackend'] ?? 'h3-local') as BackendId,
         defaultProfile: String(draft['defaultProfile'] ?? 'P12-draft'),
         maxConcurrentLocal: Number(draft['maxConcurrentLocal']) || 1,
-        previzAutoStart: Boolean(draft['previzAutoStart']),
         theme,
         accent,
       };
@@ -234,15 +232,6 @@ export function SettingsPage() {
                 </Field>
               </div>
 
-              <div style={{ marginTop: 'var(--jz-sp-3)' }}>
-                <Field label={t('settings.previzAutoStart')}>
-                  <Switch
-                    checked={Boolean(draft['previzAutoStart'])}
-                    onChange={(v) => set('previzAutoStart', v)}
-                    label={Boolean(draft['previzAutoStart']) ? t('app.yes') : t('app.no')}
-                  />
-                </Field>
-              </div>
             </Panel>
 
             <Panel title={t('settings.health')} tight>
@@ -269,10 +258,10 @@ export function SettingsPage() {
                     ),
                   },
                   {
-                    key: t('settings.healthPreviz'),
+                    key: t('settings.healthBlender'),
                     value: (
-                      <Badge tone={health?.previz?.ok ? 'ok' : 'default'}>
-                        {health?.previz?.ok ? t('app.ready') : t('app.offline')}
+                      <Badge tone={health?.blender?.ok ? 'ok' : 'default'}>
+                        {health?.blender?.ok ? t('app.ready') : t('app.offline')}
                       </Badge>
                     ),
                   },
@@ -414,7 +403,7 @@ export function SettingsPage() {
                 系统提示词模板，可在 AI 文本节点中快速选用。
               </div>
               <Alert tone="info">
-                洛书内置 20 条系统模板。当前版本支持在节点内直接手写提示词；模板管理（增删改分类）待接入。
+                内置 20 条系统模板。当前版本支持在节点内直接手写提示词；模板管理（增删改分类）待接入。
               </Alert>
               <div className="jz-col" style={{ gap: 6 }}>
                 {[
@@ -486,7 +475,7 @@ export function SettingsPage() {
               <KeyValue
                 rows={[
                   { key: 'H3 后端', value: String(health?.h3?.ok ? '在线' : '离线') },
-                  { key: '预演引擎', value: String(health?.previz?.ok ? '在线' : '离线') },
+                  { key: '预演引擎', value: String(health?.blender?.ok ? '在线' : '离线') },
                   
                   
                 ]}
@@ -507,8 +496,8 @@ export function SettingsPage() {
               <KeyValue
                 rows={[
                   { key: t('app.version'), value: '0.1.0' },
-                  { key: 'API', value: <code className="jz-mono">/luoshu/api</code> },
-                  { key: 'SPA', value: <code className="jz-mono">/luoshu/app</code> },
+                  { key: 'API', value: <code className="jz-mono">/jiuzhang/api</code> },
+                  { key: 'SPA', value: <code className="jz-mono">/jiuzhang/app</code> },
                   { key: t('settings.tokenHint'), value: '' },
                 ]}
               />

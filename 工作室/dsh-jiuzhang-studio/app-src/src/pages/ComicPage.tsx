@@ -1,7 +1,7 @@
 /**
- * 漫画工作台 —— 对齐洛书 `comic` 域（1120 键，最大域）。
+ * 漫画工作台 —— 对齐参考实现 `comic` 域（1120 键，最大域）。
  *
- * 核心设计（洛书实测）：本地渲染零费用 + 只有 LLM 抽取与出图花钱。
+ * 核心设计（实测）：本地渲染零费用 + 只有 LLM 抽取与出图花钱。
  * 15 个站里 7 个零费用，所以不接任何模型也能产出可交付页面。
  *
  * 本页落地零费用链路：
@@ -119,7 +119,7 @@ export function ComicPage() {
     setBusy(true);
     try {
       const r = await api.comicExportPage({ projectId, pageIndex }) as { ok: boolean; rel: string; bytes: number };
-      const url = `/luoshu/api/file?path=${encodeURIComponent(r.rel)}`;
+      const url = `/jiuzhang/api/file?path=${encodeURIComponent(r.rel)}`;
       setPreviewUrl(url);
       setExportMsg(`已导出第 ${pageIndex} 页（${(r.bytes / 1024).toFixed(1)} KB）`);
       toast.ok('导出完成');
@@ -256,7 +256,7 @@ export function ComicPage() {
 
         <Panel title="流水线（15 站）">
           <div className="jz-sm jz-muted" style={{ marginBottom: 8 }}>
-            洛书设计：本地渲染零费用，只有 LLM 抽取与出图花钱。绿色为已实现的零费用站。
+            设计原则：本地渲染零费用，只有 LLM 抽取与出图花钱。绿色为已实现的零费用站。
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 8 }}>
             {stations.map((s) => {
@@ -334,7 +334,7 @@ export function ComicPage() {
                       >
                         {pn.imageRel ? (
                           <img
-                            src={`/luoshu/api/file?path=${encodeURIComponent(pn.imageRel)}`}
+                            src={`/jiuzhang/api/file?path=${encodeURIComponent(pn.imageRel)}`}
                             alt={`格 ${pn.index}`}
                             style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
                             loading="lazy"

@@ -1,5 +1,5 @@
 /**
- * 画布历史栈 —— 撤销/重做，**上限 12 步**（洛书 titleBar 的 undo/redo 深度）。
+ * 画布历史栈 —— 撤销/重做，**上限 12 步**（参考实现 titleBar 的 undo/redo 深度）。
  *
  * 为什么不用 zustand：历史是画布局部状态，且快照很大（nodes+edges 整体），
  * 放进全局 store 会让别的页面也持有大对象；用 useRef + 简单类足够。

@@ -15,12 +15,14 @@
 | **26 节点画布** | 节点式工作流，8 种端口类型，拖线只列可连接节点，12 步撤销，自动保存 |
 | **H3 视频生成** | MiniMax H3 本地（Ref2VA / FL2VA / T2V），**音画同步**，5 秒片约 130 秒 |
 | **四类参考输入** | 参考图 ≤9 / 参考视频 ≤3（帧序列）/ 视频音轨 / 独立音频 ≤3，编号自动推算 |
+| **控制视频（ControlNet）** | 逐帧约束结构与运动（Fun ControlNet Union 2.0，8 条件）；实测构图跟随 |
+| **分段串联** | 上一段末帧 → 下一段首帧（Ref2VA + AddGuide），长片拆段不飘 |
 | **H3-Image 图像生成** | 33B 扩散模型，6 步采样，原生 16MP，**12GB 显存可跑** |
 | **立绘拆解** | 立绘 → 全景式角色概念分解图（服装分层/表情集/材质特写/随身物品） |
 | **漫画工作台** | 分镜抽取 → 提示词计划 → 逐格出图 → 内含图片的 SVG 导出 |
 | **模特工作台** | 电商 6 风格 / 影视 10 画风，套件批量出图（13 张 / 10 张） |
 | **剧本 5 阶段** | 大纲 → 人物小传 → 章节目录 → 章节正文 → 视觉分镜，14 题材；含「剧本拆解」tab |
-| **3D 预演** | 58 动作 / 28 运镜 / 7 人物 / 10 道具，白模可导出 mp4 当参考视频 |
+| **3D 预演** | **Blender 渲染 H3 控制序列**（depth / pose / canny / gray）+ 彩色预览 + glb/fbx 模型导入 + Mixamo 动作 + 一键在桌面 Blender 编辑 |
 | **H3 提示词工程** | 官方六段式/三段式编译器，9 种画风，硬约束校验 |
 | **画布 AI 助手** | 17 个画布工具 + 4 个权限位，自然语言改画布 |
 | **图像工具** | 裁剪 / 切割 / 标注 / 抽帧 / 抽音 / 质检 |
@@ -55,10 +57,8 @@ cd $env:USERPROFILE\.dsh\profiles\desktop
 - 常见错误排查
 - 硬件性能基线（实测数据）
 
-> **3D 预演引擎是可选组件**：它属于第三方拆解产物，许可证不允许随插件分发。
-> 需要时把引擎目录放到 `<dataDir>/previz-engine`，或用配置项 `previzDir` /
-> 环境变量 `PREVIZ_HOME` 指定位置。未安装时预演页会明确显示"未安装"，
-> 不影响其它功能。
+> **3D 预演需要 Blender 5.2+**（可选组件）：把便携版放到 `工作室/tools/blender-<版本>/`，
+> 或设环境变量 `DSH_BLENDER` 指向 blender.exe。未安装时预演页显示"未安装"，不影响其它功能。
 
 ### 3. 构建前端（可选）
 
@@ -78,6 +78,9 @@ npm run build
 
 **详细功能说明见 [使用指南](docs/使用指南.md)**，覆盖 13 个页面每一个窗口、每个输入框的作用。
 
+**3D 预演的渲染链路（四通道 / 模型导入 / 动作库）与控制视频接法见
+[Blender 预演实施报告](docs/probes/blender-previz-2026-11-14/REPORT.md) 与 [链路审查](docs/probes/blender-previz-2026-11-14/AUDIT.md)**。
+
 > 为什么不在 DSH 面板里直接画？侧栏会挤压可用宽度，画布在浏览器全屏体验才正确。面板里的监测器仍实时显示后端状态。
 
 ---
@@ -92,7 +95,7 @@ DSH Host (Electron, 127.0.0.1:随机端口)
    │  ├─ security.js       Origin 同源 + 写令牌 + 路径穿越防护
    │  ├─ config.js         配置白名单（可执行路径不接受外部注入）
    │  ├─ static.js         SPA 静态服务（Range / HEAD / ETag）
-   │  ├─ api/index.js      108 条 REST 路由
+   │  ├─ api/index.js      REST 路由
    │  ├─ services/         19 个服务
    │  └─ store/            原子 JSON + 图片引用池
    ├─ client.js            DSH 面板（启动器 + 监测器）
@@ -104,17 +107,17 @@ DSH Host (Electron, 127.0.0.1:随机端口)
 
 | 路径 | 用途 |
 |---|---|
-| `/luoshu/api/*` | REST（108 条） |
-| `/luoshu/app/*` | SPA 静态 |
-| `/luoshu/assets/*` | 素材文件静态（来自 `<dataDir>/assets`，供 3D 模型等直接内联加载） |
+| `/jiuzhang/api/*` | REST |
+| `/jiuzhang/app/*` | SPA 静态 |
+| `/jiuzhang/assets/*` | 素材文件静态（来自 `<dataDir>/assets`，供 3D 模型等直接内联加载） |
 
-**排查入口**：`GET /luoshu/api/health` 会一并返回 `workflows.ok`
-（H3 与 H3-Image 的工作流模板是否就位）与 `previz.available`（预演引擎是否安装）。
-缺模板时可打 `GET /luoshu/api/workflows/diagnostics` 看它找过哪些目录、该怎么配。
+**排查入口**：`GET /jiuzhang/api/health` 会一并返回 `workflows.ok`
+（H3 与 H3-Image 的工作流模板是否就位）与 `blender.available`（Blender 是否就绪）。
+缺模板时可打 `GET /jiuzhang/api/workflows/diagnostics` 看它找过哪些目录、该怎么配。
 
 ---
 
-## Agent 工具（15 个）
+## Agent 工具（13 个）
 
 | 工具 | 说明 |
 |---|---|
@@ -126,10 +129,10 @@ DSH Host (Electron, 127.0.0.1:随机端口)
 | `studio_jobs` | 任务查询 / 取消（真终止远端） |
 | `studio_post` | 8 个后处理/图像工具 |
 | `studio_h3_workshop` | 剧本 → 分段 + 资产（**只产文本，不出图**） |
-| `studio_previz` | 3D 预演控制 |
+
 | `studio_script` | 剧本 5 阶段 |
 | `studio_mw` | 模特工作台（11 action） |
-| `studio_director` | 3D 预演（8 action，58 动作 / 28 运镜） |
+| `studio_blender` | Blender 预演（渲染 depth/pose/canny/gray · 资产库 · 动作探测） |
 | `studio_prompt` | H3 提示词编译 |
 | `studio_image` | H3-Image 出图 |
 | `studio_toolbox` | 7 个域的工具箱 |
@@ -233,7 +236,7 @@ DSH 的 `webServer` handler 路由**不经过** DSH 的连接准入，因此插�
 - **Origin 校验**：严格同源，跨源 403
 - **写令牌**：POST/PUT/PATCH/DELETE 需 `X-JZ-Token`
 - **路径穿越防护**：所有文件访问经 `safeJoin` 限制在数据目录内
-- **读目录白名单**：`/luoshu/api/file` 只允许产物/素材子目录，
+- **读目录白名单**：`/jiuzhang/api/file` 只允许产物/素材子目录，
   `config.json` 等含密钥的运行时文件读不到
 - **id 白名单**：项目/镜头/资产 id 一律正则校验后才拼进路径
 - **上传类型白名单**：扩展名白名单；SVG 强制下载（`attachment` + `nosniff`），

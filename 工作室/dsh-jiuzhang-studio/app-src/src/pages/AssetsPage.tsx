@@ -1,7 +1,7 @@
 /**
  * 素材库页 —— 14 类资产列表、按类型/项目筛选、上传、空态与失败态。
  *
- * 上传走 POST /luoshu/api/assets/upload（multipart）。
+ * 上传走 POST /jiuzhang/api/assets/upload（multipart）。
  * 后端已实现完整 multipart 解析（host/api/index.js），支持多文件与字段。
  */
 import { useEffect, useMemo, useState } from 'react';
@@ -215,7 +215,7 @@ export function AssetsPage() {
                         {/* 缩略图：图片类显示预览，其他显示类型图标 */}
                         {a.kind === 'image' && a.rel ? (
                           <img
-                            src={`/luoshu/api/assets/item?id=${encodeURIComponent(a.id)}`}
+                            src={`/jiuzhang/api/assets/item?id=${encodeURIComponent(a.id)}`}
                             alt={a.name}
                             style={{ width: 40, height: 40, objectFit: 'cover', borderRadius: 6, display: 'block', background: 'var(--jz-bg-sunken)' }}
                             loading="lazy"
@@ -246,7 +246,7 @@ export function AssetsPage() {
                               title="下载"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                window.open(`/luoshu/api/assets/item?id=${encodeURIComponent(a.id)}`, '_blank');
+                                window.open(`/jiuzhang/api/assets/item?id=${encodeURIComponent(a.id)}`, '_blank');
                               }}
                             ><Icon name="download" size={14} /></IconButton>
                           ) : null}
@@ -274,14 +274,14 @@ export function AssetsPage() {
             <div className="jz-col" style={{ gap: 8 }}>
               {detail.kind === 'image' && detail.rel ? (
                 <img
-                  src={`/luoshu/api/assets/item?id=${encodeURIComponent(detail.id)}`}
+                  src={`/jiuzhang/api/assets/item?id=${encodeURIComponent(detail.id)}`}
                   alt={detail.name}
                   style={{ maxWidth: '100%', maxHeight: 320, borderRadius: 8, objectFit: 'contain', background: 'var(--jz-bg-sunken)' }}
                 />
               ) : null}
               {detail.kind === 'video' && detail.rel ? (
                 <video
-                  src={`/luoshu/api/assets/item?id=${encodeURIComponent(detail.id)}`}
+                  src={`/jiuzhang/api/assets/item?id=${encodeURIComponent(detail.id)}`}
                   controls
                   style={{ maxWidth: '100%', maxHeight: 320, borderRadius: 8 }}
                 />

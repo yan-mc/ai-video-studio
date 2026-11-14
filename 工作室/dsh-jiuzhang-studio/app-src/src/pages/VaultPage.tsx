@@ -322,7 +322,7 @@ export function VaultPage() {
 function assetThumb(assets: Asset[], rel: string): string {
   const hit = assets.find((a) => a.rel === rel);
   if (hit) return assetUrl(hit.id);
-  return `/luoshu/api/file?path=${encodeURIComponent(rel)}`;
+  return `/jiuzhang/api/file?path=${encodeURIComponent(rel)}`;
 }
 
 export default VaultPage;

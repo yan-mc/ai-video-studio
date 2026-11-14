@@ -145,7 +145,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       set((state) => {
         // 选择规则：
         //  1) 当前项目仍存在 → 保持；
-        //  2) 当前选择为空 → 自动选最近更新的项目（与洛书"打开即有画布"一致）；
+        //  2) 当前选择为空 → 自动选最近更新的项目（与参考实现"打开即有画布"一致）；
         //  3) 当前项目已被删除 → 退回自动选择。
         const stillExists =
           state.currentProjectId !== null && list.some((p) => p.id === state.currentProjectId);

@@ -40,11 +40,6 @@ const DEFAULTS = Object.freeze({
   defaultBackend: 'h3-local',
   defaultProfile: 'P12-draft',
   maxConcurrentLocal: 1,
-  previzPort: 4318,
-  previzAutoStart: true,
-  // 3D 预演引擎目录。空 = 自动探测（见 services/previz-controller.js）。
-  // 引擎本体不随插件分发（许可证限制），所以必须可配置。
-  previzDir: '',
   ffmpegDir: path.resolve(import.meta.dirname, '..', '..', 'tools', 'ffmpeg'),
   theme: 'inknight',            // 墨夜
   accent: 'cinnabar',           // 朱砂红
@@ -53,6 +48,10 @@ const DEFAULTS = Object.freeze({
   imageModelRoot: '',               // 空 = 自动推导为 comfyInputDir 的兄弟目录 models
   imageSizeId: 'auto',              // auto = 2048x2048
   imageSteps: 6,                    // 采样步数（蒸馏 checkpoint 默认 6；夹在 4–12）
+  // 模型文件名覆盖（key 见 generator.js 的 MODEL_DEFAULTS）。
+  // 空 = 自动从 ComfyUI 的实际列表里挑（见 resolveModelNames），
+  // 所以**不需要**为了换个量化版本去改代码。
+  modelNames: {},
 });
 
 /**
@@ -71,9 +70,9 @@ export const WRITABLE_CONFIG_KEYS = Object.freeze([
   'dataDir', 'workflowDir', 'comfyUrl', 'comfyInputDir',
   'seedanceEndpoint', 'seedanceModel', 'seedanceApiKey', 'seedanceMock',
   'defaultBackend', 'defaultProfile', 'maxConcurrentLocal',
-  'previzPort', 'previzAutoStart', 'previzDir', 'theme', 'accent', 'locale',
+  'theme', 'accent', 'locale',
   // 图像生成（H3-Image）
-  'imageModelRoot', 'imageSizeId', 'imageSteps',
+  'imageModelRoot', 'imageSizeId', 'imageSteps', 'modelNames',
 ]);
 
 let cache = null;
@@ -166,6 +165,13 @@ export function sanitizeConfigPatch(patch) {
       out[key] = trimmed;
     } else if (typeof value === 'number' || typeof value === 'boolean') {
       out[key] = value;
+    } else if (key === 'modelNames' && value && typeof value === 'object' && !Array.isArray(value)) {
+      // 只收 string 值，避免塞进奇怪结构
+      const clean = {};
+      for (const [mk, mv] of Object.entries(value)) {
+        if (typeof mv === 'string' && mv.trim() && !/[\r\n]/.test(mv)) clean[mk] = mv.trim();
+      }
+      if (Object.keys(clean).length) out[key] = clean;
     }
   }
   return out;

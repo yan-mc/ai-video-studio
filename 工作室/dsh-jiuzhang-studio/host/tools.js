@@ -16,7 +16,7 @@ import * as seedanceClient from './services/seedance-client.js';
 import { extractAssets, segmentScript } from './services/h3-workshop.js';
 import { runH3Local } from './services/generator.js';
 import { SCRIPT_GENRES, SCRIPT_STAGES, checkConsistency } from './services/script-service.js';
-import { DIRECTOR_COMMANDS, CAMERA_MOVES, DIRECTOR_FPS } from './services/director3d.js';
+import { blenderStatus, buildSceneSpec, renderControl, listModelAssets, listAssetActions } from './services/blender-service.js';
 import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, H3_MODES, H3_LIMITS } from './services/h3-prompt.js';
 import {
   IMAGE_MODELS as IMAGE_MODELS_MAP,
@@ -421,27 +421,38 @@ export function registerTools(ctx) {
 
   /* ---------------------------------------------------------- 预演 */
   disposers.push(reg(tool(
-    'studio_previz',
-    '3D 预演：start / stop / health / state / command。',
+    'studio_blender',
+    'Blender 预演渲染：从镜头卡渲出 H3 的控制序列（depth / pose / canny / gray），'
+    + '并可列出 3D 资产与模型内置动作。'
+    + 'action=health 查引擎；assets 列 3D 资产库；actions 读某模型的动作名；'
+    + 'spec 预览场景 JSON；render 渲染一路控制视频（返回 rel，可填 shot.control.videoRel）。',
     {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['start', 'stop', 'health', 'state', 'command'] },
-        name: { type: 'string' },
-        args: { type: 'object' },
+        action: { type: 'string', enum: ['health', 'assets', 'actions', 'render', 'spec'] },
+        mode: { type: 'string', enum: ['depth', 'pose', 'canny', 'gray'] },
+        assetRel: { type: 'string', description: 'action=actions 时的模型路径（dataDir 相对）' },
+        projectId: { type: 'string' },
+        shotId: { type: 'string' },
+        shot: { type: 'object', description: '直接给镜头卡（不给 projectId/shotId 时用这个）' },
+        frames: { type: 'number', description: '覆盖帧数（默认 durationSec×24）' },
       },
       required: ['action'],
       additionalProperties: false,
     },
     async (a) => {
-      switch (a.action) {
-        case 'start': return (await z.previz.start());
-        case 'stop': return (z.previz.stop());
-        case 'health': return (await z.previz.health());
-        case 'state': return (await z.previz.state());
-        case 'command': return (await z.previz.command(a.name, a.args));
-        default: throw new Error('UNKNOWN_ACTION');
+      if (a.action === 'health') return blenderStatus();
+      if (a.action === 'assets') return { assets: listModelAssets(loadConfig()) };
+      if (a.action === 'actions') {
+        if (!a.assetRel) throw new Error('ASSET_REQUIRED');
+        return await listAssetActions({ assetRel: String(a.assetRel), cfg: loadConfig() });
       }
+      const pid = a.projectId ? safeId(String(a.projectId)) : '';
+      const shot = a.shot ?? (pid && a.shotId ? listShots(pid).find((s) => s.id === a.shotId) : null);
+      if (!shot) throw new Error('SHOT_NOT_FOUND');
+      const spec = buildSceneSpec(shot, { frames: a.frames });
+      if (a.action === 'spec') return spec;
+      return await renderControl({ mode: String(a.mode || 'depth'), spec, jobId: String(a.shotId || 'shot') });
     },
   )));
 
@@ -559,54 +570,6 @@ export function registerTools(ctx) {
   )));
 
   /* ---------------------------------------------------------- 3D 导演台 */
-  disposers.push(reg(tool(
-    'studio_director',
-    '3D 导演台：58 动作 / 28 运镜 / 7 人物 / 10 道具。action=meta 取能力；state 读工程；command 执行导演命令；build 从镜头卡建工程；cameraPrompt 把机位转运镜提示词；validate 校验。',
-    {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          enum: ['meta', 'state', 'command', 'build', 'cameraPrompt', 'validate', 'start', 'stop'],
-        },
-        name: { type: 'string', description: 'director_* 命令名（action=command 时）' },
-        args: { type: 'object', description: '命令参数' },
-        projectId: { type: 'string' },
-        shotId: { type: 'string' },
-        shot: { type: 'object', description: '镜头卡（action=build 时可直接给）' },
-      },
-      required: ['action'],
-      additionalProperties: false,
-    },
-    async (a) => {
-      switch (a.action) {
-        case 'meta': {
-          const [health, catalog] = await Promise.all([
-            z.director.health(),
-            z.director.catalog().catch(() => ({})),
-          ]);
-          return { health, commands: DIRECTOR_COMMANDS, cameraMoves: CAMERA_MOVES, fps: DIRECTOR_FPS, catalog };
-        }
-        case 'state': return await z.director.getState();
-        case 'command': {
-          const name = String(a.name || '');
-          if (!/^director_[a-z_]+$/.test(name)) throw new Error('INVALID_COMMAND');
-          return await z.director.command(name, a.args ?? {});
-        }
-        case 'build': {
-          const pid = a.projectId ? safeId(String(a.projectId)) : '';
-          const shot = a.shot ?? (pid ? listShots(pid).find((s) => s.id === a.shotId) : null);
-          if (!shot) throw new Error('SHOT_NOT_FOUND');
-          return await z.director.buildFromShot(shot, a);
-        }
-        case 'cameraPrompt': return await z.director.toCameraPrompt(a.shotId);
-        case 'validate': return await z.director.validate();
-        case 'start': return await z.director.start();
-        case 'stop': return await z.director.stop();
-        default: throw new Error('UNKNOWN_ACTION');
-      }
-    },
-  )));
 
   /* ---------------------------------------------------------- 工具箱（剩余域） */
   disposers.push(reg(tool(

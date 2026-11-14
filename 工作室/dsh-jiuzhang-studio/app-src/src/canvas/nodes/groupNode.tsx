@@ -1,5 +1,5 @@
 /**
- * 分组节点 —— React Flow 的 group 能力 + 洛书的 Ctrl+G 行为。
+ * 分组节点 —— React Flow 的 group 能力 + 参考实现的 Ctrl+G 行为。
  *
  * 与普通节点的三点不同：
  *   1. 它是**父节点**：子节点用 parentId 指向它，一起拖动；

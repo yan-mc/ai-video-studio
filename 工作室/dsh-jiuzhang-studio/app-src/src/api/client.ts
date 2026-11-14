@@ -3,11 +3,11 @@
  *
  * 为什么必须自己管 token：
  *   host/security.js 的 guard() 对 POST/PUT/PATCH/DELETE 强制校验 X-JZ-Token，
- *   而 token 是进程级随机值，只能从 GET /luoshu/api/token 取。
+ *   而 token 是进程级随机值，只能从 GET /jiuzhang/api/token 取。
  *   所以这里统一拦截"写方法"，自动补头；token 取一次后缓存并复用。
  *
  * 为什么 base 是相对路径：
- *   SPA 挂在 /luoshu/app 且由 DSH Host 同源服务（端口随机），
+ *   SPA 挂在 /jiuzhang/app 且由 DSH Host 同源服务（端口随机），
  *   相对路径天然跟着当前 origin 走，无需任何端口配置。
  */
 import type {
@@ -39,12 +39,13 @@ import type {
   TokenPayload,
   TranscodeInput,
   CreateProjectInput,
-  PrevizState,
+  BlenderHealth,
+  BlenderRenderResult,
 } from './types';
 
 /* ------------------------------------------------------------ 基础设置 */
 
-export const API_BASE = '/luoshu/api';
+export const API_BASE = '/jiuzhang/api';
 
 const TOKEN_HEADER = 'X-JZ-Token';
 
@@ -274,17 +275,26 @@ export const api = {
     request<H3LengthResult>('POST', '/h3/length', { durationSec, fps }),
 
   /* 预演 */
-  previzHealth: () => request<PrevizState>('GET', '/previz/health'),
-  previzStart: () => request<PrevizState>('POST', '/previz/start'),
-  /** 预演工程 → 白模 mp4（逐帧渲染，耗时较长） */
-  previzVideo: (opts?: { fps?: number; width?: number; height?: number; maxSeconds?: number }) =>
-    request<{ ok: boolean; rel: string; seconds: number; frames: number; fps: number; bytes: number }>(
-      'POST', '/previz/video', opts ?? {},
+  /**
+   * Blender 预演渲染 —— 直出 H3 的控制通道（depth/pose/canny/gray）。
+   * 旧 three.js 预演引擎已下线；这条走 Blender，能出 ControlNet 真正需要的条件通道。
+   * 这条走 Blender，能出 ControlNet 真正需要的条件通道。
+   */
+  blenderHealth: () => request<BlenderHealth>('GET', '/blender/health'),
+  /** 3D 资产库（glb/gltf/fbx/obj） */
+  blenderAssets: () => request<{ assets: Array<{ rel: string; name: string; ext: string; kind: 'actor' | 'prop'; bytes: number }> }>('GET', '/blender/assets'),
+  /** 读某个模型内部的动作名（会启动一次 Blender，约 1—3 秒） */
+  blenderActions: (assetRel: string) =>
+    request<{ rel: string; actions: Array<{ name: string; frames: [number, number]; durationFrames: number }> }>(
+      'POST', '/blender/actions', { assetRel },
     ),
-  previzStop: () => request<PrevizState>('POST', '/previz/stop'),
-  previzState: () => request<PrevizState>('GET', '/previz/state'),
-  previzCommand: (name: string, args: Record<string, unknown> = {}) =>
-    request<unknown>('POST', '/previz/command', { name, args }),
+  blenderRender: (opts: { mode: string; projectId?: string; shotId?: string; shot?: unknown; frames?: number }) =>
+    request<BlenderRenderResult>('POST', '/blender/render', opts),
+  /** 用桌面 Blender 打开最近的场景（.blend）—— 页面负责"看"，这条负责"改" */
+  blenderOpen: (blendRel?: string) =>
+    request<{ ok: boolean; pid?: number; file?: string; detail?: string }>(
+      'POST', '/blender/open', blendRel ? { blendRel } : {},
+    ),
 
   /* H3 提示词工坊 / 成片 */
   h3Analyze: (input: H3AnalyzeInput) => request<H3Analysis>('POST', '/h3/workshop/analyze', input),
@@ -355,19 +365,6 @@ export const api = {
   mwFigures: () => request<unknown>('GET', '/mw/figures'),
   mwUpsertFigure: (figure: Record<string, unknown>) =>
     request<unknown>('POST', '/mw/figure/upsert', { figure }),
-
-  /* 3D 导演台 */
-  directorMeta: () => request<unknown>('GET', '/director/meta'),
-  directorState: () => request<unknown>('GET', '/director/state'),
-  directorShots: () => request<unknown>('GET', '/director/shots'),
-  directorCommand: (input: { name: string; arguments?: Record<string, unknown> }) =>
-    request<{ ok: boolean; result: unknown }>('POST', '/director/command', input),
-  directorBuild: (input: Record<string, unknown>) => request<unknown>('POST', '/director/build', input),
-  directorCameraPrompt: (input: Record<string, unknown>) =>
-    request<unknown>('POST', '/director/camera-prompt', input),
-  directorValidate: () => request<unknown>('POST', '/director/validate'),
-  directorStart: () => request<unknown>('POST', '/director/start'),
-  directorStop: () => request<unknown>('POST', '/director/stop'),
 
   /* H3 提示词编译 */
   promptMeta: () => request<unknown>('GET', '/prompt/meta'),

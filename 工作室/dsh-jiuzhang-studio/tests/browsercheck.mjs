@@ -12,12 +12,12 @@ const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'
  *   node tests/browsercheck.mjs [url]
  *   DSH_PORT=7983 node tests/browsercheck.mjs
  *
- * 以前的默认值是写死的 `http://127.0.0.1:7983/luoshu/app/`，
+ * 以前的默认值是写死的 `http://127.0.0.1:7983/jiuzhang/app/`，
  * 但 DSH 默认用 `--port 0` 随机端口 → 换台机器必失败。
  * 现在：命令行参数 > DSH_PORT/DSH_HOST_PORT 环境变量 > 7983 兜底。
  */
 const port = process.env.DSH_PORT || process.env.DSH_HOST_PORT || '7983';
-const URL_TO_TEST = process.argv[2] || `http://127.0.0.1:${port}/luoshu/app/`;
+const URL_TO_TEST = process.argv[2] || `http://127.0.0.1:${port}/jiuzhang/app/`;
 const PORT = 9333;
 const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'jz-edge-'));
 

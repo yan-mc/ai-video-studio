@@ -4,7 +4,7 @@
  * 解决什么问题：
  *   `services/generator.js` 已经把「执行器」统一了（runH3Local / runH3ImageLocal），
  *   但「入参准备」还没统一：
- *     - POST /luoshu/api/generate  会调 withVaultCards（解析项目/镜头绑定的角色卡、
+ *     - POST /jiuzhang/api/generate  会调 withVaultCards（解析项目/镜头绑定的角色卡、
  *       探测参考视频音频），然后 compilePrompt
  *     - studio_generate 工具       直接 compilePrompt(shot) → 角色卡完全丢失
  *   结果是同一个镜头，页面点渲染和让 AI 生成，产物不一样。

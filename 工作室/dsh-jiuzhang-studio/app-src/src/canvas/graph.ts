@@ -270,7 +270,7 @@ export function findParentGroup(nodes: ReadonlyArray<CanvasFlowNode>, nodeIds: R
  * 返回新的 nodes 数组（不修改入参），会：
  *   · 计算这批节点的包围盒，扩 padding 后作为分组的 position/size；
  *   · 给每个成员设置 parentId + extent:'parent'，并把坐标转成**相对父容器**；
- *   · 跳过已经是别的分组的子节点（不跨组嵌套，与洛书一致）；
+ *   · 跳过已经是别的分组的子节点（不跨组嵌套，与参考实现一致）；
  *   · 跳过 groupNode 自身（不允许组里套组，行为不可预期）。
  */
 export function groupSelection(

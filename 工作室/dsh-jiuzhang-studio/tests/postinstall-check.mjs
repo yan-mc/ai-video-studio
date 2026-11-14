@@ -2,10 +2,10 @@
  * 重启后安装验证 —— 确认 DSH 加载的是新代码（1.0.1）。
  *
  * 判据（旧代码必然不满足）：
- *   1. GET /luoshu/api/health 含 workflows.ok 与 previz.available
- *   2. GET /luoshu/api/workflows/diagnostics 可访问
+ *   1. GET /jiuzhang/api/health 含 workflows.ok 与 blender.available
+ *   2. GET /jiuzhang/api/workflows/diagnostics 可访问
  *   3. skills/LICENSE 等新文件在插件目录内可见
- *   4. SPA /luoshu/app/ 可服务
+ *   4. SPA /jiuzhang/app/ 可服务
  *   5. 工作流模板真的能被这个进程读到
  *
  * 用法：node tests/postinstall-check.mjs [origin]
@@ -68,7 +68,7 @@ let health = null;
 const tried = [];
 for (const o of candidateOrigins()) {
   try {
-    const h = await getJson(o, '/luoshu/api/health');
+    const h = await getJson(o, '/jiuzhang/api/health');
     tried.push(`${o}(${h.status})`);
     if (h.status === 200 && h.json?.ok !== undefined) { ORIGIN = o; health = h; break; }
   } catch { tried.push(`${o}(不可达)`); }
@@ -82,28 +82,28 @@ if (!ORIGIN) {
   process.exit(1);
 }
 console.log(`目标 DSH: ${ORIGIN}\n`);
-add('插件已挂载（/luoshu/api/health 可达）', health.status === 200, `HTTP ${health.status}`);
+add('插件已挂载（/jiuzhang/api/health 可达）', health.status === 200, `HTTP ${health.status}`);
 
 // 1) 新代码标志字段
 const h = health.json || {};
 add('health 含 workflows 字段（1.0.1 新增）', h.workflows !== undefined, JSON.stringify(h.workflows ?? null));
-add('health 含 previz.available（1.0.1 新增）', h.previz?.available !== undefined, String(h.previz?.available));
+add('health 含 blender.available（Blender 预演）', h.blender?.available !== undefined, String(h.blender?.available));
 add('工作流模板就位', h.workflows?.ok === true,
   `h3=${h.workflows?.h3?.exists} image=${h.workflows?.image?.exists} dir=${h.workflows?.h3?.dir ?? ''}`);
 add('ComfyUI 可达', h.h3?.ok === true, h.h3?.detail ?? '');
 
 // 2) 新增端点
-const diag = await getJson(ORIGIN, '/luoshu/api/workflows/diagnostics');
+const diag = await getJson(ORIGIN, '/jiuzhang/api/workflows/diagnostics');
 add('/workflows/diagnostics 可访问（1.0.1 新增）', diag.status === 200 && diag.json?.h3 !== undefined,
   `HTTP ${diag.status}`);
 
 // 3) 元信息与工具面
-const meta = await getJson(ORIGIN, '/luoshu/api/meta');
+const meta = await getJson(ORIGIN, '/jiuzhang/api/meta');
 add('/meta 正常', meta.status === 200 && Array.isArray(meta.json?.nodeTypes), `${meta.json?.nodeTypes?.length ?? 0} 节点`);
 
 // 4) SPA
 try {
-  const r = await fetch(`${ORIGIN}/luoshu/app/`);
+  const r = await fetch(`${ORIGIN}/jiuzhang/app/`);
   const html = await r.text();
   add('SPA 可服务', r.status === 200 && html.includes('assets/index-'),
     `HTTP ${r.status}${html.match(/assets\/index-[\w-]+\.js/)?.[0] ? ' · ' + html.match(/assets\/index-[\w-]+\.js/)[0] : ''}`);
@@ -112,7 +112,7 @@ try {
 }
 
 // 5) 写令牌（写操作前置条件）
-const tok = await getJson(ORIGIN, '/luoshu/api/token');
+const tok = await getJson(ORIGIN, '/jiuzhang/api/token');
 add('写令牌可获取', Boolean(tok.json?.token), tok.json?.origin ?? '');
 
 // 6) 包内新增文件（确认加载的就是这份代码）

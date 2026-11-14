@@ -102,5 +102,29 @@
   "21": {
     "class_type": "LoadImage",
     "inputs": { "image": "{{REF_IMAGE_2}}" }
+  },
+  "60": {
+    "class_type": "LoadVideo",
+    "inputs": { "file": "{{CONTROL_VIDEO}}" }
+  },
+  "61": {
+    "class_type": "GetVideoComponents",
+    "inputs": { "video": ["60", 0] }
+  },
+  "62": {
+    "class_type": "ModelPatchLoader",
+    "inputs": { "name": "{{CONTROL_PATCH_NAME}}" }
+  },
+  "63": {
+    "class_type": "MiniMaxH3FunControlNetApply",
+    "inputs": {
+      "model": ["4", 0],
+      "model_patch": ["62", 0],
+      "vae": ["3", 0],
+      "strength": "{{CONTROL_STRENGTH}}",
+      "start_percent": "{{CONTROL_START}}",
+      "end_percent": "{{CONTROL_END}}",
+      "control_video": ["61", 0]
+    }
   }
 }
