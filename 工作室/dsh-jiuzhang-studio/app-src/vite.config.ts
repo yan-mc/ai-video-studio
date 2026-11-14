@@ -10,6 +10,8 @@ import react from '@vitejs/plugin-react';
  * 为什么 outDir 指向插件目录：构建产物直接落进 dsh-jiuzhang-studio/app-dist，
  * Host 静态服务直接从那里读，免去二次拷贝（也就免去"忘了拷贝"的失败模式）。
  */
+const DEV_HOST_PORT = process.env.DSH_PORT || process.env.DSH_HOST_PORT || '7983';
+
 export default defineConfig({
   base: './',
   plugins: [react()],
@@ -25,10 +27,12 @@ export default defineConfig({
   server: {
     port: 5273,
     strictPort: false,
-    // 开发期直连 DSH Host（用户按实际端口改），生产同源不需要代理
+    // 开发期直连 DSH Host。DSH 默认 `--port 0`（随机端口），
+    // 所以这里从环境变量取，取不到才用 7983 这个常见默认值。
+    //   PowerShell: $env:DSH_PORT = '7983'; npm run dev
     proxy: {
       '/luoshu/api': {
-        target: 'http://127.0.0.1:7983',
+        target: `http://127.0.0.1:${DEV_HOST_PORT}`,
         changeOrigin: false,
       },
     },

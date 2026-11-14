@@ -76,6 +76,57 @@ export const NODE_LABELS = Object.freeze({
   blueprintNode: '导演台', previzNode: '白模预演', poseStudioNode: '姿势台',
 });
 
+/**
+ * 模式归一化 —— **单一真源**。
+ *
+ * 问题：两套词表一直没打通。
+ *   - 画布/前端用短名：t2v / i2v / fl2v / ref2v
+ *   - H3 提示词编译器只认：t2va / i2va / fl2va / l2va / ref2va
+ * 而 `newShot()` 默认给 `mode: 't2v'`，`validateShot()` 也用 'i2v'/'fl2v' 判断。
+ * 结果：
+ *   · 用默认值建的镜头卡，编译器认不出 mode → 一律落到"三段式 T2VA"
+ *     （i2v 的首帧对齐、fl2v 的首尾帧对齐指令全部丢失）
+ *   · validateShot 的"首帧模式需要 1 张参考图"永远不触发（因为收到的是 t2va）
+ *
+ * 这里统一成编译器认的长名（t2va 系），并保留短名作为输入别名。
+ */
+export const H3_MODE_ALIASES = Object.freeze({
+  t2v: 't2va', T2V: 't2va',
+  i2v: 'i2va', I2V: 'i2va',
+  fl2v: 'fl2va', FL2V: 'fl2va', flf: 'fl2va',
+  l2v: 'l2va', L2V: 'l2va',
+  ref: 'ref2va', ref2v: 'ref2va', ref2va: 'ref2va', REF: 'ref2va',
+  t2va: 't2va', i2va: 'i2va', fl2va: 'fl2va', l2va: 'l2va',
+});
+
+/** H3 编译器认的规范模式名 */
+export const H3_MODES = Object.freeze(['t2va', 'i2va', 'fl2va', 'l2va', 'ref2va']);
+
+/**
+ * 把任意写法归一成规范模式名。
+ * @param {unknown} mode
+ * @param {{hasRefImages?: boolean, fallback?: string}} [opts]
+ */
+export function normalizeMode(mode, opts = {}) {
+  const raw = String(mode ?? '').trim();
+  // 兼容带前缀的档位写法（如 h3:T2V）
+  const bare = raw.includes(':') ? raw.slice(raw.indexOf(':') + 1) : raw;
+  const hit = H3_MODE_ALIASES[bare] ?? H3_MODE_ALIASES[bare.toUpperCase()] ?? H3_MODE_ALIASES[bare.toLowerCase()];
+  if (hit) return hit;
+  // 未识别：有参考图走全参考，无图走文生（与画布 runner 的兜底一致）
+  if (opts.fallback) return opts.fallback;
+  return opts.hasRefImages ? 'ref2va' : 't2va';
+}
+
+/** 这个模式是否"需要至少 N 张参考图" */
+export function modeImageRequirement(mode) {
+  const m = normalizeMode(mode);
+  if (m === 'i2va') return 1;
+  if (m === 'fl2va') return 2;
+  if (m === 'l2va') return 1;
+  return 0;
+}
+
 /** 结果节点子类型（洛书 resultKind） */
 export const RESULT_KINDS = Object.freeze([
   'generic', 'storyboardGenOutput', 'storyboardSplitExport',
@@ -164,6 +215,7 @@ export const H3_MODEL_SLOTS = Object.freeze([
 
 /* ------------------------------------------------------------- 存储实例 */
 
+/** 运行时数据子目录（跟随 dataDir 变化，每次调用重新计算） */
 function dirs() {
   const cfg = loadConfig();
   const root = cfg.dataDir;
@@ -182,10 +234,66 @@ function dirs() {
 
 export { dirs };
 
-export const projects = collectionStore(path.join(dirs().root, 'projects.json'), { prefix: 'proj' });
-// 注意：jobs 的权威实现在 services/job-store.js（惰性单例，跟随 dataDir 变化）。
-// 这里不再导出 jobs，避免"模块加载时把路径冻死"的问题。
-export const assets = collectionStore(dirs().assetsIndex, { prefix: 'asset' });
+/**
+ * ⚠️ 存储句柄必须**惰性**创建，不能模块级求值。
+ *
+ * 原先写的是：
+ *   export const projects = collectionStore(path.join(dirs().root, 'projects.json'), ...)
+ *   export const assets   = collectionStore(dirs().assetsIndex, ...)
+ * 而 dirs() 依赖 loadConfig().dataDir —— 模块加载时就执行一次，
+ * 之后用户在设置页改 dataDir 也不会重建句柄。
+ * 实测：改完数据目录后，项目仍然写进**旧目录**，用户看到的是"项目列表全空了"。
+ * （同文件下面关于 jobs 的注释早就说过这个问题，但 projects/assets 没改。）
+ *
+ * 现在改成惰性单例：每次取用时比对文件路径，变了就重建。
+ * 对外仍是 `projects` / `assets` 这两个名字，调用点不用改。
+ */
+function lazily(build) {
+  let store = null;
+  let storeFile = null;
+  const get = () => {
+    const next = build();
+    if (!store || storeFile !== next.file) {
+      store = next;
+      storeFile = next.file;
+    }
+    return store;
+  };
+  get.reset = () => { store = null; storeFile = null; };
+  return get;
+}
+
+const projectsStore = lazily(() => collectionStore(path.join(dirs().root, 'projects.json'), { prefix: 'proj' }));
+// 注意：jobs 的权威实现在 services/job-store.js（同样是惰性单例）。
+const assetsStore = lazily(() => collectionStore(dirs().assetsIndex, { prefix: 'asset' }));
+
+/** 项目集合（惰性，跟随 dataDir） */
+export const projects = {
+  get file() { return projectsStore().file; },
+  list: () => projectsStore().list(),
+  listSync: () => projectsStore().listSync(),
+  get: (id) => projectsStore().get(id),
+  upsert: (item) => projectsStore().upsert(item),
+  remove: (id) => projectsStore().remove(id),
+  newId: () => projectsStore().newId(),
+};
+
+/** 资产集合（惰性，跟随 dataDir） */
+export const assets = {
+  get file() { return assetsStore().file; },
+  list: () => assetsStore().list(),
+  listSync: () => assetsStore().listSync(),
+  get: (id) => assetsStore().get(id),
+  upsert: (item) => assetsStore().upsert(item),
+  remove: (id) => assetsStore().remove(id),
+  newId: () => assetsStore().newId(),
+};
+
+/** 测试用：丢弃惰性句柄（配合 resetConfigCache 一起用） */
+export function resetModelStores() {
+  projectsStore.reset();
+  assetsStore.reset();
+}
 
 export function newProject({ name, category = 'uncategorized', rootPath = '', description = '' } = {}) {
   const now = Date.now();
@@ -217,7 +325,9 @@ export function newShot({ title = '', episodeIndex = 1, shotIndex = 1, ...rest }
     episodeIndex,
     shotIndex,
     suffix: rest.suffix || '',
-    mode: rest.mode || 't2v',
+    // 存规范化后的长名（t2va 系），与 h3-prompt 编译器一致；
+    // 短名（t2v/i2v/…）作为输入别名仍然接受，见 normalizeMode。
+    mode: normalizeMode(rest.mode, { hasRefImages: (rest.refs?.images?.length ?? 0) > 0 }),
     durationSec: Number(rest.durationSec) || 5,
     ratio: rest.ratio || '16:9',
     profile: rest.profile || 'P12-draft',
@@ -241,15 +351,26 @@ export function newShot({ title = '', episodeIndex = 1, shotIndex = 1, ...rest }
   };
 }
 
+/**
+ * 镜头卡校验。
+ *
+ * ⚠️ 用 normalizeMode 判定，不要再写裸字符串 'i2v'/'fl2v'。
+ *    之前写成 `shot.mode === 'i2v'`，而存储里实际是规范名 t2va 系（或历史短名），
+ *    两个词表对不上 → 这两条"首帧/首尾帧需要几张图"的校验**永远不会触发**。
+ */
 export function validateShot(shot) {
   const warnings = [];
   const dur = Number(shot.durationSec);
   if (!Number.isFinite(dur) || dur < 1 || dur > 15) warnings.push('时长需为 1—15 秒');
   const imgs = shot.refs?.images?.length || 0;
   if (imgs > 9) warnings.push('参考图超过 9 张');
-  if (shot.mode === 'i2v' && imgs < 1) warnings.push('首帧模式需要 1 张参考图');
-  if (shot.mode === 'fl2v' && imgs < 2) warnings.push('首尾帧模式需要 2 张参考图');
-  return { ok: warnings.length === 0, warnings };
+  const mode = normalizeMode(shot.mode);
+  const need = modeImageRequirement(mode);
+  if (need > 0 && imgs < need) {
+    const label = mode === 'fl2va' ? '首尾帧' : mode === 'l2va' ? '尾帧' : '首帧';
+    warnings.push(`${label}模式需要 ${need} 张参考图（当前 ${imgs} 张）`);
+  }
+  return { ok: warnings.length === 0, warnings, mode };
 }
 
 export { ASSET_TYPES as default };

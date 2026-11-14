@@ -39,7 +39,21 @@ export const H3_MAX_REF_VIDEOS = 3;
 export const H3_MAX_REF_AUDIOS = 3;
 
 /**
- * 参考视频/音频的时长范围（秒）。
+ * 参考视频 + 参考音频的**合计时长上限**（秒）。
+ *
+ * 为什么是 14.8 而不是 15：
+ *   H3 的参考输入是"总预算"制 —— 视频和音频共用同一段时间轴预算，
+ *   超过之后模型会开始截断/降级，而且**不报错**（静默失效）。
+ *   15 是理论边界，但探测得到的时长本身有 ±0.1s 的测量误差，
+ *   贴着 15 卡容易在实际提交时越界。留 0.2s 余量，取 **14.8**。
+ *
+ * 注意：这个限制**只约束参考输入的总时长**，与被生成的视频长度
+ * （shot.durationSec，1–15s）是两回事，不要混淆。
+ */
+export const MAX_REFS_TOTAL_SEC = 14.8;
+
+/**
+ * 参考视频/音频的**单段**时长范围（秒）。
  *
  * 来自 `h3-prompt.js` 的 H3_LIMITS.audioClipSec / videoClipSec（都是 2–15）。
  * 这里独立定义一份是因为 render-plan 不该依赖提示词编译器；
@@ -285,6 +299,60 @@ export function buildRenderPlan({
     });
   }
 
+  // ---- 参考视频 + 音频的**合计时长**预算（14.8s 硬限制）----
+  //
+  // 为什么要在这里裁：H3 的参考输入共用一段时间预算，超了模型会静默截断，
+  // 用户看到的是"素材都传了但效果不对"，极难排查。
+  // 所以宁可**明确拒绝**并说清超了多少、砍掉哪些，也不要静默降级。
+  //
+  // 裁剪优先级（先保留信息量最大的）：
+  //   视频 > 独立音频  —— 视频同时携带动作与音轨，独立音频只是音色参考
+  // 同一类内按**提交顺序**保留前面的。
+  const totalMediaSec = () => {
+    let s = 0;
+    for (const v of videoList) if (Number.isFinite(v.durationSec)) s += v.durationSec;
+    for (const a of audioList) if (Number.isFinite(a.durationSec)) s += a.durationSec;
+    return s;
+  };
+  // 时长未知的项**不计入**（也无法计入），但它们仍会被提交，
+  // 所以给一条提示让用户知道预算可能超。
+  const unknownDur = [...videoList, ...audioList].filter((x) => !Number.isFinite(x.durationSec));
+  if (unknownDur.length) {
+    warnings.push(
+      `有 ${unknownDur.length} 个参考文件的时长未知，无法计入 ${MAX_REFS_TOTAL_SEC}s 预算：`
+      + unknownDur.map((x) => x.name || x.rel).join('、'),
+    );
+  }
+
+  {
+    let total = totalMediaSec();
+    if (total > MAX_REFS_TOTAL_SEC) {
+      // 先砍独立音频（从后往前）
+      while (total > MAX_REFS_TOTAL_SEC && audioList.length) {
+        const gone = audioList.pop();
+        if (Number.isFinite(gone.durationSec)) total -= gone.durationSec;
+        warnings.push(
+          `参考视频+音频合计超出 ${MAX_REFS_TOTAL_SEC}s，已移除音频「${gone.name || gone.rel}」`
+          + `（${Number.isFinite(gone.durationSec) ? gone.durationSec.toFixed(2) + 's' : '时长未知'}）`,
+        );
+      }
+      // 还不够就砍视频（从后往前）
+      while (total > MAX_REFS_TOTAL_SEC && videoList.length) {
+        const gone = videoList.pop();
+        if (Number.isFinite(gone.durationSec)) total -= gone.durationSec;
+        warnings.push(
+          `参考视频+音频合计超出 ${MAX_REFS_TOTAL_SEC}s，已移除视频「${gone.name || gone.rel}」`
+          + `（${Number.isFinite(gone.durationSec) ? gone.durationSec.toFixed(2) + 's' : '时长未知'}）`,
+        );
+      }
+      // 重新编号（裁剪后 <Video k> / <Audio j> 必须连续）
+      videoList.forEach((v, i) => { v.index = i + 1; delete v.audioIndex; });
+      let ac = 0;
+      for (const v of videoList) { if (v.hasAudio) { ac += 1; v.audioIndex = ac; } }
+      audioList.forEach((a, i) => { a.index = i + 1; ac += 1; a.audioIndex = ac; });
+    }
+  }
+
   // ---- 参考图保真档位（含显存保护）----
   const refDecision = decideRefImageSize(refImageSize, vram);
   if (refDecision.downgraded) warnings.push(refDecision.reason);
@@ -368,6 +436,11 @@ export function buildRenderPlan({
       audioCount: audioList.length,
       audioLimit: H3_MAX_REF_AUDIOS,
       videoAudioCount: videoList.filter((v) => v.hasAudio).length,
+      // 参考视频 + 音频的合计时长预算（14.8s 硬限制）
+      mediaSec: Number(totalMediaSec().toFixed(3)),
+      mediaSecLimit: MAX_REFS_TOTAL_SEC,
+      mediaSecRemaining: Number(Math.max(0, MAX_REFS_TOTAL_SEC - totalMediaSec()).toFixed(3)),
+      mediaSecOver: totalMediaSec() > MAX_REFS_TOTAL_SEC,
       totalRefs,
       totalRefsLimit: H3_MAX_TOTAL_REFS,
       hasVideo,

@@ -13,6 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { runProcess, resolveFfmpeg, resolveFfprobe } from './seedance-client.js';
+import { readWorkflow, resolveWorkflowFile } from './workflow-paths.js';
 import { h3Length, resolutionFor, assets as assetStore } from '../store/models.js';
 
 /* ------------------------------------------------------- 分段规则引擎 */
@@ -129,7 +130,13 @@ export function extractAssets(segments) {
 
 /* ----------------------------------------------------------- 工坊服务 */
 
-export function createH3Workshop({ root, cfg }) {
+/**
+ * 创建 H3 工坊服务。
+ *
+ * 注意：`root` 参数**已不再需要**（历史上用来拼 workflows 路径，现在统一走
+ * services/workflow-paths.js）。保留参数是为了不破坏既有调用点，但不再读取它。
+ */
+export function createH3Workshop({ cfg } = {}) {
   /** 目录扫描：列出可分析的文本文件 */
   function scanDir(dir) {
     const abs = path.resolve(dir);
@@ -354,15 +361,44 @@ export function createH3Workshop({ root, cfg }) {
     }
   }
 
+  /**
+   * 读取成片文件的元信息（时长 / 分辨率 / 帧数）。
+   *
+   * ⚠️ 这是**修好的桩函数**。原来写成：
+   *      const { stderr } = await runProcess(...).catch(e => ({ stderr: '', err: e }));
+   *      return stderr ? null : null;          // ← 两个分支都返回 null
+   *    于是成片工作台的 "meta" 永远是 null，前端拿不到时长/分辨率。
+   *    而且 runProcess 成功时解析的是 stdout（ffprobe 的 JSON 在 stdout），
+   *    解构 stderr 本身就是错的。
+   */
   async function probe(file, c) {
     try {
       const ffprobe = resolveFfprobe(c);
-      const { stderr } = await runProcess(ffprobe, [
-        '-v', 'error', '-show_entries', 'format=duration,size',
-        '-show_entries', 'stream=codec_type,width,height,nb_frames', '-of', 'json', file,
-      ], 30000).catch((e) => ({ stderr: '' , err: e }));
-      return stderr ? null : null;
-    } catch { return null; }
+      const { stdout } = await runProcess(ffprobe, [
+        '-v', 'error',
+        '-show_entries', 'format=duration,size,format_name',
+        '-show_entries', 'stream=codec_type,codec_name,width,height,nb_frames',
+        '-of', 'json', file,
+      ], 30000);
+      const j = JSON.parse(stdout || '{}');
+      const v = (j.streams ?? []).find((s) => s.codec_type === 'video');
+      const a = (j.streams ?? []).find((s) => s.codec_type === 'audio');
+      return {
+        ok: true,
+        durationSec: Number(j?.format?.duration) || null,
+        bytes: Number(j?.format?.size) || null,
+        format: j?.format?.format_name ?? null,
+        width: v?.width ?? null,
+        height: v?.height ?? null,
+        frames: Number(v?.nb_frames) || null,
+        videoCodec: v?.codec_name ?? null,
+        hasAudio: Boolean(a),
+        audioCodec: a?.codec_name ?? null,
+      };
+    } catch (e) {
+      // 探测是增强信息，失败不影响成片本身
+      return { ok: false, error: String(e?.message ?? e) };
+    }
   }
 
   /** 跨段连戏检查（对齐 h3_continuity 语义） */
@@ -383,14 +419,21 @@ export function createH3Workshop({ root, cfg }) {
 
   /* ----------------------------- 工作流 ----------------------------- */
 
+  /**
+   * 工作流模板路径。
+   *
+   * ⚠️ 曾经写成 `path.join(cfg.dataDir, 'workflows', 'h3.json')`：
+   *    dataDir 是用户可改的**运行时数据**目录，而 workflows 是随插件分发的
+   *    **模板**。用户一改数据目录，这里就找不到文件，生成报
+   *    `WORKFLOW_MISSING: 缺少 data/workflows/h3.json` —— 指向一个插件里
+   *    明明存在的文件。现在统一走 resolveWorkflowFile（见 services/workflow-paths.js）。
+   */
   function workflowFile() {
-    return path.join(cfg.dataDir, 'workflows', 'h3.json');
+    return resolveWorkflowFile('h3', cfg);
   }
 
   function loadWorkflow() {
-    const f = workflowFile();
-    if (!fs.existsSync(f)) return null;
-    try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; }
+    return readWorkflow('h3', cfg);
   }
 
   function dispose() { filmTask = { status: 'idle', progress: 0, message: '' }; }

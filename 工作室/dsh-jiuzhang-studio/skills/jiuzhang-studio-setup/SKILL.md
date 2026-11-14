@@ -32,8 +32,15 @@ description: 从零部署九章工作室插件（DSH 视频/图像创作插件�
 
 推荐布局（路径可改，但下文以此为例）：
 
+> 下文用 `<工作区>` 代表你选的根目录（例如 `D:\AI视频`）。
+> 请先把它设成变量，后面的命令直接复制即可：
+>
+> ```powershell
+> $ws = 'D:\AI视频'        # ← 改成你自己的目录
+> ```
+
 ```
-F:\AI视频\
+<工作区>\
 ├── ai-runtime\                 # 运行时（含模型，不进插件仓库）
 │   ├── ComfyUI\                # ComfyUI 源码（git 仓库）
 │   ├── venv\                   # Python 虚拟环境
@@ -49,7 +56,7 @@ F:\AI视频\
 1. 配置项 `imageModelRoot`
 2. `comfyInputDir` 的兄弟目录 `models`
 3. 环境变量 `H3_MODEL_ROOT`
-4. 常见路径 `F:\AI视频\ai-runtime\models`
+4. 常见路径 `<工作区>\ai-runtime\models`
 5. 从插件位置向上 6 层找 `models` 或 `ai-runtime\models`
 
 所以**只要 `models` 目录符合上述任一形态就能被找到**，无需手工配置。
@@ -60,26 +67,26 @@ F:\AI视频\
 
 ```powershell
 # 克隆（或用已有的）
-git clone https://github.com/comfyanonymous/ComfyUI.git F:\AI视频\ai-runtime\ComfyUI
+git clone https://github.com/comfyanonymous/ComfyUI.git <工作区>\ai-runtime\ComfyUI
 
 # 建 venv（Python 3.10+，实测 3.12 可用）
-cd F:\AI视频\ai-runtime
+cd <工作区>\ai-runtime
 python -m venv venv
 
 # 装依赖（torch 用 CUDA 版本，实测 cu128 + torch 2.11 可用）
-F:\AI视频\ai-runtime\venv\Scripts\python.exe -m pip install --upgrade pip
-F:\AI视频\ai-runtime\venv\Scripts\python.exe -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+<工作区>\ai-runtime\venv\Scripts\python.exe -m pip install --upgrade pip
+<工作区>\ai-runtime\venv\Scripts\python.exe -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 cd ComfyUI
-F:\AI视频\ai-runtime\venv\Scripts\python.exe -m pip install -r requirements.txt
+<工作区>\ai-runtime\venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 **升级到 0.45.0+**（必须，否则没有 H3-Image 节点）：
 
 ```powershell
-cd F:\AI视频\ai-runtime\ComfyUI
+cd <工作区>\ai-runtime\ComfyUI
 git fetch origin
 git pull origin master
-F:\AI视频\ai-runtime\venv\Scripts\python.exe -m pip install -r requirements.txt
+<工作区>\ai-runtime\venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 验证节点存在：
@@ -91,7 +98,7 @@ curl http://127.0.0.1:8188/object_info/MiniMaxH3ImageConditioning
 启动（12 GB 显存必须 `--lowvram`）：
 
 ```powershell
-F:\AI视频\ai-runtime\venv\Scripts\python.exe main.py --lowvram --listen 127.0.0.1 --port 8188
+<工作区>\ai-runtime\venv\Scripts\python.exe main.py --lowvram --listen 127.0.0.1 --port 8188
 ```
 
 ---
@@ -133,7 +140,7 @@ F:\AI视频\ai-runtime\venv\Scripts\python.exe main.py --lowvram --listen 127.0.
 **推荐用 curl 直连**，不要用 `hf_hub_download`（实测会卡在 0 字节）：
 
 ```powershell
-$base='F:\AI视频\ai-runtime\models'
+$base='<工作区>\ai-runtime\models'
 $repo='https://huggingface.co/Comfy-Org/MiniMax-H3-Image/resolve/main'
 
 # 图像 VAE（1.17 GB）
@@ -162,7 +169,7 @@ curl.exe -L --fail --retry 10 --retry-delay 3 --retry-all-errors -C - `
 ### 3.4 快速自检脚本
 
 ```powershell
-$m='F:\AI视频\ai-runtime\models'
+$m='<工作区>\ai-runtime\models'
 foreach($d in @('diffusion_models','text_encoders','vae','loras')){
   $p=Join-Path $m $d
   if(Test-Path $p){
@@ -275,6 +282,7 @@ curl.exe -s http://127.0.0.1:8188/system_stats
 | H3-Image 尺寸 | 32 的倍数；0 = 自动 2048² | 报错 |
 | 参考图上限 | Ref2VA 9 张；H3-Image 16 张 | 报错 |
 | 参考视频/音频 | 各 3 段，每段 2-15 秒 | 报错 |
+| 参考视频+音频合计 | **≤ 14.8 秒**（超出自动裁剪） | 自动裁剪并告警 |
 | 参考文件总数 | ≤ 12 | 报错 |
 | **音轨必须接线** | `SamplerCustomAdvanced → VAEDecodeAudio(audio_vae) → CreateVideo.audio` | **产物静音**（不报错，静默丢失） |
 | **AUTOGROW 用点号路径** | `ref_images.ref_image_1` / `ref_videos.ref_video_1` | 被 ComfyUI **静默忽略** |

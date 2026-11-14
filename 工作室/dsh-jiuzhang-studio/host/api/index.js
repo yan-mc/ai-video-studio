@@ -8,11 +8,11 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { loadConfig, saveConfig, maskConfig, sanitizeConfigPatch, resetConfigCache } from '../config.js';
 import { guard, safeId, safeJoin, getWriteToken, isSameOrigin as _isSameOrigin, isLoopbackHost as _isLoopbackHost } from '../security.js';
-import { dirs, projects, newProject, newShot, validateShot, PROFILES, resolutionFor, h3Length, H3_MODEL_SLOTS, NODE_TYPES, NODE_LABELS, ASSET_TYPES, ASSET_TYPE_LABELS, PROJECT_CATEGORY_LABELS } from '../store/models.js';
+import { dirs, projects, newProject, newShot, validateShot, PROFILES, resolutionFor, h3Length, H3_MODEL_SLOTS, NODE_TYPES, NODE_LABELS, ASSET_TYPES, ASSET_TYPE_LABELS, PROJECT_CATEGORY_LABELS, normalizeMode } from '../store/models.js';
 import * as comfy from '../services/comfy-client.js';
 import * as seedance from '../services/seedance-client.js';
 import { runJob, cancelJob, runtimeStats, markCancelled, CancelledError } from '../services/job-runner.js';
-import { newJob, jobs as jobsStore } from '../services/job-store.js';
+import { newJob, jobs as jobsStore, isLocalBackendOf } from '../services/job-store.js';
 import { runH3Local, runH3ImageLocal, jobKind } from '../services/generator.js';
 import { packGraph, unpackGraph, IMG_REF_PREFIX } from '../store/image-pool.js';
 import { SCRIPT_GENRES, SCRIPT_STAGES, checkConsistency } from '../services/script-service.js';
@@ -32,6 +32,12 @@ import { findBrowser, screenshotPreviz, cropWithFfmpeg, buildPrevizStylePrompt }
 import { resolveFfmpeg } from '../services/seedance-client.js';
 import { createCanvasAgent } from '../services/canvas-agent.js';
 import { getRuntime } from '../runtime.js';
+// 工作流模板定位 —— 单一真源（模板随插件分发，不跟随 dataDir）
+import { readWorkflowCached, workflowDiagnostics } from '../services/workflow-paths.js';
+// 生成入参准备 —— REST 与 Agent 工具共用同一份（角色卡解析 / 媒体探测 / 编号）
+import {
+  withVaultCards, resolveMediaRefs, writeBackProbe, resolvePictureIndices,
+} from '../services/shot-context.js';
 
 /* ------------------------------------------------------------- 工具函数 */
 
@@ -237,7 +243,27 @@ export async function handleApi(req, res) {
         comfy.health(cfg),
         Promise.resolve({ ok: seedance.isAvailable(cfg) ? true : 'mock', detail: seedance.isAvailable(cfg) ? 'Seedance 已配置' : 'Seedance 走 Mock（无 key）' }),
       ]);
-      return sendJson(res, 200, { ok: true, h3, seedance: sd, previz: await previzHealth(ctx) });
+      // 工作流模板是否就位 —— 首装最容易踩的坑，直接在健康检查里暴露
+      const wfH3 = workflowDiagnostics('h3', cfg);
+      const wfImg = workflowDiagnostics('image', cfg);
+      return sendJson(res, 200, {
+        ok: true,
+        h3,
+        seedance: sd,
+        previz: await previzHealth(ctx),
+        workflows: {
+          h3: { exists: wfH3.exists, dir: wfH3.dir },
+          image: { exists: wfImg.exists, dir: wfImg.dir },
+          ok: wfH3.exists && wfImg.exists,
+        },
+      });
+    }
+    // 工作流诊断：缺文件时告诉用户找过哪里、该怎么配
+    if (req.method === 'GET' && route === '/workflows/diagnostics') {
+      return sendJson(res, 200, {
+        h3: workflowDiagnostics('h3', cfg),
+        image: workflowDiagnostics('image', cfg),
+      });
     }
 
     /* ---------------- 配置 ---------------- */
@@ -282,8 +308,13 @@ export async function handleApi(req, res) {
           return sendJson(res, 200, projectSummary(packed));
         }
         if (req.method === 'DELETE') {
+          // ⚠️ 删除项目必须连带清理它名下的运行时数据。
+          //    旧实现只删 projects.json 里的记录，`shots/<pid>/`、`data/script/<pid>.json`、
+          //    `data/comic/<pid>.json`、`data/projects/<pid>/cards.json` 全留在磁盘上，
+          //    长期使用后数据目录只增不减，且重建同名项目会"捡到"旧数据。
+          const cleaned = cleanupProjectArtifacts(cfg, id);
           await projects.remove(id);
-          return sendJson(res, 200, { ok: true, removed: id });
+          return sendJson(res, 200, { ok: true, removed: id, cleaned });
         }
       }
     }
@@ -341,7 +372,7 @@ export async function handleApi(req, res) {
       await jobsStore().upsert(job);
 
       // 角色卡已在上面解析进 shotWithCards，直接用它执行
-      runAndArchive(job, (running) => executeBackend(running, shotWithCards, ctx, cfg), ctx).catch(() => {});
+      runAndArchive(job, (running, hooks) => executeBackend(running, shotWithCards, ctx, cfg, hooks), ctx).catch(() => {});
       return sendJson(res, 200, job);
     }
     if (req.method === 'GET' && route === '/jobs') {
@@ -372,7 +403,7 @@ export async function handleApi(req, res) {
           prompt: old.prompt, params: old.params, mode: old.mode,
         });
         await jobsStore().upsert(job);
-        runAndArchive(job, (running) => executeBackend(running, shot, ctx, cfg), ctx).catch(() => {});
+        runAndArchive(job, (running, hooks) => executeBackend(running, shot, ctx, cfg, hooks), ctx).catch(() => {});
         return sendJson(res, 200, job);
       }
     }
@@ -394,7 +425,13 @@ export async function handleApi(req, res) {
     if (req.method === 'GET' && route === '/previz/state') return sendJson(res, 200, await ctx.previz.state());
     if (req.method === 'POST' && route === '/previz/command') {
       const body = await readJsonBody(req);
-      return sendJson(res, 200, await ctx.previz.command(body.name, body.args || {}));
+      // 与 /director/command 保持一致：引擎命令名必须匹配已知形态，
+      // 不能把任意字符串原样透传给子进程。
+      const name = String(body.name || '');
+      if (!/^director_[a-z_]+$/.test(name)) {
+        return sendJson(res, 400, { error: 'INVALID_COMMAND', name });
+      }
+      return sendJson(res, 200, await ctx.previz.command(name, body.args || {}));
     }
 
     /* ---------------- H3 工坊 / 成片 ---------------- */
@@ -1023,7 +1060,9 @@ export async function handleApi(req, res) {
     }
     if (req.method === 'POST' && route === '/director/build') {
       const body = await readJsonBody(req);
-      const shot = body.shot ?? listShots(body.projectId || '').find((s) => s.id === body.shotId);
+      // projectId 必须过 safeId：它会被拼进 shots 路径（见 shotsFile）
+      const pid = body.projectId ? safeId(String(body.projectId)) : '';
+      const shot = body.shot ?? (pid ? listShots(pid).find((s) => s.id === body.shotId) : null);
       if (!shot) return sendJson(res, 404, { error: 'SHOT_NOT_FOUND' });
       return sendJson(res, 200, await ctx.director.buildFromShot(shot, body));
     }
@@ -1199,7 +1238,7 @@ export async function handleApi(req, res) {
       }
 
       // 尺寸按用途映射
-      const sizeId = job.mode === 'film' ? 'p-3x4-film' : 'ecom-sq';
+      const sizeId = job.mode === 'film' ? 'p-2x3-film' : 'ecom-sq';
       const seed = body.seed ?? Math.floor(Math.random() * 2147483647);
 
       // 异步跑，立即返回
@@ -1229,7 +1268,7 @@ export async function handleApi(req, res) {
               // 旧实现硬编码 images: [] → 每套图都是纯文生图，形象库完全没用上。
               shot: {
                 refs: { images: body.refImages ?? job.refImages ?? [] },
-                characterRefs: body.characterRefs ?? job.characterRefs ?? resolveMwFigureRefs(job),
+                characterRefs: body.characterRefs ?? job.characterRefs ?? resolveMwFigureRefs(ctx, job),
                 imageSizeId: sizeId,
               },
               cfg,
@@ -1368,6 +1407,17 @@ export async function handleApi(req, res) {
         const stat = fs.statSync(abs);
         const ext = path.extname(abs).toLowerCase();
         const mime = MIME_BY_EXT[ext] || 'application/octet-stream';
+        // ⚠️ 主动下载/内联的取舍：
+        //    SVG 里可以带 <script>，而 /assets/item 与 SPA 同源。
+        //    直接以 image/svg+xml 内联返回 = 存储型 XSS（用户点"下载"就执行）。
+        //    这里对 SVG 一律强制 attachment，浏览器不会在同源下渲染它。
+        //    其它类型仍可内联（图片/视频要能在页面里直接显示）。
+        const forceDownload = ext === '.svg';
+        const disposition = forceDownload
+          ? { 'Content-Disposition': `attachment; filename="${encodeURIComponent(path.basename(abs))}"` }
+          : {};
+        // 统一加 nosniff，避免浏览器把声明外的内容当脚本执行
+        const baseHeaders = { 'X-Content-Type-Options': 'nosniff', ...disposition };
         const range = parseRangeHeader(req.headers.range, stat.size);
         if (range && range.invalid) {
           res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
@@ -1379,12 +1429,14 @@ export async function handleApi(req, res) {
             'Content-Type': mime, 'Accept-Ranges': 'bytes',
             'Content-Range': `bytes ${range.start}-${range.end}/${stat.size}`,
             'Content-Length': len, 'Cache-Control': 'no-store',
+            ...baseHeaders,
           });
           return pipeStream(res, abs, range);
         }
         res.writeHead(200, {
           'Content-Type': mime, 'Content-Length': stat.size,
           'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store',
+          ...baseHeaders,
         });
         if (req.method === 'HEAD') return res.end();
         return pipeStream(res, abs);
@@ -1398,6 +1450,13 @@ export async function handleApi(req, res) {
     }
 
     /* ---------------- 文件服务（产物/资产，带 Range） ---------------- */
+    //
+    // ⚠️ 只允许 dataDir 下的**指定子目录**，不是整个 dataDir。
+    //    safeJoin 挡住了 `../`，但 dataDir 根下还有 config.json（含明文
+    //    seedanceApiKey）、jobs.json、projects.json 等。实测
+    //    `/file?path=config.json` 会 200 并把掩码保护的密钥原样吐出来 ——
+    //    等于绕过了 /config 的掩码。
+    //    这些文件没有任何前端需要，直接排除。
     if ((req.method === 'GET' || req.method === 'HEAD') && route === '/file') {
       const rel = url.searchParams.get('path');
       if (!rel) return sendJson(res, 400, { error: 'PATH_REQUIRED' });
@@ -1406,6 +1465,13 @@ export async function handleApi(req, res) {
         abs = safeJoin(cfg.dataDir, rel);      // 只允许 dataDir 内
       } catch {
         return sendJson(res, 403, { error: 'FORBIDDEN_PATH', path: rel });
+      }
+      if (!isServableDataPath(cfg.dataDir, abs)) {
+        return sendJson(res, 403, {
+          error: 'FORBIDDEN_PATH',
+          detail: '只允许读取产物与素材子目录（outputs/assets/previz/post/comic/workflows）',
+          path: rel,
+        });
       }
       if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
         return sendJson(res, 404, { error: 'NOT_FOUND', path: rel });
@@ -1474,8 +1540,13 @@ export async function handleApi(req, res) {
 
     return sendJson(res, 404, { error: `UNKNOWN_ROUTE: ${req.method} ${route}` });
   } catch (err) {
-    const status = err instanceof CancelledError ? 409 : 500;
-    return sendJson(res, status, { error: String(err?.message || err) });
+    // 参数校验类错误应当回 400，而不是把所有异常都算成 500。
+    // 这样前端能区分"请求写错了"和"服务端炸了"，也便于排查。
+    const msg = String(err?.message || err);
+    const isCancel = err instanceof CancelledError;
+    const isValidation = /^(INVALID_ID|INVALID_\w+|BAD_JSON|BODY_TOO_LARGE|FORBIDDEN_PATH|PROJECT_REQUIRED|PATH_REQUIRED)/.test(msg)
+      || /_REQUIRED$/.test(msg);
+    return sendJson(res, isCancel ? 409 : (isValidation ? 400 : 500), { error: msg });
   }
 }
 
@@ -1519,8 +1590,8 @@ async function archiveBatchOutput(ctx, cfg, output, opts = {}) {
  * 归档失败**不影响任务结果**——产物已经生成，只是没进素材库，属于可接受的降级。
  */
 function runAndArchive(job, run, ctx) {
-  return runJob(job, async (running) => {
-    const result = await run(running);
+  return runJob(job, async (running, hooks) => {
+    const result = await run(running, hooks);
     try {
       const outs = Array.isArray(result?.outputs) ? result.outputs : [];
       const archived = [];
@@ -1536,13 +1607,19 @@ function runAndArchive(job, run, ctx) {
             tag: 'auto-archived',
             note: String(running.prompt ?? '').slice(0, 200),
           });
-          archived.push({ id: item.id, rel: item.rel, assetId: item.id });
+          // ⚠️ 记下**源产物路径**，回填时按它对账。
+          //    旧实现回填时拿 o.path（outputs/job_x.mp4）去 endsWith 归档后的
+          //    新文件名（asset_y.mp4）—— 永远不匹配，于是前端 outputs[] 里
+          //    永远没有 assetId / archivedRel，"产物自动归档"等于只在磁盘上发生，
+          //    用户界面上看不出来。
+          archived.push({ id: item.id, rel: item.rel, assetId: item.id, sourcePath: o.path });
         } catch { /* 单条失败不阻断 */ }
       }
       if (archived.length) {
-        // 把素材 id 附在产物上，前端可直接引用
+        // 把素材 id 附在产物上，前端可直接引用（按源路径精确对账）
+        const norm = (p) => String(p ?? '').replace(/\\/g, '/');
         result.outputs = outs.map((o) => {
-          const hit = archived.find((a) => o.path && a.rel && o.path.replace(/\\/g, '/').endsWith(a.rel.split('/').pop()));
+          const hit = archived.find((a) => a.sourcePath && norm(a.sourcePath) === norm(o.path));
           return hit ? { ...o, assetId: hit.assetId, archivedRel: hit.rel } : o;
         });
       }
@@ -1554,155 +1631,9 @@ function runAndArchive(job, run, ctx) {
 /**
  * 把项目绑定的角色卡解析进 shot。
  *
- * 产出 `shot.characterCards`（含 resolvedImages），供：
- *   - resolveRefImages 取图（排在最高优先级）
- *   - injectCardDefinitions 拼文字（算出 <Picture N> 编号）
- *
- * 项目级的 cardIds 与镜头级的 shot.cardIds 会合并去重，镜头级优先。
+ * 实现已下沉到 services/shot-context.js（与 Agent 工具共用同一份），
+ * 这里只做转发，避免再次出现"两份实现各自漂移"。
  */
-/**
- * 探测结果回写素材库记录。
- *
- * 场景：素材是外部放进来 / 从画布产物归档的，上传时没探测过。
- * 生成时探测到了真实信息，顺手写回，下次读素材库就能直接看到。
- *
- * 只在**有变化**时写，避免每次生成都刷一遍 assets-index.json。
- * 失败静默 —— 探测信息是增强，不是必需。
- */
-async function writeBackProbe(ctx, cfg, rel, probe) {
-  if (!probe?.ok || !rel) return;
-  try {
-    const all = await ctx.assets.list();
-    const hit = all.find((a) => a.rel === rel);
-    if (!hit) return;
-    const next = {
-      ...hit,
-      hasAudio: probe.hasAudio,
-      durationSec: probe.durationSec,
-      mediaWidth: probe.width,
-      mediaHeight: probe.height,
-      fps: probe.fps,
-    };
-    // 没有实质变化就不写
-    const same = hit.hasAudio === next.hasAudio
-      && hit.durationSec === next.durationSec
-      && hit.mediaWidth === next.mediaWidth
-      && hit.mediaHeight === next.mediaHeight
-      && hit.fps === next.fps;
-    if (same) return;
-    await ctx.assets.upsertRaw(next);
-  } catch { /* 回写失败不影响生成 */ }
-}
-
-/**
- * 解析请求体里的视频/音频引用（probe 补全 hasAudio / 时长）。
- *
- * ⚠️ `/render/plan`、`/render/compile`、`/generate` 三处都必须用这一份逻辑。
- *    之前 plan/compile 各自直接读 body.videos，没做探测，导致：
- *      - 预览说"有音轨"，实际生成时按探测结果又变成"无音轨"；
- *      - 两个入口对同一份输入给出不同的编号。
- *
- * @param {object} cfg
- * @param {Array} rawVideos
- * @param {Array} rawAudios
- */
-async function resolveMediaRefs(ctx, cfg, rawVideos = [], rawAudios = []) {
-  const resolveRel = (item) => {
-    if (!item) return '';
-    const rel = typeof item === 'string' ? item : (item.rel ?? '');
-    if (!rel) return '';
-    try { return safeJoin(cfg.dataDir, rel); } catch { return ''; }
-  };
-
-  const videos = [];
-  for (const v of (Array.isArray(rawVideos) ? rawVideos : [])) {
-    const abs = resolveRel(v);
-    if (!abs || !fs.existsSync(abs)) continue;
-    const rel = typeof v === 'string' ? v : (v.rel ?? '');
-    const explicit = typeof v === 'object' && typeof v.hasAudio === 'boolean' ? v.hasAudio : null;
-
-    // 无论调用方有没有给 hasAudio，都要探测 —— 时长、分辨率这些信息总要拿到，
-    // 而且探测结果要回写素材库（见 writeBackProbe）。
-    const probe = await probeMedia(abs, cfg).catch(() => null);
-
-    // ⚠️ hasAudio 必须**探测**，不能默认 true。
-    //    给无音轨的视频硬接一个空 ref_video_audios，模型会收到"有音轨但是空的"，
-    //    效果比不接更差，而且不会报错（静默降级）。
-    //    调用方显式指定时以调用方为准（比如用户手动关掉"带上音轨"）。
-    const hasAudio = explicit === null
-      ? Boolean(probe?.ok && probe.hasAudio)
-      : explicit;
-
-    // 外部放进来/归档的素材可能没有探测信息，顺手补上
-    if (probe?.ok) await writeBackProbe(ctx, cfg, rel, probe);
-
-    videos.push({
-      index: videos.length + 1,
-      abs,
-      rel,
-      name: (typeof v === 'object' && v.name) || path.basename(rel),
-      hasAudio,
-      durationSec: probe?.durationSec ?? null,
-    });
-  }
-
-  const audios = [];
-  for (const a of (Array.isArray(rawAudios) ? rawAudios : [])) {
-    const abs = resolveRel(a);
-    if (!abs || !fs.existsSync(abs)) continue;
-    const rel = typeof a === 'string' ? a : (a.rel ?? '');
-    const probe = await probeMedia(abs, cfg).catch(() => null);
-    if (probe?.ok) await writeBackProbe(ctx, cfg, rel, probe);
-    audios.push({
-      index: audios.length + 1,
-      abs,
-      rel,
-      name: (typeof a === 'object' && a.name) || path.basename(rel),
-      durationSec: probe?.durationSec ?? null,
-    });
-  }
-
-  return { videos, audios };
-}
-
-/**
- * 把镜头要用的素材解析完整：角色卡 + 参考视频 + 参考音频。
- *
- * 为什么放在一处：这三类都来自「素材库/角色卡仓库」，且**编号互相耦合**
- * （视频自带音轨会占用 <Audio> 序号，见 docs/H3参考输入契约.md）。
- * 由同一处解析，保证编号一致。
- *
- * 输入形态（shot 上的字段，均为 rel 或资产 id）：
- *   cardIds   → 角色卡 id
- *   refs.videos → [{ rel|assetId, name, hasAudio }]
- *   refs.audios → [{ rel|assetId, name }]
- */
-async function withVaultCards(shot, projectId, ctx, cfg = loadConfig()) {
-  const out = { ...shot, characterCards: [] };
-  try {
-    // ---- 角色卡 ----
-    const projectCards = readProjectCards(projectId, cfg);
-    const shotCards = Array.isArray(shot.cardIds) ? shot.cardIds : [];
-    const ids = [...new Set([...shotCards, ...projectCards])];
-    if (ids.length) {
-      const cards = [];
-      for (const id of ids) {
-        const c = await ctx.vault.get(id).catch(() => null);
-        if (c) cards.push(c);
-      }
-      out.characterCards = cards;
-    }
-    // ---- 视频 / 音频 ----
-    // 与 /render/plan、/render/compile 共用**同一份**解析逻辑，
-    // 否则三个入口会对同一输入给出不同编号（踩过）。
-    const media = await resolveMediaRefs(ctx, cfg, shot?.refs?.videos ?? [], shot?.refs?.audios ?? []);
-    out.videos = media.videos;
-    out.audios = media.audios;
-  } catch {
-    /* 保底：至少保证字段存在 */
-  }
-  return out;
-}
 
 /**
  * 列出可用的中文字体文件（ffmpeg drawtext 需要真实字体路径）。
@@ -1739,13 +1670,59 @@ function listChineseFonts() {
   return out;
 }
 
+// 允许通过 /file 读取的 dataDir 子目录（产物与素材）。
+// 白名单而非黑名单：新增运行时文件时默认不会被读到。
+const SERVABLE_DATA_DIRS = Object.freeze([
+  'outputs', 'assets', 'previz', 'previz-shots', 'post', 'comic', 'tmp-inline', 'inputs',
+]);
+
+/**
+ * abs 是否落在 dataDir 的可读子目录内。
+ * @param {string} dataDir
+ * @param {string} abs 已由 safeJoin 解析过的绝对路径
+ */
+function isServableDataPath(dataDir, abs) {
+  const rel = path.relative(path.resolve(dataDir), path.resolve(abs));
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return false;
+  const top = rel.split(path.sep)[0];
+  return SERVABLE_DATA_DIRS.includes(top);
+}
+
 function guardNoToken(req) {
   // /token 只做 Origin 校验，不需要 token
   return _isLoopbackHost(req) && _isSameOrigin(req);
 }
 
-function projectSummary(p) {
-  return {
+/**
+ * 删除项目时清理它名下的运行时数据。
+ *
+ * 只清理**确定由项目派生**的目录/文件，绝不碰 assets/（素材是用户的资产，
+ * 可能被多个项目引用；要删素材请走 /assets/delete）。
+ *
+ * @returns {{removed:string[], failed:string[]}}
+ */
+function cleanupProjectArtifacts(cfg, projectId) {
+  const removed = [];
+  const failed = [];
+  const targets = [
+    { label: 'shots', abs: path.join(cfg.dataDir, 'shots', projectId) },
+    { label: 'cards', abs: path.join(cfg.dataDir, 'projects', projectId) },
+    { label: 'script', abs: path.join(cfg.dataDir, 'script', `${projectId}.json`) },
+    { label: 'comic', abs: path.join(cfg.dataDir, 'comic', `${projectId}.json`) },
+  ];
+  for (const t of targets) {
+    try {
+      if (!fs.existsSync(t.abs)) continue;
+      fs.rmSync(t.abs, { recursive: true, force: true });
+      removed.push(t.label);
+    } catch (e) {
+      failed.push(`${t.label}: ${String(e?.message ?? e)}`);
+    }
+  }
+  return { removed, failed };
+}
+
+function projectSummary(p) {  return {
     id: p.id, name: p.name, category: p.category,
     createdAt: p.createdAt, updatedAt: p.updatedAt,
     nodeCount: p.nodeCount || 0,
@@ -1783,12 +1760,21 @@ function unpackProject(project) {
   };
 }
 
+/**
+ * 镜头表文件路径。
+ *
+ * ⚠️ projectId 必须过 safeId —— 这里是 `path.join(..., projectId, ...)`，
+ *    不校验的话 `../../..` 能跳出 dataDir。REST 路由有校验，但 Agent 工具
+ *    （studio_shot / studio_director / studio_generate）是直接调 listShots/upsertShot，
+ *    之前完全没校验，`studio_shot { projectId: '../../../../tmp' }` 可写出数据目录。
+ */
 function shotsFile(projectId) {
-  return path.join(dirs().root, 'shots', projectId, 'shots.json');
+  return path.join(dirs().root, 'shots', safeId(projectId), 'shots.json');
 }
 
 export function listShots(projectId) {
-  const f = shotsFile(projectId);
+  let f;
+  try { f = shotsFile(projectId); } catch { return []; }   // 非法 id 当作没有镜头，不抛
   if (!fs.existsSync(f)) return [];
   try {
     const arr = JSON.parse(fs.readFileSync(f, 'utf8') || '[]');
@@ -1798,7 +1784,7 @@ export function listShots(projectId) {
 
 /** 整体写回镜头表（原子写） */
 export function writeShots(projectId, list) {
-  const f = shotsFile(projectId);
+  const f = shotsFile(projectId);      // 非法 id 在这里抛，调用方必须处理
   fs.mkdirSync(path.dirname(f), { recursive: true });
   const tmp = `${f}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(list, null, 2), 'utf8');
@@ -1807,10 +1793,17 @@ export function writeShots(projectId, list) {
 }
 
 export function upsertShot(projectId, shot) {
-  const f = shotsFile(projectId);
+  const f = shotsFile(projectId);      // 非法 id 在这里抛
   fs.mkdirSync(path.dirname(f), { recursive: true });
   const list = listShots(projectId);
-  const next = { ...shot, updatedAt: Date.now() };
+  // mode 归一化统一放在**落盘口**：
+  //   REST 可以直接传 body.shot（绕过 newShot），工具也走这里，
+  //   只在 newShot 里归一化覆盖不到这些路径。
+  const next = {
+    ...shot,
+    mode: normalizeMode(shot.mode, { hasRefImages: (shot.refs?.images?.length ?? 0) > 0 }),
+    updatedAt: Date.now(),
+  };
   if (!next.id) next.id = newShot().id;
 
   // ⚠️ validateShot 以前只被 import 从未调用 —— 镜头卡保存不做任何校验，
@@ -1834,6 +1827,12 @@ export function upsertShot(projectId, shot) {
 }
 
 /**
+ * 共享的生成入参准备（已下沉到 services/shot-context.js）。
+ * 这里重新导出，保持既有调用点与测试的 import 路径不变。
+ */
+export { withVaultCards, resolveMediaRefs, writeBackProbe, resolvePictureIndices } from '../services/shot-context.js';
+
+/**
  * 编译提示词。
  *
  * 优先走 **H3 官方六段式/三段式编译器**（services/h3-prompt.js），
@@ -1842,22 +1841,36 @@ export function upsertShot(projectId, shot) {
  * 保证旧数据仍能生成。
  */
 export function compilePrompt(shot) {
-  // 走官方结构：需要有 mode 或 styleId，或显式给了 subjects
-  const useStructured = Boolean(shot.mode || shot.styleId || shot.subjects?.length || shot.h3mode);
+  // ⚠️ 手工提示词优先级最高：直接整段使用，不再走编译。
+  //
+  // 为什么必须放在最前面：用户在渲染页的提示词编辑器里写好的完整六段式，
+  // 是**成品**，不是素材。早先的实现在编译后用
+  // `pkg.sceneLayout += shot.prompt` 把整段塞进 SCENE LAYOUT 字段，
+  // 结果模型收到的是「自动编译的骨架 + 后面挂一坨完整提示词」的畸形文本，
+  // 两套 subject_definitions 互相打架。
+  //
+  // 判据：长度超过 200 字符才认为是"用户手写的完整提示词"，
+  // 避免老数据里 `prompt: "一句话描述"` 这类简短备注被误当成成品。
+  if (typeof shot.prompt === 'string' && shot.prompt.trim().length > 200) {
+    return shot.prompt.trim().slice(0, 7000);
+  }
+
+  // 走官方结构：需要有 mode 或 styleId，或显式给了 subjects。
+  // mode 统一归一化，短名（t2v/i2v/fl2v）也能正确进编译器分支。
+  const mode = normalizeMode(shot.mode, { hasRefImages: (shot.refs?.images?.length ?? 0) > 0 });
+  const useStructured = Boolean(mode || shot.styleId || shot.subjects?.length || shot.h3mode);
   if (useStructured) {
     try {
       // ⚠️ subjects 优先级：显式 subjects > 角色卡 > 从 description 猜。
       //    早先只看 shot.subjects，导致用角色卡生成的镜头 **summary 里没有角色名**
       //    （deriveSummary 拿不到 subjects，拼出「的一段戏。」这种残句）。
+      //
+      // ⚠️ pictureIndex 必须来自**真实参考图顺序**（resolvePictureIndices），
+      //    不能是"第几张卡"。之前用 i+1：一旦有卡没图 / 有手工图 /
+      //    有视频音频占位，编号就整体错位，提示词里的 <Picture N> 指错人。
+      //    渲染页展示的编号（/render/plan）与这里必须一致。
       const cardSubjects = Array.isArray(shot.characterCards)
-        ? shot.characterCards.map((c, i) => ({
-          id: c.id ?? `C${i + 1}`,
-          name: c.name ?? `角色${i + 1}`,
-          pictureIndex: i + 1,
-          traits: Array.isArray(c.traits) ? c.traits.join('、') : (c.traits ?? ''),
-          personality: c.personality ?? '',
-          voiceDesc: c.voiceDesc ?? '',
-        }))
+        ? resolvePictureIndices(shot)
         : [];
       const subjects = shot.subjects ?? (cardSubjects.length ? cardSubjects : deriveSubjectsFromShot(shot));
 
@@ -1867,8 +1880,15 @@ export function compilePrompt(shot) {
         scenes: shot.scenes ?? undefined,
         seed: shot.seed,
       });
-      // 兼容旧字段：description/camera/style 已在 toShotInputPackage 里映射
-      if (shot.prompt) pkg.sceneLayout = `${pkg.sceneLayout}\n${shot.prompt}`;
+      // 兼容旧字段：description/camera/style 已在 toShotInputPackage 里映射。
+      //
+      // 注意：这里**不再**把 `shot.prompt` 追加到 sceneLayout。
+      // 完整的用户提示词已在函数开头直接返回；能走到这里的 `prompt`
+      // 只可能是不足 200 字的简短备注，把它当场景补充说明更合理，
+      // 所以限制为短文本，避免长文本重复灌入导致提示词畸形。
+      if (shot.prompt && String(shot.prompt).trim().length <= 200) {
+        pkg.sceneLayout = `${pkg.sceneLayout}\n${String(shot.prompt).trim()}`;
+      }
 
       // ⚠️ 环境声/配乐要显式带过去。
       //    早先它们被 workbench 的默认值覆盖（"环境底噪" / "N/A"），
@@ -1942,23 +1962,25 @@ async function previzHealth(ctx) {
 /* --------------------------------------------------- 后端执行分发 */
 
 
-async function executeBackend(job, shot, ctx, cfg) {
+async function executeBackend(job, shot, ctx, cfg, hooks) {
   const prompt = job.prompt || compilePrompt(shot);
   const outputsDir = path.join(cfg.dataDir, 'outputs');
+  // 提交回调：把 remoteId 尽早落盘，否则"已提交未完成"期间取消无法通知远端
+  const onSubmitted = hooks?.onSubmitted;
 
   if (job.backendId === 'h3-local') {
     // 统一走 services/generator.js（与 Agent 工具共用同一实现）
     return runH3Local({
       workflow: ctx.h3.loadWorkflow(),
-      job, shot, prompt, cfg,
+      job, shot, prompt, cfg, onSubmitted,
     });
   }
 
   // 图像生成（H3-Image）：与视频共用编码器，只换扩散模型 + 图像 VAE
   if (job.backendId === 'h3-image' || jobKind(job) === 'image') {
-    const wf = loadImageWorkflow();
+    const wf = loadImageWorkflow(cfg);
     if (!wf) throw new Error('WORKFLOW_MISSING: 缺少 data/workflows/h3-image.json');
-    return runH3ImageLocal({ workflow: wf, job, shot, prompt, cfg });
+    return runH3ImageLocal({ workflow: wf, job, shot, prompt, cfg, onSubmitted });
   }
 
   if (job.backendId === 'seedance-cloud') {
@@ -1980,15 +2002,13 @@ async function executeBackend(job, shot, ctx, cfg) {
 }
 
 /** 加载图像生成工作流（带缓存） */
-let _imgWf = null;
-function loadImageWorkflow() {
-  if (_imgWf) return _imgWf;
-  try {
-    const f = path.join(dirs().root, 'workflows', 'h3-image.json');
-    if (!fs.existsSync(f)) return null;
-    _imgWf = JSON.parse(fs.readFileSync(f, 'utf8'));
-    return _imgWf;
-  } catch { return null; }
+//
+// ⚠️ 曾经写成 path.join(dirs().root, 'workflows', 'h3-image.json')：
+//    dirs().root 就是 cfg.dataDir（用户可改的运行时数据目录），而工作流模板
+//    随插件分发在 <插件根>/data/workflows。用户一改数据目录就 WORKFLOW_MISSING。
+//    现在统一走 services/workflow-paths.js 的单一真源。
+function loadImageWorkflow(cfg = loadConfig()) {
+  return readWorkflowCached('image', cfg);
 }
 
 /**
@@ -1996,12 +2016,18 @@ function loadImageWorkflow() {
  *
  * 形象库（figures.json）里的形象带封面图片，job 通过 figure/role/model 引用它。
  * 旧实现从不读这些字段，形象库等于死数据；这里把它接进 characterRefs。
+ *
+ * ⚠️ 必须显式接收 ctx。
+ *    上一版写成了 `resolveMwFigureRefs(job)` 然后在体内用 `ctx.mw`，
+ *    但这是**模块级函数**，`ctx` 是 handleApi 里的局部变量 ——
+ *    于是 `ReferenceError: ctx is not defined`，被下面的 catch 吞成 `[]`。
+ *    表现：形象库选了也没用，出图不带任何形象参考，且不报错。
  */
-function resolveMwFigureRefs(job) {
+function resolveMwFigureRefs(ctx, job) {
   try {
     const key = job?.figure ?? job?.role ?? job?.model ?? null;
     if (!key) return [];
-    const figures = ctx.mw?.listFigureItems?.() ?? [];
+    const figures = ctx?.mw?.listFigureItems?.() ?? [];
     const hit = figures.find((f) => f.id === key || f.name === key);
     if (!hit) return [];
     const imgs = [];
@@ -2009,7 +2035,11 @@ function resolveMwFigureRefs(job) {
     if (hit.imageRel) imgs.push(hit.imageRel);
     if (Array.isArray(hit.images)) imgs.push(...hit.images.filter(Boolean));
     return imgs;
-  } catch { return []; }
+  } catch (e) {
+    // 不再无声失败：至少留一条日志，方便定位形象库为什么没生效
+    try { ctx?.extras?.appendLog?.({ level: 'warn', msg: `形象库参考图解析失败：${String(e?.message ?? e)}` }); } catch { /* ignore */ }
+    return [];
+  }
 }
 
 

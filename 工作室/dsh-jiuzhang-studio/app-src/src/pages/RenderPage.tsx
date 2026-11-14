@@ -67,6 +67,13 @@ interface RenderPlan {
     total: number; limit: number; remaining: number;
     bySource: Record<string, number>;
     cardsWithImage: number; cardsWithoutImage: number;
+    /** 参考视频 + 音频的合计时长（秒） */
+    mediaSec?: number;
+    /** 合计时长上限（默认 14.8s） */
+    mediaSecLimit?: number;
+    mediaSecRemaining?: number;
+    /** 是否超限（超限时后端会自动裁剪并告警） */
+    mediaSecOver?: boolean;
   };
 }
 
@@ -241,6 +248,13 @@ export function RenderPage() {
     setBusy(true);
     setError('');
     try {
+      // 手工编辑过的提示词必须**随镜头卡一起存**。
+      //
+      // 为什么：`manualPrompt` 原先只活在本地 state 里，`saveShot` 不传 `prompt`，
+      // 生成时后端拿镜头卡重新 `compilePrompt(shot)` → 用户在编辑器里写的东西
+      // **完全被丢掉**，而且没有任何提示（实测：填入 2151 字手写提示词，
+      // 送进模型的却是 1134 字的自动编译版，摘要退化成"一段戏"）。
+      const manual = useManualPrompt ? manualPrompt.trim() : '';
       // 1) 先把当前配置存成镜头卡（渲染以镜头卡为单位）
       const saved = await api.saveShot(currentProjectId, {
         title: summary.slice(0, 40) || `镜头 ${new Date().toLocaleTimeString('zh-CN')}`,
@@ -251,6 +265,8 @@ export function RenderPage() {
         mode,
         refImageSize,
         description: [summary, shotAction].filter(Boolean).join('。'),
+        // 手工提示词优先；后端 compilePrompt 会优先用 shot.prompt
+        ...(manual ? { prompt: manual } : {}),
         // 角色卡通过 cardIds 传，后端解析成图与文字
         cardIds: pickedCards,
         refs: {
@@ -307,6 +323,11 @@ export function RenderPage() {
 
   const budget = plan?.stats;
   const over = Boolean(budget && budget.total > budget.limit);
+  // 参考视频 + 音频的合计时长预算（后端上限 14.8s，超了会自动裁剪并告警）
+  const mediaSec = budget?.mediaSec ?? 0;
+  const mediaLimit = budget?.mediaSecLimit ?? 14.8;
+  const mediaOver = Boolean(budget?.mediaSecOver);
+  const mediaTone = mediaOver ? 'danger' : (mediaLimit - mediaSec) <= 1.5 ? 'warn' : 'ok';
 
   if (loading) return <Page title="渲染"><Loading text="载入中" /></Page>;
 
@@ -327,6 +348,9 @@ export function RenderPage() {
           />
           <Badge tone={over ? 'danger' : (budget?.remaining ?? 9) <= 1 ? 'warn' : 'ok'}>
             参考图 {budget?.total ?? 0}/{budget?.limit ?? 9}
+          </Badge>
+          <Badge tone={mediaTone}>
+            音视频 {mediaSec.toFixed(1)}/{mediaLimit}s
           </Badge>
           <Button icon={<Icon name="refresh" size={15} />} onClick={() => void load()} disabled={busy}>刷新</Button>
           {tab === 'shot' ? (

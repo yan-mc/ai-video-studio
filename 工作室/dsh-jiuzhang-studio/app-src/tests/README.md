@@ -17,7 +17,7 @@
 
 ```powershell
 # node 不在 PATH 时先补（与环境说明一致）
-$env:Path = 'F:\Deepseek_harness\rea-agent\runtime;' + $env:Path
+$env:Path = '<你的 Node 目录>;' + $env:Path
 
 node --import ./tests/register.mjs tests/runAll.mjs
 ```

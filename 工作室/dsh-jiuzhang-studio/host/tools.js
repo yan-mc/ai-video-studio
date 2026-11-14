@@ -6,9 +6,11 @@
 import fs from 'node:fs';
 import { loadConfig, saveConfig, maskConfig, sanitizeConfigPatch, resetConfigCache } from './config.js';
 import { projects, assets, newProject, newShot, PROFILES, resolutionFor, h3Length, NODE_TYPES, NODE_LABELS, ASSET_TYPES, ASSET_TYPE_LABELS, PROJECT_CATEGORY_LABELS, H3_MODEL_SLOTS, dirs } from './store/models.js';
-import { jobs as jobsStore, newJob } from './services/job-store.js';
+import { jobs as jobsStore, newJob, isLocalBackendOf } from './services/job-store.js';
 import { runJob, cancelJob, runtimeStats } from './services/job-runner.js';
 import { compilePrompt, listShots, upsertShot, writeShots } from './api/index.js';
+import { withVaultCards } from './services/shot-context.js';
+import { readWorkflowCached } from './services/workflow-paths.js';
 import * as comfy from './services/comfy-client.js';
 import * as seedanceClient from './services/seedance-client.js';
 import { extractAssets, segmentScript } from './services/h3-workshop.js';
@@ -26,9 +28,24 @@ import {
 } from './services/h3-image.js';
 import { runH3ImageLocal } from './services/generator.js';
 import { getRuntime } from './runtime.js';
+import { safeId } from './security.js';
 
 function ok(value) {
   return { value, content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] };
+}
+
+/**
+ * 统一的项目 id 校验。
+ *
+ * 为什么不依赖下游：`listShots` 已经会拦，但那是在**拼路径时**才抛，
+ * 而且 `projects.get/remove` 是内存数组查找、不会抛 —— 传 `../../x` 只会
+ * 静默返回 null，用户看到的是"项目不存在"，根本想不到是非法 id。
+ * 在工具入口统一校验，错误信息才可操作。
+ */
+function requireProjectId(v) {
+  const s = String(v ?? '').trim();
+  if (!s) throw new Error('PROJECT_ID_REQUIRED');
+  return safeId(s);
 }
 
 /**
@@ -132,16 +149,17 @@ export function registerTools(ctx) {
       additionalProperties: false,
     },
     async (args) => {
+      const pid = args.projectId ? requireProjectId(args.projectId) : '';
       switch (args.action) {
         case 'list': return (await projects.list());
         case 'create': return (await projects.upsert(newProject(args.patch || {})));
-        case 'get': return (await projects.get(args.projectId));
+        case 'get': return (await projects.get(pid));
         case 'update': {
-          const p = await projects.get(args.projectId);
+          const p = await projects.get(pid);
           if (!p) throw new Error('PROJECT_NOT_FOUND');
           return await projects.upsert({ ...p, ...(args.patch || {}), updatedAt: Date.now() });
         }
-        case 'delete': return (await projects.remove(args.projectId));
+        case 'delete': return (await projects.remove(pid));
         default: throw new Error('UNKNOWN_ACTION');
       }
     },
@@ -163,7 +181,7 @@ export function registerTools(ctx) {
       additionalProperties: false,
     },
     async (args) => {
-      const pid = args.projectId;
+      const pid = requireProjectId(args.projectId);
       switch (args.action) {
         case 'list': return (listShots(pid));
         case 'create': return (upsertShot(pid, newShot(args.shot || {})));
@@ -263,47 +281,75 @@ export function registerTools(ctx) {
   /* ---------------------------------------------------------- 生成 */
   disposers.push(reg(tool(
     'studio_generate',
-    '提交生成任务。backend=h3-local|seedance-cloud|mock。立即返回 job，异步执行。',
+    '提交生成任务。backend=h3-local|h3-image|seedance-cloud|mock。立即返回 job，异步执行。',
     {
       type: 'object',
       properties: {
         projectId: { type: 'string' },
         shotId: { type: 'string' },
-        backend: { type: 'string', enum: ['h3-local', 'seedance-cloud', 'mock'] },
+        backend: { type: 'string', enum: ['h3-local', 'h3-image', 'seedance-cloud', 'mock'] },
         seed: { type: 'number' },
       },
       required: ['projectId', 'shotId'],
       additionalProperties: false,
     },
     async (args) => {
-      const shot = listShots(args.projectId).find((s) => s.id === args.shotId);
+      const pid = requireProjectId(args.projectId);
+      const shot = listShots(pid).find((s) => s.id === args.shotId);
       if (!shot) throw new Error('SHOT_NOT_FOUND');
       const cfg = loadConfig();
       const backendId = args.backend || shot.backend || cfg.defaultBackend;
+
+      // ⚠️ 必须校验后端名。
+      //    旧实现不校验，任何拼错的名字（甚至 'h3-image'）都会掉进最后的
+      //    runMock 分支 → 产出 ffmpeg 占位视频且状态 completed，
+      //    用户拿到"假视频"还以为成了。REST /generate 有这道校验，工具没有。
+      const VALID = new Set(['h3-local', 'h3-image', 'seedance-cloud', 'mock']);
+      if (!VALID.has(backendId)) {
+        throw new Error(`UNKNOWN_BACKEND: ${JSON.stringify(backendId)} 不是有效后端。可选：${[...VALID].join(' / ')}`);
+      }
+
+      // ⚠️ 必须先解析角色卡再编译提示词（与 REST /generate 完全一致）。
+      //    旧实现直接 compilePrompt(shot)：项目/镜头绑定的角色卡完全丢失，
+      //    导致"页面点渲染"和"让 AI 生成"同一个镜头结果不一样。
+      //    generator.js 顶部注释骂过这种漂移 —— 执行器统一了，入参也要统一。
+      const ctx = z;
+      const shotWithCards = await withVaultCards(shot, pid, ctx, cfg);
+
       const job = newJob({
-        projectId: args.projectId,
+        projectId: pid,
         shotId: shot.id,
         backendId,
-        prompt: compilePrompt(shot),
+        prompt: compilePrompt(shotWithCards),
         params: { durationSec: shot.durationSec, ratio: shot.ratio, profile: shot.profile, seed: args.seed ?? 1101 },
         mode: shot.mode,
       });
+      if (backendId === 'h3-image') job.kind = 'image';
       await jobsStore().upsert(job);
 
-      runJob(job, async (running) => {
+      runJob(job, async (running, hooks) => {
         if (backendId === 'h3-local') {
           // 统一走 services/generator.js —— 与 REST 路径共用同一实现，
           // 杜绝"工具漏填占位符"这类漂移（审查 G7）
           return runH3Local({
             workflow: z.h3.loadWorkflow(),
             job: running,
-            shot,
+            shot: shotWithCards,
             prompt: running.prompt,
             cfg,
+            onSubmitted: hooks?.onSubmitted,
           });
         }
-        if (backendId === 'seedance-cloud') return seedanceClient.runSeedance({ cfg, job: running, shot, prompt: running.prompt });
-        return seedanceClient.runMock({ cfg, job: running, shot, prompt: running.prompt });
+        if (backendId === 'h3-image') return runH3ImageLocal({
+          workflow: imageWorkflow(),
+          job: running,
+          prompt: running.prompt,
+          shot: shotWithCards,
+          cfg,
+          onSubmitted: hooks?.onSubmitted,
+        });
+        if (backendId === 'seedance-cloud') return seedanceClient.runSeedance({ cfg, job: running, shot: shotWithCards, prompt: running.prompt });
+        return seedanceClient.runMock({ cfg, job: running, shot: shotWithCards, prompt: running.prompt });
       }).catch(() => {});
 
       return job;
@@ -452,7 +498,8 @@ export function registerTools(ctx) {
       additionalProperties: false,
     },
     async (a) => {
-      const { action, projectId, ...rest } = a;
+      const { action, ...rest } = a;
+      const projectId = action === 'meta' ? '' : requireProjectId(a.projectId);
       if (action === 'meta') return { genres: SCRIPT_GENRES, stages: SCRIPT_STAGES };
       if (action === 'get') return z.script.load(projectId);
       if (action === 'stage') return await z.script.runStage(projectId, rest.stage, rest);
@@ -547,7 +594,8 @@ export function registerTools(ctx) {
           return await z.director.command(name, a.args ?? {});
         }
         case 'build': {
-          const shot = a.shot ?? listShots(a.projectId || '').find((s) => s.id === a.shotId);
+          const pid = a.projectId ? safeId(String(a.projectId)) : '';
+          const shot = a.shot ?? (pid ? listShots(pid).find((s) => s.id === a.shotId) : null);
           if (!shot) throw new Error('SHOT_NOT_FOUND');
           return await z.director.buildFromShot(shot, a);
         }
@@ -626,16 +674,9 @@ export function registerTools(ctx) {
     },
   )));
 
-/** 加载图像工作流（带缓存） */
-  let _imgWf = null;
+/** 加载图像工作流（带缓存；模板随插件分发，不跟随 dataDir） */
   function imageWorkflow() {
-    if (_imgWf) return _imgWf;
-    try {
-      const f = `${dirs().root}/workflows/h3-image.json`;
-      if (!fs.existsSync(f)) return null;
-      _imgWf = JSON.parse(fs.readFileSync(f, 'utf8'));
-      return _imgWf;
-    } catch { return null; }
+    try { return readWorkflowCached('image', loadConfig()); } catch { return null; }
   }
 
   /* ---------------------------------------------------------- 图像生成 */
@@ -692,12 +733,13 @@ export function registerTools(ctx) {
       job.kind = 'image';
       await jobsStore().upsert(job);
 
-      runJob(job, async (running) => runH3ImageLocal({
+      runJob(job, async (running, hooks) => runH3ImageLocal({
         workflow: wf,
         job: running,
         prompt: String(a.prompt ?? ''),
         shot: { refs: { images: a.refImages ?? [] }, imageSizeId: a.sizeId },
         cfg,
+        onSubmitted: hooks?.onSubmitted,
       })).catch(() => {});
 
       return { ok: true, jobId: job.id, status: job.status, note: '用 studio_jobs 查进度' };

@@ -43,14 +43,22 @@ export const IMAGE_SAMPLING = Object.freeze({
 /**
  * 官方原生尺寸表（宽 × 高）。
  * 模型调优面积约 16 MP；`auto` 走 2048×2048。
+ *
+ * id 命名约定：`<方向>-<宽>:<高>`，方向 p=竖(portrait) / l=横(landscape) / sq=方 / v=竖屏视频 / h=横屏视频。
+ *
+ * ⚠️ 历史包袱（不要改 id，会破坏存量数据）：
+ *    - `v-16x9` 的实际尺寸是 1440×2560（9:16 竖屏），id 里的 16x9 是**早期笔误**。
+ *      几何是对的，只有名字误导；已补 name 说明，并保留 id 兼容。
+ *    - `p-3x4-film` 的实际尺寸是 1600×2400（2:3），也不符合 id 里的 3:4。
+ *      这里**改名为 `p-2x3-film`**（几何与名字对齐），旧 id 作为别名继续可用。
  */
 export const IMAGE_SIZES = Object.freeze([
   { id: 'auto', name: '自动 2048²', w: 0, h: 0, mp: 4.2 },
   { id: 'sq-2048', name: '方图 2048²', w: 2048, h: 2048, mp: 4.2 },
   { id: 'p-4x3', name: '竖图 3:4', w: 1776, h: 2368, mp: 4.2 },
   { id: 'l-4x3', name: '横图 4:3', w: 2368, h: 1776, mp: 4.2 },
-  { id: 'p-3x4-film', name: '人物卡 2:3', w: 1600, h: 2400, mp: 3.8 },
-  { id: 'v-16x9', name: '视频竖 9:16', w: 1440, h: 2560, mp: 3.7 },
+  { id: 'p-2x3-film', name: '人物卡 2:3', w: 1600, h: 2400, mp: 3.8 },
+  { id: 'v-16x9', name: '视频竖 9:16（id 为历史遗留）', w: 1440, h: 2560, mp: 3.7 },
   { id: 'h-16x9', name: '视频横 16:9', w: 2560, h: 1440, mp: 3.7 },
   { id: 'ecom-sq', name: '电商方图', w: 2048, h: 2048, mp: 4.2 },
   { id: 'ecom-45', name: '电商竖 4:5', w: 1832, h: 2290, mp: 4.2 },
@@ -59,9 +67,16 @@ export const IMAGE_SIZES = Object.freeze([
   { id: 'h3-4k-169', name: '4K 横 16:9', w: 5472, h: 3072, mp: 16.8 },
 ]);
 
-/** 按 id 取尺寸；找不到回落 auto */
+/** 旧尺寸 id → 新 id（历史数据兼容） */
+export const IMAGE_SIZE_ALIASES = Object.freeze({
+  'p-3x4-film': 'p-2x3-film',
+});
+
+/** 按 id 取尺寸（支持别名）；找不到回落 auto */
 export function imageSize(id) {
-  return IMAGE_SIZES.find((s) => s.id === id) ?? IMAGE_SIZES[0];
+  const key = String(id ?? '');
+  const normalized = IMAGE_SIZE_ALIASES[key] ?? key;
+  return IMAGE_SIZES.find((s) => s.id === normalized) ?? IMAGE_SIZES[0];
 }
 
 /**
@@ -126,9 +141,9 @@ export function sizeForPurpose(purpose) {
     'ecom': 'ecom-sq',
     'ecom-detail': 'ecom-sq',
     'ecom-45': 'ecom-45',
-    'film-base': 'p-3x4-film',
-    'film-turnaround': 'p-3x4-film',
-    'film-exp': 'p-3x4-film',
+    'film-base': 'p-2x3-film',
+    'film-turnaround': 'p-2x3-film',
+    'film-exp': 'p-2x3-film',
     'comic-page': 'comic-page',
     'comic-panel': 'sq-2048',
     'canvas': 'sq-2048',
@@ -233,7 +248,7 @@ export function normalizeImagePrompt(prompt, opts = {}) {
  * @param {string[]} [opts.refImages] 参考图绝对路径（编辑模式）
  */
 export async function runH3Image({
-  workflow, job, prompt, sizeId = 'auto', width, height, refImages = [], cfg = loadConfig(),
+  workflow, job, prompt, sizeId = 'auto', width, height, refImages = [], cfg = loadConfig(), onSubmitted,
 }) {
   if (!workflow) throw new Error('WORKFLOW_MISSING: 缺少 data/workflows/h3-image.json');
 
@@ -256,12 +271,20 @@ export async function runH3Image({
     )
     : {};
 
+  // 采样步数：蒸馏 checkpoint 固定 6 步，但配置项 imageSteps 之前是死字段
+  // （读都存在，代码里却硬编码 IMAGE_SAMPLING.steps）。这里让它真正生效，
+  // 同时夹到合理区间：少于 4 步画质崩，多于 12 步对蒸馏模型没有收益只有耗时。
+  const stepsRaw = Number(cfg?.imageSteps);
+  const steps = Number.isFinite(stepsRaw) && stepsRaw >= 1
+    ? Math.max(4, Math.min(12, Math.round(stepsRaw)))
+    : IMAGE_SAMPLING.steps;
+
   const map = {
     '{{PROMPT}}': normalizeImagePrompt(prompt),
     '{{WIDTH}}': W,
     '{{HEIGHT}}': H,
     '{{SEED}}': job.params?.seed ?? Math.floor(Math.random() * 2147483647),
-    '{{STEPS}}': IMAGE_SAMPLING.steps,
+    '{{STEPS}}': steps,
     '{{UNET_NAME}}': models.unet,
     '{{VAE_NAME}}': models.vae,
     '{{CLIP_NAME}}': models.clip,
@@ -305,7 +328,7 @@ export async function runH3Image({
 
   const outputsDir = path.join(cfg.dataDir, 'outputs');
   // SaveImage 走 ComfyUI 的 output 目录，runWorkflow 会负责取回
-  return comfy.runWorkflow({ cfg, workflow: wf, map, job, outputsDir });
+  return comfy.runWorkflow({ cfg, workflow: wf, map, job, outputsDir, onSubmitted });
 }
 
 export { IMAGE_MODELS as H3_IMAGE_MODELS, IMAGE_SIZES as H3_IMAGE_SIZES };

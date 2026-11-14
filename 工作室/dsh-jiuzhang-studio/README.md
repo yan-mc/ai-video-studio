@@ -55,6 +55,11 @@ cd $env:USERPROFILE\.dsh\profiles\desktop
 - 常见错误排查
 - 硬件性能基线（实测数据）
 
+> **3D 预演引擎是可选组件**：它属于第三方拆解产物，许可证不允许随插件分发。
+> 需要时把引擎目录放到 `<dataDir>/previz-engine`，或用配置项 `previzDir` /
+> 环境变量 `PREVIZ_HOME` 指定位置。未安装时预演页会明确显示"未安装"，
+> 不影响其它功能。
+
 ### 3. 构建前端（可选）
 
 仓库已包含构建好的 `app-dist`，clone 即用。若改了 `app-src`：
@@ -101,7 +106,11 @@ DSH Host (Electron, 127.0.0.1:随机端口)
 |---|---|
 | `/luoshu/api/*` | REST（108 条） |
 | `/luoshu/app/*` | SPA 静态 |
-| `/luoshu/assets/*` | 3D 资产静态 |
+| `/luoshu/assets/*` | 素材文件静态（来自 `<dataDir>/assets`，供 3D 模型等直接内联加载） |
+
+**排查入口**：`GET /luoshu/api/health` 会一并返回 `workflows.ok`
+（H3 与 H3-Image 的工作流模板是否就位）与 `previz.available`（预演引擎是否安装）。
+缺模板时可打 `GET /luoshu/api/workflows/diagnostics` 看它找过哪些目录、该怎么配。
 
 ---
 
@@ -192,16 +201,27 @@ DSH Host (Electron, 127.0.0.1:随机端口)
 
 ```powershell
 cd tests
-node verify-all.mjs        # 88 项全量验收
+node verify-all.mjs        # 304 项全量验收（含 B-回归 106 条）
 node test-image-pool.mjs   # 图片引用池 22 项
+```
+
+装机后 / 重启后验证插件是否正常加载（自动探测 DSH 端口）：
+
+```powershell
+node tests/postinstall-check.mjs
+# 或显式指定：node tests/postinstall-check.mjs http://127.0.0.1:4583
 ```
 
 SPA 侧：
 
 ```powershell
 cd app-src
-node --import ./tests/register.mjs tests/acceptance.mjs   # 12 项 + 179 单测
+node --import ./tests/register.mjs tests/runAll.mjs   # 179 单测 + 2 跳过
+npx tsc --noEmit                                     # 类型检查
 ```
+
+> `verify-all.mjs` 对**可选运行时**（ffmpeg / ai-runtime）缺失时记 `SKIP` 而不是
+> 假装通过 —— 看到 `SKIP` 说明对应检查没跑，不是成功。
 
 ---
 
@@ -213,6 +233,11 @@ DSH 的 `webServer` handler 路由**不经过** DSH 的连接准入，因此插�
 - **Origin 校验**：严格同源，跨源 403
 - **写令牌**：POST/PUT/PATCH/DELETE 需 `X-JZ-Token`
 - **路径穿越防护**：所有文件访问经 `safeJoin` 限制在数据目录内
+- **读目录白名单**：`/luoshu/api/file` 只允许产物/素材子目录，
+  `config.json` 等含密钥的运行时文件读不到
+- **id 白名单**：项目/镜头/资产 id 一律正则校验后才拼进路径
+- **上传类型白名单**：扩展名白名单；SVG 强制下载（`attachment` + `nosniff`），
+  避免同源存储型 XSS
 - **可执行路径**：不在配置白名单内，不接受外部注入
 - **画布 Agent 权限位**：写/删/花钱分别授权，默认不允许花钱
 
@@ -220,7 +245,9 @@ DSH 的 `webServer` handler 路由**不经过** DSH 的连接准入，因此插�
 
 ## 许可证说明
 
-本项目代码为原创。运行时依赖的 MiniMax H3 与 H3-Image 模型有各自的许可：
+本项目代码为原创，完整说明见 [LICENSE](LICENSE)。
+
+运行时依赖的 MiniMax H3 与 H3-Image 模型有各自的许可：
 
 - **H3**：MiniMax H3 Community License
 - **H3-Image**：MiniMax-H3-Image Community License（**与 H3 不同**）

@@ -6,13 +6,13 @@
 ## 命令
 
 > `node`/`npm` 不在系统 PATH 时，使用捆绑运行时：
-> `F:\Deepseek_harness\rea-agent\runtime\node.exe` 与同级 `npm.cmd`。
+> `<你的 Node 路径>\node.exe` 与同级 `npm.cmd`。
 
 ```powershell
-$env:Path = 'F:\Deepseek_harness\rea-agent\runtime;' + $env:Path
+$env:Path = '<你的 Node 目录>;' + $env:Path
 npm install
 npm run build      # tsc --noEmit && vite build → ../dsh-jiuzhang-studio/app-dist
-npm run dev        # 开发服务器（含 /luoshu/api → 127.0.0.1:7983 代理，端口按需改 vite.config.ts）
+npm run dev        # 开发服务器（含 /luoshu/api 代理；端口取 $env:DSH_PORT，默认 7983）
 npm run typecheck
 ```
 

@@ -16,6 +16,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { safeId } from '../security.js';
 
 /** 14 种题材模板（洛书 script.templates 对齐） */
 export const GENRES = Object.freeze([
@@ -254,8 +255,16 @@ export function createScriptService({ cfg }) {
     fs.mkdirSync(d, { recursive: true });
     return d;
   }
+  /**
+   * 单个项目的剧本文件。
+   *
+   * ⚠️ projectId 必须校验：这里直接拼进文件名（`${projectId}.json`），
+   *    而 `studio_script` 工具是把参数**原样**传进来的。不校验的话
+   *    `projectId: '../../../x'` 可把文件写到数据目录之外。
+   */
   function file(projectId) {
-    return path.join(dir(), `${projectId}.json`);
+    const id = safeId(projectId);
+    return path.join(dir(), `${id}.json`);
   }
   function load(projectId) {
     const f = file(projectId);

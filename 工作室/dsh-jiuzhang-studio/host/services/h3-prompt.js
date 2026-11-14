@@ -1,6 +1,5 @@
 /**
  * H3 提示词编译器 —— 按官方六段式 / 三段式规范生成提示词。
- *
  * 来源：用户提供的 H3 提示词工程体系（4 份技能书 + schema）
  *  - 《MiniMax H3 中文提示词技能》v3.1：六段式 Ref2VA 结构
  *  - 《完整工作流 Skill 2.3》：字段铁律 + 稳定性对策
@@ -16,6 +15,8 @@
  *  4. 三个声音字段（overall_soundscape / non_diegetic_music / 音效）不能空
  *  5. 参考视频必须声明用途，否则模型会照抄视频角色
  */
+
+import { normalizeMode } from '../store/models.js';
 
 /** 8 种画风（英文，直接复制用）—— 来自 seedance2.5技能书 + H3 中文提示词技能 */
 export const STYLE_PRESETS = Object.freeze([
@@ -133,7 +134,10 @@ export const H3_LIMITS = Object.freeze({
  * @returns {{ prompt: string, mode: string, warnings: string[], chars: number }}
  */
 export function compileH3Prompt(input = {}) {
-  const mode = String(input.mode ?? 'ref2va').toLowerCase();
+  // ⚠️ 归一化模式名：短名（t2v/i2v/fl2v/ref2v）与长名（t2va/…）都要能进编译器。
+  //    之前直接 String(input.mode ?? 'ref2va').toLowerCase()，
+  //    't2v' 落到 else 分支 → 被当成关键帧模式，生成一段没有对齐指令的提示词。
+  const mode = normalizeMode(input.mode ?? 'ref2va');
   const warnings = [];
 
   const style = resolveStyle(input);
@@ -192,13 +196,16 @@ function normalizeSubjects(list) {
   return (list ?? []).map((s, i) => ({
     id: s.id ?? `S${i + 1}`,
     name: s.name ?? `角色${i + 1}`,
-    pictureIndex: s.pictureIndex ?? (i + 1),
+    // pictureIndex 为 null 表示"这张卡没有参考图"（被预算裁掉 / 本身没图）。
+    // ⚠️ 不能回建成 i+1 —— 那会指向别的角色的图，比不写更糟。
+    pictureIndex: s.pictureIndex === null ? null : (s.pictureIndex ?? (i + 1)),
     gender: s.gender ?? 'FEMALE',
     heightCm: s.heightCm ?? null,
     traits: s.traits ?? '',
     personality: s.personality ?? '',
     voiceDesc: s.voiceDesc ?? '',
     audioIndex: s.audioIndex ?? null,
+    hasImage: s.hasImage !== false && s.pictureIndex !== null,
   }));
 }
 
@@ -238,6 +245,11 @@ function styleBlock(style) {
 function referenceRuleBlock(refs, subjects) {
   const lines = ['CRITICAL REFERENCE RULE:'];
   for (const s of subjects) {
+    // 没有参考图的角色只声明身份，不写 <Picture N>（写了就是指向别人的图）
+    if (s.pictureIndex === null || s.hasImage === false) {
+      lines.push(`- ${s.name} 没有参考图，外观按文字描述。`);
+      continue;
+    }
     lines.push(`- <Picture ${s.pictureIndex}> 是 ${s.name} 的外观参考 — 面部、发型、服装全部保持一致。`);
   }
   // 参考视频必须声明用途（否则模型会照抄）
@@ -268,7 +280,10 @@ function subjectDefinitionsBlock(subjects) {
     const bits = [];
     if (s.traits) bits.push(s.traits);
     if (s.heightCm) bits.push(`身高${s.heightCm}cm`);
-    lines.push(`${s.name} = 外观来自 <Picture ${s.pictureIndex}> — ${bits.join('，') || '保持一致'}。此角色为说话人 (${s.id})。`);
+    const look = (s.pictureIndex === null || s.hasImage === false)
+      ? (bits.join('，') || '按文字描述')
+      : `外观来自 <Picture ${s.pictureIndex}> — ${bits.join('，') || '保持一致'}`;
+    lines.push(`${s.name} = ${look}。此角色为说话人 (${s.id})。`);
   }
   return lines.join('\n');
 }
@@ -425,6 +440,10 @@ function deriveSummary(subjects, scenes) {
 function deriveRetention(subjects, refs) {
   const lines = [];
   for (const s of subjects) {
+    if (s.pictureIndex === null || s.hasImage === false) {
+      lines.push(`${s.name}：text_only — 没有参考图，按文字设定呈现。`);
+      continue;
+    }
     lines.push(`${s.name}（出现在 <Picture ${s.pictureIndex}>）：fully_preserved — 保持${s.traits || '面部、发型、服装'}一致。`);
   }
   refs.videos.forEach((_, i) => {
@@ -447,7 +466,7 @@ function deriveRetention(subjects, refs) {
 
 /** 把内部 shot 结构转成 H3 镜头输入包（对齐 schema） */
 export function toShotInputPackage(shot, opts = {}) {
-  const mode = shot.mode ?? opts.mode ?? 'ref2va';
+  const mode = normalizeMode(shot.mode ?? opts.mode ?? 'ref2va');
   // 角色卡 → subjects：让 subject_definitions 自动带上卡的文字设定。
   // pictureIndex 按卡在 refList 里的实际位置算（见 generator.js 的编号规则），
   // 这里用卡自身的 resolvedImages 顺序占位，最终以 generator 注入的为准。

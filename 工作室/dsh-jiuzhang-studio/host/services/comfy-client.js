@@ -300,7 +300,7 @@ export function deepReplace(value, map) {
 }
 
 /** 提交工作流并轮询，返回产物 */
-export async function runWorkflow({ cfg, workflow, map, job, outputsDir }) {
+export async function runWorkflow({ cfg, workflow, map, job, outputsDir, onSubmitted }) {
   const wf = deepReplace(workflow, map);
   const url = await resolveComfyUrl(cfg);
   const submitted = await getJson(`${url}/prompt`, {
@@ -310,6 +310,20 @@ export async function runWorkflow({ cfg, workflow, map, job, outputsDir }) {
   });
   const remoteId = submitted.prompt_id || submitted.id;
   if (!remoteId) throw new Error('COMFY_NO_PROMPT_ID');
+
+  // ⚠️ 提交成功后**立刻**把 remoteId 交给上层持久化。
+  //
+  // 为什么必须这么做：job.remoteId 原先只在 runJob 成功收尾时才写回，
+  // 于是"已提交到 ComfyUI、但还没跑完"这一整段窗口里，job.remoteId 都是 null。
+  // 用户在这期间点取消 → cancelJob 看到 remoteId 为空 → **不会调用
+  // /interrupt** → 本地显示"已取消"，但 ComfyUI 继续把这段视频跑完，
+  // GPU 白烧 2 分多钟（实测复现：取消后队列里仍留着一个 running 任务，
+  // 且该 prompt_id 与任何 job 都对不上，无从清理）。
+  //
+  // 这里通过回调上报，让 job-runner/上层在拿到 ID 的第一时间落盘。
+  if (typeof onSubmitted === 'function') {
+    try { await onSubmitted(remoteId, job); } catch { /* 记录失败不阻断执行 */ }
+  }
 
   for (let i = 0; i < MAX_POLL; i++) {
     await cancellableSleep(job, POLL_MS);     // 取消后最多 250ms 中断

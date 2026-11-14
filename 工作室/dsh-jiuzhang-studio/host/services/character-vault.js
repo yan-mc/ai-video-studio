@@ -164,9 +164,18 @@ export function createVaultService({ cfg: injectedCfg } = {}) {
       ? all.filter((c) => [c.name, c.description, ...(c.aliases ?? []), ...(c.traits ?? [])]
         .filter(Boolean).join(' ').toLowerCase().includes(kw))
       : all;
+    // 按创建时间正序：**创建早的排在前面**。
+    //
+    // 为什么不用 updatedAt 倒序：这个顺序会直接决定 `cardIds` 的排列，
+    // 而 `cardIds` 的顺序又决定参考图提交顺序 → 决定提示词里的 <Picture N>。
+    // 用 updatedAt 倒序的后果：
+    //   · 后创建的角色卡排在前面，抢到 <Picture 1>
+    //   · 用户只要编辑过某张卡，它就会跳到最前，编号**静默改变**
+    //     （同一个镜头，改个错别字就可能让两个角色的编号互换）
+    // 改为 createdAt 正序后，编号只与创建先后有关，编辑不会打乱。
     return filtered
       .slice()
-      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
       .map(enrich);
   }
 

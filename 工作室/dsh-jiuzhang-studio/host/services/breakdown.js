@@ -54,12 +54,12 @@ export const BREAKDOWN_LEVELS = Object.freeze([
   {
     id: 'standard',
     name: '角色设定卡',
-    desc: '三视图（正/侧/背）+ 服装部件 + 附属部件',
+    desc: '三视图（正/侧/背）+ 服装部件 + 附属部件（含细节还原约束）',
   },
   {
     id: 'full',
     name: '完整设定卡',
-    desc: '设定卡 + 表情集 + 材质细节放大',
+    desc: '与 standard 同内容；表情差分自 1.0.2 起已移除，保留此档位仅为兼容旧调用',
   },
   {
     id: 'parts',
@@ -78,8 +78,30 @@ export const BREAKDOWN_SIZES = Object.freeze([
 /** 默认三视图角度 */
 export const DEFAULT_VIEWS = Object.freeze(['正面', '侧面', '背面']);
 
-/** 默认表情集 */
-export const DEFAULT_EXPRESSIONS = Object.freeze(['平静', '微笑', '微怒', '惊讶']);
+/**
+ * 细节锁 —— 服装与附件的"不丢细节"约束（1.0.2 新增）。
+ *
+ * 为什么单独抽出来：实测原提示词只说"完整展开、互不遮挡"，
+ * 模型仍会简化——把多层裙摆合并、省掉小配饰、把纹样画成色块。
+ * 这里把"不要丢失细节"翻译成模型能执行的具体动作：
+ *   · 逐件单列（禁止合并/拆分）
+ *   · 保持原比例与朝向（禁止为了排版把长物画短、把斜挎画成正挂）
+ *   · 材质/纹样/五金逐项复刻（而不是概括成"金色装饰"）
+ *   · 只画参考图里存在的（禁止臆造）
+ */
+const DETAIL_LOCK = [
+  '细节还原要求（最高优先级，逐条执行）：',
+  '1. 逐件单列：参考图里能分辨出的每一件服装与配件都要单独画出，一件不漏；'
+    + '不要把多件合并成一件，也不要把一件拆成互不相干的碎片。',
+  '2. 保持原比例与朝向：每件都按参考图中的实际比例、长度、垂坠形态和穿戴方向绘制；'
+    + '长裙不要画短，披风不要拉直，斜挎不要画成正挂，系带与扣具的位置保持原样。',
+  '3. 逐项复刻材质与工艺：布料质感（哑光/丝绸/皮革/蕾丝/网纱）、纹样与印花、'
+    + '缝线与滚边、刺绣与珠绣、五金与镶嵌、宝石与链条，都要按参考图如实还原，'
+    + '不要概括成"金色装饰""黑色布料"这类笼统描述。',
+  '4. 不丢小件：耳饰、戒指、胸针、链扣、铆钉、绑带、蕾丝花边等小尺寸部件同样要完整呈现，'
+    + '不要因为面积小就省略或简化。',
+  '5. 不做增删：只画参考图中确实存在的元素，不要臆造参考图里没有的装饰、配饰或配色。',
+].join('\n');
 
 /* ------------------------------------------------------------------ 内部 */
 
@@ -114,9 +136,15 @@ function numbered(list) {
  * @param {string[]} [input.outfit]      要拆出的服装清单（留空=让模型自行判断）
  * @param {string[]} [input.parts]       要拆出的附属部件清单
  * @param {string[]} [input.views]       三视图角度
- * @param {string[]} [input.expressions] 表情集（full 档）
+ * @param {string[]} [input.expressions] **已弃用**：表情差分已从管线移除
  * @param {string}   [input.notes]       任务性补充要求（画风/排版），非外观描述
  * @param {string}   level               档位 id
+ *
+ * 设计变更（1.0.2）：
+ *   · **移除表情差分**。实测它与三视图/部件拆解抢构图预算，导致表情数少于要求、
+ *     而且整套设定卡的价值主要在服装与附件，表情分区收益低。
+ *   · **强化细节保真**。把"不要丢失细节"拆成可执行的具体指令：逐件单列、
+ *     保持原比例与朝向、材质/纹样/五金/镶嵌逐项还原、禁止合并与简化。
  */
 export function buildBreakdownPrompt(input = {}, level = 'standard') {
   const name = String(input.character ?? '').trim();
@@ -127,10 +155,8 @@ export function buildBreakdownPrompt(input = {}, level = 'standard') {
   const outfit = cleanList(input.outfit, 24);
   const parts = cleanList(input.parts, 24);
   const views = cleanList(input.views, 8).length ? cleanList(input.views, 8) : [...DEFAULT_VIEWS];
-  const expressions = cleanList(input.expressions, 12).length
-    ? cleanList(input.expressions, 12)
-    : [...DEFAULT_EXPRESSIONS];
   const notes = String(input.notes ?? '').trim();
+  void input.expressions;   // 已弃用，保留入参只为不破坏旧调用
 
   /* ---------------------------------------------------------- 纯部件档 */
   if (level === 'parts') {
@@ -157,6 +183,7 @@ export function buildBreakdownPrompt(input = {}, level = 'standard') {
       '风格：干净的服装设计参考稿，均匀平光，无投影。'
       + '严格照参考图的实际设计与配色拆解，不添加、不改动设计。',
     );
+    body.push(DETAIL_LOCK);
     body.push('画面中不要出现任何文字、标注、编号或水印。');
     if (notes) body.push(`补充要求：${notes}`);
 
@@ -164,7 +191,7 @@ export function buildBreakdownPrompt(input = {}, level = 'standard') {
   }
 
   /* ------------------------------------------------------ 设定卡 / 完整档 */
-  const isFull = level === 'full';
+  // 1.0.2 起 standard 与 full 合并同一套内容（表情差分区已移除）
   const body = [];
 
   body.push(
@@ -179,31 +206,32 @@ export function buildBreakdownPrompt(input = {}, level = 'standard') {
     + '\n自然站立，双臂自然下垂，不做大幅度动作；全身入画，不切头不切脚。',
   );
 
-  // 服装 + 部件
+  // 服装 + 部件（细节保真的重点区）
   const wardrobe = [];
   if (outfit.length) {
     wardrobe.push(`把下列服装逐件拆出、单独平铺展示：\n${numbered(outfit)}`);
   } else {
-    wardrobe.push('把角色身上的服装逐件拆出、单独平铺展示：上衣、下装、外层、鞋履。');
+    wardrobe.push(
+      '把角色身上的服装逐件拆出、单独平铺展示：上衣、下装、外层、内衬、鞋履、头饰。'
+      + '\n每一件都必须是完整的一件，不得把多件合并成一件，也不得把一件拆成互不相干的碎片。',
+    );
   }
   if (parts.length) {
     wardrobe.push(`把下列附属部件逐件拆出、单独平铺展示：\n${numbered(parts)}`);
   } else {
-    wardrobe.push('把角色身上的附属部件逐件拆出、单独平铺展示：发饰、首饰、挂件、武器、披风等。');
+    wardrobe.push(
+      '把角色身上的附属部件逐件拆出、单独平铺展示：发饰、耳饰、颈饰、手饰、腰饰、'
+      + '挂件、武器、披风与绶带、系带与扣具。'
+      + '\n小件（戒指、耳钉、胸针、链扣、铆钉）也要单独列出，不要因为尺寸小就省略。',
+    );
   }
   wardrobe.push(
     '每件要求：正面朝上、完整展开、互不遮挡，且能与三视图中的对应部位明确对应。',
   );
   body.push(wardrobe.join('\n\n'));
 
-  // 表情集 + 材质（仅完整档）
-  if (isFull) {
-    body.push(
-      `另外绘制${cn(expressions.length)}个头部特写，展示这些表情：${expressions.join('、')}。`
-      + '\n只改变面部表情，发型、瞳色、头部角度保持一致。',
-    );
-    body.push('再选取一到两处关键材质做放大特写，例如布料纹理、金属质感、刺绣细节。');
-  }
+  // 细节锁（1.0.2 新增，替代原表情分区）
+  body.push(DETAIL_LOCK);
 
   // 整体风格
   body.push(
@@ -217,7 +245,8 @@ export function buildBreakdownPrompt(input = {}, level = 'standard') {
   // 一致性（最重要，放最后强化）
   body.push(
     '一致性的要求最高：角色的长相、发型、瞳色、服装设计完全以参考图为准，'
-    + '不要美化、不要改动设计、不要替换配色；三视图与拆解出的部件必须能看出是同一个角色。',
+    + '不要美化、不要改动设计、不要替换配色、不要臆造参考图里没有的元素；'
+    + '三视图与拆解出的部件必须能看出是同一个角色、同一套服装。',
   );
 
   if (notes) body.push(`补充要求：${notes}`);

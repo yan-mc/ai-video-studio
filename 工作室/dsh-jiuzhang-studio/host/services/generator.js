@@ -169,35 +169,47 @@ export function resolvePrevizArtifacts(shot, cfg = loadConfig()) {
  *   Ref2VA 里参考图按 ref_images 的顺序编号为 <Picture 1>..<Picture N>，
  *   我们的 refList 就是提交顺序，所以第 i 张（1-based）对应 <Picture i>。
  *
+ * ⚠️ 编号**只能**来自 refList（真实提交顺序），不能来自"第几张卡"。
+ *    之前用 `pictureIndex = 卡序号`：一旦某张卡没有图、或有手工图插进来，
+ *    编号就整体错位，提示词里的 <Picture N> 指向别人的图 —— 表现为角色串脸。
+ *    现在 refList 里每张图都带 cardId（见 resolveRefImages 的 push(..., 'vault-card', {cardId})），
+ *    这里按 cardId 反查它在 refList 中的真实位置。
+ *
  * ⚠️ 只写身份与编号，不复述像素级外观：
  *    外观由图片本身承载，文字重复描述反而会与图片冲突。
  */
 function injectCardDefinitions(prompt, refList, shot) {
   const text = String(prompt ?? '');
   const cardById = new Map((shot.characterCards ?? []).map((c) => [c.id, c]));
+  if (!cardById.size) return text;
 
-  // ⚠️ 正常情况下 h3-prompt.toShotInputPackage 已经在编译时用 shot.characterCards
-  //    生成了 subject_definitions（编号即卡序）。这里只在**编译时没拿到卡**
-  //    （提示词里没有卡名）时补一次，避免重复注入把同一段写两遍。
-  const already = (shot.characterCards ?? []).some(
-    (c) => c?.name && text.includes(String(c.name)),
-  );
-  if (already) return text;
-
-  // 收集有卡信息的参考图（角色卡来源）
-  const cardEntries = [];
+  // 从**真实参考图清单**算出每张卡占哪几个编号
   const byCard = new Map();
   refList.forEach((r, i) => {
     if (!r.cardId) return;
-    if (!byCard.has(r.cardId)) byCard.set(r.cardId, { name: r.cardName, pictures: [] });
-    byCard.get(r.cardId).pictures.push(i + 1); // 1-based picture index
+    if (!byCard.has(r.cardId)) byCard.set(r.cardId, []);
+    byCard.get(r.cardId).push(i + 1);
   });
-  if (!byCard.size) return text;
 
+  // 已经有正确的 subject_definitions 就不重复注入。
+  // 判据从"提示词里出现过卡名"改为"卡名 + 正确编号都出现过" ——
+  // 旧判据只要名字出现就跳过，于是编译器算错的编号被原样保留下来。
+  const definitionsOk = (shot.characterCards ?? []).every((c) => {
+    if (!c?.name) return true;
+    if (!text.includes(String(c.name))) return false;
+    const pics = byCard.get(c.id) ?? [];
+    if (!pics.length) return true;            // 这张卡没有图，不需要编号
+    return pics.some((n) => text.includes(`<Picture ${n}>`));
+  });
+  if (definitionsOk) return text;
+
+  const cardEntries = [];
   for (const [id, info] of byCard) {
-    const card = cardById.get(id) ?? { name: info.name };
-    cardEntries.push({ card, pictureIndex: info.pictures[0], allPictures: info.pictures });
+    const card = cardById.get(id) ?? { id, name: (shot.characterCards ?? []).find((c) => c.id === id)?.name };
+    if (!card) continue;
+    cardEntries.push({ card, pictureIndex: info[0], allPictures: info });
   }
+  if (!cardEntries.length) return text;
 
   const lines = [];
   for (const { card, pictureIndex, allPictures } of cardEntries) {
@@ -228,7 +240,7 @@ function injectCardDefinitions(prompt, refList, shot) {
  * @param {object} opts.shot      镜头卡
  * @param {string} opts.prompt    编译后的提示词
  */
-export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig() }) {
+export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig(), onSubmitted }) {
   if (!workflow) throw new Error('WORKFLOW_MISSING: 缺少 data/workflows/h3.json');
 
   const res = resolutionFor(shot.profile, shot.ratio);
@@ -396,7 +408,7 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
   }
 
   const outputsDir = path.join(cfg.dataDir, 'outputs');
-  return comfy.runWorkflow({ cfg, workflow: wfCopy, map, job, outputsDir });
+  return comfy.runWorkflow({ cfg, workflow: wfCopy, map, job, outputsDir, onSubmitted });
 }
 
 export const H3_MODEL_NAMES = { UNET_REF, UNET_FL2V, CLIP_NAME, VAE_NAME, AUDIO_VAE_NAME, LORA_REF, LORA_FL2V };
@@ -407,7 +419,7 @@ export const H3_MODEL_NAMES = { UNET_REF, UNET_FL2V, CLIP_NAME, VAE_NAME, AUDIO_
  * 执行一次 H3-Image 生成（文生图 / 参考图编辑）。
  * 与视频共用 Qwen3-VL 编码器，只换扩散模型 + 图像 VAE。
  */
-export async function runH3ImageLocal({ workflow, job, prompt, shot, cfg = loadConfig() }) {
+export async function runH3ImageLocal({ workflow, job, prompt, shot, cfg = loadConfig(), onSubmitted }) {
   const { runH3Image } = await import('./h3-image.js');
   const params = job.params ?? {};
   return runH3Image({
@@ -419,6 +431,7 @@ export async function runH3ImageLocal({ workflow, job, prompt, shot, cfg = loadC
     width: params.width,
     height: params.height,
     refImages: resolveRefImages(shot ?? {}, cfg).map((r) => r.abs),
+    onSubmitted,
   });
 }
 

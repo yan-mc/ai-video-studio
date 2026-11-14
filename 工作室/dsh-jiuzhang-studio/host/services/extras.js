@@ -146,16 +146,29 @@ export function createExtrasService({ cfg }) {
   /* ---------------- 分镜目录导入 ---------------- */
   /**
    * 扫描目录，识别可导入的产物类型。
+   *
+   * ⚠️ 这是**唯一**允许访问 dataDir 之外路径的接口（用户要导入外部
+   *    分镜目录），所以必须自己把边界说清楚：
+   *      - 只扫一层（不递归），只认 IMPORT_SOURCES 里的模式
+   *      - 拒绝非常规文件，结果里不返回文件内容
+   *    `previewImportFile` 更进一步：只回**已知类型**文件的前 N 个字符。
+   *
    * @param {string} dir 绝对路径
    */
   function scanImportDir(dir) {
-    if (!dir || !fs.existsSync(dir)) throw new Error('DIR_NOT_FOUND');
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const abs = String(dir || '').trim();
+    if (!abs) throw new Error('DIR_REQUIRED');
+    if (!path.isAbsolute(abs)) throw new Error('DIR_MUST_BE_ABSOLUTE');
+    if (!fs.existsSync(abs)) throw new Error('DIR_NOT_FOUND');
+    if (!fs.statSync(abs).isDirectory()) throw new Error('NOT_A_DIRECTORY');
+
+    const entries = fs.readdirSync(abs, { withFileTypes: true });
     const files = [];
     for (const e of entries) {
       if (!e.isFile()) continue;
-      const full = path.join(dir, e.name);
-      const st = fs.statSync(full);
+      const full = path.join(abs, e.name);
+      let st;
+      try { st = fs.statSync(full); } catch { continue; }
       const matched = IMPORT_SOURCES.filter((s) => s.pattern.test(e.name));
       files.push({
         name: e.name,
@@ -168,7 +181,7 @@ export function createExtrasService({ cfg }) {
     const known = files.filter((f) => f.kind);
     const unknown = files.filter((f) => !f.kind);
     return {
-      dir,
+      dir: abs,
       total: files.length,
       known: known.length,
       unknown: unknown.length,
@@ -177,16 +190,43 @@ export function createExtrasService({ cfg }) {
     };
   }
 
-  /** 读取一个导入文件的预览（前 N 字符） */
+  /**
+   * 读取一个导入文件的预览（前 N 字符）。
+   *
+   * 安全边界：只允许预览 **scanImportDir 认得的分镜类文件**
+   * （`IMPORT_SOURCES` 的模式 + 文本扩展名）。之前无任何限制，
+   * 等于给本机 HTTP 开了一个"任意文件读前 2000 字符"的口子。
+   */
   function previewImportFile(filePath, limit = 2000) {
-    if (!filePath || !fs.existsSync(filePath)) throw new Error('FILE_NOT_FOUND');
-    const raw = fs.readFileSync(filePath, 'utf8');
-    return {
-      name: path.basename(filePath),
-      bytes: Buffer.byteLength(raw, 'utf8'),
-      truncated: raw.length > limit,
-      preview: raw.slice(0, limit),
-    };
+    const abs = String(filePath || '').trim();
+    if (!abs) throw new Error('FILE_REQUIRED');
+    if (!path.isAbsolute(abs)) throw new Error('FILE_MUST_BE_ABSOLUTE');
+    if (!fs.existsSync(abs)) throw new Error('FILE_NOT_FOUND');
+    const st = fs.statSync(abs);
+    if (!st.isFile()) throw new Error('NOT_A_FILE');
+
+    const name = path.basename(abs);
+    const recognized = IMPORT_SOURCES.some((s) => s.pattern.test(name));
+    const textLike = /\.(json|md|markdown|txt|csv|srt)$/i.test(name);
+    if (!recognized || !textLike) {
+      throw new Error(`UNSUPPORTED_IMPORT_FILE: ${name}（只允许预览分镜/提示词/字幕类文本文件）`);
+    }
+    // 大文件只读头部，避免把整个视频/模型读进内存
+    const maxBytes = Math.max(1, Math.min(16 * 1024 * 1024, Number(limit) * 8));
+    const fd = fs.openSync(abs, 'r');
+    try {
+      const buf = Buffer.alloc(Math.min(st.size, maxBytes));
+      fs.readSync(fd, buf, 0, buf.length, 0);
+      const raw = buf.toString('utf8');
+      return {
+        name,
+        bytes: st.size,
+        truncated: raw.length > limit || st.size > maxBytes,
+        preview: raw.slice(0, limit),
+      };
+    } finally {
+      try { fs.closeSync(fd); } catch { /* ignore */ }
+    }
   }
 
   /* ---------------- 资源清理（孤儿文件） ---------------- */

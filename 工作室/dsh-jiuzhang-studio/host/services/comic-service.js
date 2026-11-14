@@ -15,6 +15,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { safeId } from '../security.js';
 
 /** 11 套版式模板（洛书实测） */
 export const LAYOUT_TEMPLATES = Object.freeze([
@@ -221,8 +222,15 @@ export function createComicService({ cfg }) {
     fs.mkdirSync(d, { recursive: true });
     return d;
   }
+  /**
+   * 单个项目的漫画文件。
+   *
+   * ⚠️ projectId 必须校验：这里直接拼进文件名，不校验的话
+   *    `projectId: '../../../x'` 可把文件写到数据目录之外。
+   */
   function file(projectId) {
-    return path.join(dir(), `${projectId}.json`);
+    const id = safeId(projectId);
+    return path.join(dir(), `${id}.json`);
   }
   function load(projectId) {
     const f = file(projectId);

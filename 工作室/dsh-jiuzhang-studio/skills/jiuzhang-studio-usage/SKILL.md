@@ -134,7 +134,7 @@ POST /luoshu/api/breakdown/preview  {character, outfit[], parts[], views[], expr
 POST /luoshu/api/breakdown/generate 同上 + refImages[] + sizeId
 ```
 
-**level**：`standard`（三视图+服装+部件）/ `full`（+表情+材质）/ `parts`（纯部件）
+**level**：`standard`（三视图+服装+部件）/ `full`（与 standard 同内容，表情差分已移除）/ `parts`（纯部件）
 
 ### 2.6 提示词编译
 

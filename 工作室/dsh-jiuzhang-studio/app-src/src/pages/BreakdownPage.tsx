@@ -38,7 +38,6 @@ export function BreakdownPage() {
   const [outfitText, setOutfitText] = useState('');
   const [partsText, setPartsText] = useState('');
   const [viewText, setViewText] = useState('正面，侧面，背面');
-  const [exprText, setExprText] = useState('平静，微笑，微怒，惊讶');
   const [notes, setNotes] = useState('');
   const [level, setLevel] = useState('standard');
   const [sizeId, setSizeId] = useState('square');
@@ -71,12 +70,11 @@ export function BreakdownPage() {
     outfit: outfitText.split(/[\n,，;；]/).map((s) => s.trim()).filter(Boolean),
     parts: partsText.split(/[\n,，;；]/).map((s) => s.trim()).filter(Boolean),
     views: viewText.split(/[\n,，;；]/).map((s) => s.trim()).filter(Boolean),
-    expressions: exprText.split(/[\n,，;；]/).map((s) => s.trim()).filter(Boolean),
     notes,
     level,
     sizeId,
     refImages: refRel ? [refRel] : [],
-  }), [character, outfitText, partsText, viewText, exprText, notes, level, sizeId, refRel]);
+  }), [character, outfitText, partsText, viewText, notes, level, sizeId, refRel]);
 
   async function doPreview() {
     setBusy(true);
@@ -225,9 +223,6 @@ export function BreakdownPage() {
               <Field label="三视图角度（逗号分隔）">
                 <Input value={viewText} onChange={(e) => setViewText(e.target.value)}
                   placeholder="正面，侧面，背面" />
-              </Field>
-              <Field label="表情集（完整档才用，逗号分隔）">
-                <Input value={exprText} onChange={(e) => setExprText(e.target.value)} />
               </Field>
             </Panel>
           </div>

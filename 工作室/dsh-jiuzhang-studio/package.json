@@ -1,8 +1,9 @@
 {
   "name": "@local/dsh-jiuzhang-studio",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "private": true,
   "type": "module",
+  "license": "UNLICENSED",
   "description": "九章工作室 — DSH 本地 AI 视频工作室：渲染页 / 角色卡 / 节点画布 / 素材库 / 剧本漫画分镜 / 3D 预演 / H3 与 Seedance 双后端",
   "exports": {
     ".": "./host/index.js",
@@ -17,7 +18,12 @@
     "locale/*.json",
     "icon.svg",
     "app-dist/**",
-    "README.md"
+    "skills/**",
+    "docs/**",
+    "data/workflows/*.json",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {

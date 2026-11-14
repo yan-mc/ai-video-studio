@@ -13,7 +13,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { loadConfig, resetConfigCache } from './config.js';
+import { loadConfig, resetConfigCache, wireConfigInvalidation } from './config.js';
 import { handleApi } from './api/index.js';
 import { serveSpa, serveStatic } from './static.js';
 import { recoverInterruptedJobs, runtimeStats, runJob } from './services/job-runner.js';
@@ -33,6 +33,7 @@ import { createCanvasAgent } from './services/canvas-agent.js';
 import { createVaultService } from './services/character-vault.js';
 import { createExtrasService } from './services/extras.js';
 import { initRuntime, attachControllers, disposeRuntime } from './runtime.js';
+import { readWorkflowCached } from './services/workflow-paths.js';
 
 export const inject = ['tools', 'webServer'];
 
@@ -43,14 +44,18 @@ const ASSET_PREFIX = '/luoshu/assets';
 export function apply(ctx) {
   const root = path.resolve(import.meta.dirname, '..');
 
+  // 配置变更 → 重建各模块缓存（ComfyUI 探活、工作流目录、存储句柄等）
+  wireConfigInvalidation().catch(() => { /* 个别模块加载失败不影响主流程 */ });
+
   /** 加载 H3-Image 工作流（画布 Agent 的 generate_image 用） */
   let _imgWf = null;
   function loadImageWorkflowForGen() {
     if (_imgWf) return _imgWf;
     try {
-      const f = path.join(root, 'data', 'workflows', 'h3-image.json');
-      if (!fs.existsSync(f)) return null;
-      _imgWf = JSON.parse(fs.readFileSync(f, 'utf8'));
+      // 工作流模板随插件分发，**不跟随 dataDir**（见 services/workflow-paths.js）
+      const wf = readWorkflowCached('image', loadConfig());
+      if (!wf) return null;
+      _imgWf = wf;
       return _imgWf;
     } catch { return null; }
   }
@@ -91,14 +96,15 @@ export function apply(ctx) {
       });
       if (kind === 'image') job.kind = 'image';
       await jobsStore().upsert(job);
-      runJob(job, async (running) => (kind === 'video'
-        ? runH3Local({ workflow, job: running, shot: options.shot ?? {}, prompt: String(prompt ?? ''), cfg })
+      runJob(job, async (running, hooks) => (kind === 'video'
+        ? runH3Local({ workflow, job: running, shot: options.shot ?? {}, prompt: String(prompt ?? ''), cfg, onSubmitted: hooks?.onSubmitted })
         : runH3ImageLocal({
           workflow,
           job: running,
           prompt: String(prompt ?? ''),
           shot: { refs: { images: options.refImages ?? [] }, imageSizeId: options.sizeId ?? 'sq-2048' },
           cfg,
+          onSubmitted: hooks?.onSubmitted,
         }))).catch(() => {});
       return { jobId: job.id, status: job.status, backendId: job.backendId };
     },
@@ -160,11 +166,17 @@ export function apply(ctx) {
           .catch(() => { try { res.destroy(); } catch { /* ignore */ } });
       },
     });
+    // 3D 资产静态服务。
+    //
+    // ⚠️ 原来 baseDir 指向 `app-dist`（SPA 构建产物），语义与 README 宣称的
+    //    "3D 资产静态" 不符，而且前端从未引用过这个前缀。
+    //    现在改成服务 `<dataDir>/assets`（glb/gltf/fbx/obj 都落在这里），
+    //    这样画布/预演页面要直接内联加载 3D 模型时有个稳定的同源地址。
     const disposeAsset = ctx.webServer.register({
       kind: 'prefix',
       path: ASSET_PREFIX,
       handler: (req, res) => {
-        serveStatic(req, res, { prefix: ASSET_PREFIX, baseDir: path.join(root, 'app-dist') })
+        serveStatic(req, res, { prefix: ASSET_PREFIX, baseDir: path.join(loadConfig().dataDir, 'assets') })
           .catch(() => { try { res.destroy(); } catch { /* ignore */ } });
       },
     });
