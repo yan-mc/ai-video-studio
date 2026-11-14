@@ -1352,7 +1352,14 @@ for (let i = 0; i < 40; i++) {
   if (finalJob && ['completed', 'failed', 'cancelled'].includes(finalJob.status)) break;
 }
 add('C-生成', '任务到达终态', Boolean(finalJob) && finalJob.status !== 'queued', finalJob?.status);
-add('C-生成', 'mock 出片成功', finalJob?.status === 'completed', finalJob?.error || '');
+// mock 后端依赖 ffmpeg 生成占位视频。ffmpeg 是**外部运行时依赖**（314MB，不入库），
+// 单独 clone 仓库的环境里没有它 —— 那种情况应记为 SKIP 而不是 FAIL，
+// 否则从 GitHub clone 下来的用户跑测试会看到一个吓人的红叉。
+if (finalJob?.status === 'failed' && /ENOENT|ffmpeg/i.test(String(finalJob.error || ''))) {
+  skip('C-生成', 'mock 出片需要 ffmpeg（未安装，跳过）', finalJob.error);
+} else {
+  add('C-生成', 'mock 出片成功', finalJob?.status === 'completed', finalJob?.error || '');
+}
 if (finalJob?.outputs?.[0]?.path) {
   const out = finalJob.outputs[0];
   add('C-生成', '产物文件存在', fs.existsSync(out.path), out.path);
