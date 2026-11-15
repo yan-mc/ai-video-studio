@@ -1,0 +1,4 @@
+- insert:
+    - id: jiuzhang-studio
+      name: '@local/dsh-jiuzhang-studio'
+      config: {}

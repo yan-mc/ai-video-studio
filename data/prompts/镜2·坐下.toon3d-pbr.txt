@@ -1,0 +1,44 @@
+CRITICAL STYLE RULE:
+3D cel-shaded animation with PBR rendering. Thin dark outlines (not thick hand-drawn lines). Subsurface scattering on skin — soft, translucent, delicate. Soft studio lighting. Smooth shadow transitions, soft diffused shadows. Realistic fabric textures with wrinkles and bump. 3D physical hair strands with clear groups. Clean render, smooth surfaces.
+禁止：粗黑手绘轮廓线、纯平涂赛璐珞、硬块状阴影、写实人类皮肤质感。
+NO subtitles, NO on-screen text.
+
+CRITICAL REFERENCE RULE:
+- <Picture 1> 是 三角初华 的外观参考 — 面部、发型、服装全部保持一致。
+- <Picture 2> 是 丰川祥子 的外观参考 — 面部、发型、服装全部保持一致。
+
+subject_definitions:
+三角初华 = 外观来自 <Picture 1> — 金色短发、金色眼瞳、白色礼帽、黑色露肩上衣与黑色长裙、黑色长靴。身高 168cm。此角色为说话人 (S1)。
+丰川祥子 = 外观来自 <Picture 2> — 淡紫色长发、紫色眼瞳、深色发饰、黑色礼裙与紫色披肩、黑色长靴。身高 166cm。此角色为说话人 (S2)。
+
+CHARACTER DEFINITION — 三角初华 (S1):
+- 性别：FEMALE
+- 身高：168cm
+- 关键特征：金色短发、金色眼瞳、白色礼帽、黑色露肩上衣与黑色长裙、黑色长靴
+- 性格：沉静、温柔、习惯照顾对方
+- 声音：中低音女声，语调平缓，气声偏多（本镜无台词）
+
+CHARACTER DEFINITION — 丰川祥子 (S2):
+- 性别：FEMALE
+- 身高：166cm
+- 关键特征：淡紫色长发、紫色眼瞳、深色发饰、黑色礼裙与紫色披肩、黑色长靴
+- 性格：清冷、克制、情绪不外露
+- 声音：偏高而清亮的女声，尾音干脆（本镜无台词）
+
+summary:
+三角初华与丰川祥子走到海边的长椅前并肩坐下，面朝大海。
+
+retention_analysis:
+三角初华（出现在 <Picture 1>）：fully_preserved — 保持金发、礼帽、黑裙、长靴一致。
+丰川祥子（出现在 <Picture 2>）：fully_preserved — 保持紫发、发饰、黑礼裙、紫披肩一致。
+
+non_diegetic_music: N/A
+
+SCENE LAYOUT:
+同一片黄昏海滩，摄影机此时位于岸的一侧、朝向海面。一张木制长椅立在沙滩上，椅面朝向大海。天空的橙红落在海平面上，长椅与沙地投下长长的暖色影子。
+
+overall_soundscape: 海浪持续拍岸，木头在承重时发出轻微吱呀声，衣料与椅面摩擦的细响。
+
+MOTION DESCRIPTION:
+[0.0s-3.8s] 全景。两人走到长椅前，并肩坐下。动作是缓慢下坐、膝盖弯曲、上身微微前倾，坐定后肩膀自然靠在一起。 运镜：固定机位，镜头极缓慢地向前推进，视点略高于椅背。
+音效：海浪持续拍岸（叙事内）。

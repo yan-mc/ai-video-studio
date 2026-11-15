@@ -1,0 +1,44 @@
+CRITICAL STYLE RULE:
+Helltaker game visual aesthetic. High contrast black/white/deep red color palette. Flat cartoon character design — slightly larger head, slender limbs, flat torso, simplified geometric shapes. Thick jagged black outlines. Flat cel-shaded coloring with block shadows, no gradients. Render characters as 2D cartoons, NOT realistic. NO photorealistic textures, NO realistic skin shading, NO 3D proportions, NO PBR materials.
+禁止：写实质感、写实皮肤阴影、3D比例、PBR材质、渐变、柔光、模糊、照片级渲染。
+NO subtitles, NO on-screen text.
+
+CRITICAL REFERENCE RULE:
+- <Picture 1> 是 三角初华 的外观参考 — 面部、发型、服装全部保持一致。
+- <Picture 2> 是 丰川祥子 的外观参考 — 面部、发型、服装全部保持一致。
+
+subject_definitions:
+三角初华 = 外观来自 <Picture 1> — 金色短发、金色眼瞳、白色礼帽、黑色露肩上衣与黑色长裙、黑色长靴。身高 168cm。此角色为说话人 (S1)。
+丰川祥子 = 外观来自 <Picture 2> — 淡紫色长发、紫色眼瞳、深色发饰、黑色礼裙与紫色披肩、黑色长靴。身高 166cm。此角色为说话人 (S2)。
+
+CHARACTER DEFINITION — 三角初华 (S1):
+- 性别：FEMALE
+- 身高：168cm
+- 关键特征：金色短发、金色眼瞳、白色礼帽、黑色露肩上衣与黑色长裙、黑色长靴
+- 性格：沉静、温柔、习惯照顾对方
+- 声音：中低音女声，语调平缓，气声偏多（本镜无台词）
+
+CHARACTER DEFINITION — 丰川祥子 (S2):
+- 性别：FEMALE
+- 身高：166cm
+- 关键特征：淡紫色长发、紫色眼瞳、深色发饰、黑色礼裙与紫色披肩、黑色长靴
+- 性格：清冷、克制、情绪不外露
+- 声音：偏高而清亮的女声，尾音干脆（本镜无台词）
+
+summary:
+三角初华与丰川祥子在黄昏海滩牵手散步，随后走向长椅坐下，最终相向亲吻。
+
+retention_analysis:
+三角初华（出现在 <Picture 1>）：fully_preserved — 保持金发、礼帽、黑裙、长靴一致。
+丰川祥子（出现在 <Picture 2>）：fully_preserved — 保持紫发、发饰、黑礼裙、紫披肩一致。
+
+non_diegetic_music: N/A
+
+SCENE LAYOUT:
+黄昏的海滩。海岸线沿画面横向延伸，海面在人物身后远处，天空是落日余晖的橙红色渐变，海面浮着细碎的金色波光。沙滩占画面下方三分之一。
+
+overall_soundscape: 海浪缓慢拍岸的连续白噪，脚下沙地被踩实的细碎声响，远处一两声海鸟啼叫。
+
+MOTION DESCRIPTION:
+[0.0s-3.8s] 中景。三角初华与丰川祥子并肩、手牵手沿着海岸线行走，两人都侧向对着镜头，步伐一致，手臂自然交握。 运镜：镜头从海面一侧横向平移跟拍，与两人保持固定距离同速移动，视线垂直于海岸线。
+音效：海浪缓慢拍岸的连续白噪（叙事内）。

@@ -1,0 +1,46 @@
+# 许可证说明
+
+## 本仓库的代码
+
+本插件（`@local/dsh-jiuzhang-studio`）的**源代码为本项目原创**。
+
+当前版本以 `package.json` 中的 `"license": "UNLICENSED"` 分发 —— 即
+**保留所有权利，未授予公开使用许可**。如果你希望开源，请在此处补上
+你选择的许可证全文（例如 MIT / Apache-2.0），并同步修改 `package.json`。
+
+## 第三方依赖
+
+| 依赖 | 许可证 | 说明 |
+|---|---|---|
+| [ComfyUI](https://github.com/comfyanonymous/ComfyUI) | GPL-3.0 | 推理框架，**需用户自行安装**，不随本仓库分发 |
+| [React](https://react.dev/) / [React DOM](https://react.dev/) | MIT | SPA 运行时 |
+| [Vite](https://vitejs.dev/) | MIT | 构建工具 |
+| [@xyflow/react](https://reactflow.dev/) | MIT | 节点画布 |
+| [zustand](https://github.com/pmndrs/zustand) | MIT | 状态管理 |
+| [TypeScript](https://www.typescriptlang.org/) | Apache-2.0 | 类型系统 |
+| ffmpeg | LGPL/GPL（视构建而定） | 后处理；本仓库**不含**二进制 |
+
+## 模型权重（不随本仓库分发）
+
+| 模型 | 许可证 | 关键限制 |
+|---|---|---|
+| MiniMax H3（视频） | MiniMax H3 Community License | 见模型随附条款 |
+| MiniMax H3-Image（图像） | MiniMax H3-Image Community License | **与 H3 不同**。年收入 ≤ 100 万美元且不对外提供托管服务 → 可直接使用；超出 → 需向 MiniMax 申请授权 |
+
+模型权重体积约 60 GB，**不在本仓库内**，需用户按
+`skills/jiuzhang-studio-setup/SKILL.md` 自行下载。
+
+## 不在本仓库内的内容
+
+以下内容因体积或许可证原因不分发：
+
+- 模型权重（约 60 GB）
+- ComfyUI 本体与其依赖
+- ffmpeg 二进制（约 314 MB）
+- 3D 预演引擎（第三方拆解产物，许可证不允许再分发）
+- 用户运行时数据（`data/` 下的素材、产物、配置）
+
+## 免责
+
+本项目是本地创作工具，不对生成内容的合规性负责。使用他人肖像、
+受版权保护的角色形象或商业素材时，请自行确认授权。

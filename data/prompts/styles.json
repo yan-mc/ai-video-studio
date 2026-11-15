@@ -1,0 +1,17 @@
+{
+  "ova90s": {
+    "name": "90年代OVA",
+    "en": "90s OVA animation style. Cel animation look. High saturation colors. Hard shadows (not block shadows). Film grain texture. Natural human proportions. Soft gradient blush. Thick but not jagged outlines. 4K.",
+    "forbid": "写实质感、实拍质感、3D比例、粗黑锯齿轮廓、块状阴影"
+  },
+  "helltaker-look": {
+    "name": "地狱把妹王（外观版）",
+    "en": "Helltaker game visual aesthetic. High contrast black/white/deep red color palette. Flat cartoon character design — slightly larger head, slender limbs, flat torso, simplified geometric shapes. Thick jagged black outlines. Flat cel-shaded coloring with block shadows, no gradients. Render characters as 2D cartoons, NOT realistic. NO photorealistic textures, NO realistic skin shading, NO 3D proportions, NO PBR materials.",
+    "forbid": "写实质感、写实皮肤阴影、3D比例、PBR材质、渐变、柔光、模糊、照片级渲染"
+  },
+  "toon3d-pbr": {
+    "name": "三渲二+PBR混合",
+    "en": "3D cel-shaded animation with PBR rendering. Thin dark outlines (not thick hand-drawn lines). Subsurface scattering on skin — soft, translucent, delicate. Soft studio lighting. Smooth shadow transitions, soft diffused shadows. Realistic fabric textures with wrinkles and bump. 3D physical hair strands with clear groups. Clean render, smooth surfaces.",
+    "forbid": "粗黑手绘轮廓线、纯平涂赛璐珞、硬块状阴影、写实人类皮肤质感"
+  }
+}

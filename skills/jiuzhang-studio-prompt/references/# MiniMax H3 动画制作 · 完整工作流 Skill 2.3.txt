@@ -1,0 +1,523 @@
+# MiniMax H3 动画制作 · 完整工作流 Skill v2.3
+
+> **版本**：v2.3 | **更新**：新增参考视频规范 + 首尾帧控制规范；更新快速启动模板（模板D/模板E）；更新速查卡
+> **基于**：ComfyUI MiniMax H3 节点实测 + 官方指南 + 社区最佳实践
+
+
+## 一、H3 核心特性速览
+
+| 特性 | 参数/说明 |
+| :--- | :--- |
+| **时长范围** | 4-15秒（推荐6-10秒稳定，14秒以上易崩溃） |
+| **宽高比** | 21:9、16:9、4:3、1:1、3:4、9:16 |
+| **分辨率** | 默认短边768px，可启用2K（2560×1440） |
+| **帧率** | 24 FPS 固定 |
+| **参考图上限** | ≤9张 |
+| **参考视频上限** | ≤3段（每段2-15秒，≤50MB，H.264/H.265） |
+| **音频参考上限** | ≤3段 |
+| **总参考文件** | ≤12个 |
+| **首尾帧模式** | 支持0/1/2张图（0=文生视频，1=图生视频，2=首尾帧控制） |
+
+
+## 二、提示词标准结构 v2.3（强制顺序）
+
+```text
+CRITICAL STYLE RULE: [画风描述 — 含材质声明、禁止项]
+
+CRITICAL REFERENCE RULE:
+- <Picture 1> is [角色名/用途] — [具体说明 + 强制覆盖项（如有）].
+- <Video 1> is [用途] — [动作参考/运镜参考/节奏参考].
+- <Audio 1> is [角色名] voice reference（如有）.
+- [首帧图] <Picture X> is the START frame — scene/character at the beginning.
+- [尾帧图] <Picture Y> is the END frame — scene/character at the end.
+
+subject_definitions:
+[角色名] = appearance from <Picture 1> converted to flat cartoon — [关键显式特征：发色、瞳色、配饰、身高、特殊标记].
+[角色名] = appearance from <Picture 2> converted to flat cartoon — [关键显式特征].
+
+CHARACTER DEFINITION — [角色名]:
+- Gender: FEMALE/MALE
+- Height: [具体数字] cm（如需体现身高差）
+- Key traits: [发色、瞳色、配饰等 — 与 subject_definitions 保持一致]
+- Personality: [性格、情绪基调]
+
+[重复以上结构为每个角色]
+
+non_diegetic_music: N/A 或 [时间] 描述
+
+SCENE LAYOUT:
+[全局场景描述 — 地点、空间布局、光线色调、角色站位/排列顺序]
+[如使用首尾帧：起始画面描述 → 结束画面描述]
+
+MOTION DESCRIPTION:
+[0s-Xs] [景别] [动作] [音效] (Diegetic)
+[Xs-Ys] [景别] [动作] [音效] (Diegetic)
+```
+
+### ⚠️ 结构铁律（v2.3）
+
+| 规则 | 说明 |
+| :--- | :--- |
+| **`subject_definitions` 为必填块** | 所有角色的外观在此一次性绑定参考素材，并显式写明关键特征 |
+| **`CHARACTER DEFINITION` 精简** | 仅写性别、身高、关键特征、性格；外观描述不重复 |
+| **分镜中只提人名** | 不再重复引用 `<Picture X>`；直接使用角色名 |
+| **`SCENE LAYOUT` 正式独立** | 场景描述集中在此，分镜中不再重复空间布局 |
+| **参考视频明确用途** | 在 `CRITICAL REFERENCE RULE` 中声明每个视频的具体作用 |
+| **首尾帧明确标注** | 标明哪个是首帧图、哪个是尾帧图，并描述动态演变过程 |
+
+
+## 三、画风格子库
+
+| 画风 | H3 关键词指令 | 视觉锚点 | 是否改变人物外观 | 适用场景 |
+| :--- | :--- | :--- | :--- | :--- |
+| **GoHands** | `GoHands-inspired aesthetic, high-saturation color palette, strong urban contrast, sharp highlights on hair and glass, vibrant sky gradients, modern sleek anime lines.` | 高饱和、强对比、锐利高光 | ❌ 仅渲染 | 现代都市、街头、强光影场景 |
+| **90年代OVA** | `90s OVA retro cel-animation style, thick bold outlines, hard cel-shaded shadows, grainy film texture, muted vintage color tones, limited color palette per scene.` | 粗轮廓线、硬阴影、胶片颗粒 | ❌ 仅渲染 | 日常、花园、观众席、温和氛围 |
+| **日本动画电影风** | `Studio Ghibli / Makoto Shinkai inspired cinematic anime style, soft atmospheric lighting, bokeh depth of field, warm natural sunlight, gentle pastel gradients, painterly backgrounds.` | 柔和自然光、浅景深、暖色调 | ❌ 仅渲染 | 治愈系、风景、梦幻氛围 |
+| **地狱把妹王（画风版）** | `Helltaker game visual aesthetic. High contrast black/white/deep red color palette. Flat cel-shaded coloring with heavy block shadows. Sharp angular silhouettes. Minimalist stark backgrounds. NO photorealistic textures, NO realistic skin shading, NO 3D proportions, NO PBR materials.` | 黑白红高对比、块状阴影、简约背景 | ❌ 仅渲染 | 只套用高对比光影和背景，保留原人物比例 |
+| **地狱把妹王（外观版）** | 上述画风 + `Flat cartoon character design with exaggerated proportions — slightly larger head, slender limbs, flat chest and torso, simplified geometric shapes. Thick, bold, jagged black outlines defining every character edge. Render the character as a 2D cartoon, NOT as realistic.` | 同上 + 扁平卡通人体比例（大头、细肢、几何化） | ✅ 改变外观 | 参考图是3D/写实，强制转扁平卡通 |
+
+
+## 四、参考视频使用规范（v2.3 新增）
+
+### 核心原则
+
+参考视频用于保持**动作连贯性、运镜节奏、剪辑风格**。视频本身的角色外观会被参考图片覆盖，因此可以实现“保留参考视频的拍法，替换成自己的角色”。
+
+### 输入限制
+
+| 项目 | 限制 |
+| :--- | :--- |
+| **数量** | ≤3段 |
+| **时长** | 每段2-15秒 |
+| **文件大小** | 单段≤50MB |
+| **编码格式** | H.264 或 H.265 |
+| **计费规则** | 参考视频会产生额外费用，生成时长+参考视频时长叠加计费 |
+
+### 视频用途分类
+
+在 `CRITICAL REFERENCE RULE` 中明确声明视频用途，确保模型正确理解：
+
+```text
+- <Video 1> is motion and camera movement reference ONLY — the characters and environment in the video DO NOT influence appearance. Use ONLY for action sequence and camera pans.
+- <Video 2> is editing rhythm and pacing reference ONLY — use ONLY for the timing of cuts and shot changes.
+- <Video 3> is mood and lighting reference ONLY — use ONLY for atmosphere, NOT for character design.
+```
+
+### 提示词写法示例（带视频参考）
+
+```text
+CRITICAL REFERENCE RULE:
+- <Picture 1> is Du Ziteng appearance reference.
+- <Picture 2> is Wei appearance reference.
+- <Video 1> is action and camera movement reference ONLY — Du Ziteng walking through a corridor, medium shot with slow pan. Use ONLY the motion pattern and camera movement. Replace all characters with <Picture 1> and <Picture 2>.
+- <Audio 1> is Du Ziteng voice reference.
+
+subject_definitions:
+Du Ziteng = appearance from <Picture 1> converted to flat cartoon — short (155cm).
+Wei = appearance from <Picture 2> converted to flat cartoon — dark green hair, mole near right mouth corner, tall (165cm).
+
+SCENE LAYOUT:
+Shopping mall corridor, high-contrast Helltaker palette. Same layout as <Video 1> background — but characters are replaced with Du Ziteng and Wei.
+
+MOTION DESCRIPTION:
+[0s-4s] Medium shot. Du Ziteng walks slowly down the corridor, following the exact same motion path as <Video 1>. Wei steps in from right side...
+```
+
+
+## 五、首尾帧控制规范（v2.3 新增）
+
+### 核心模式
+
+| 首帧图 | 尾帧图 | 模式 | 说明 |
+| :---: | :---: | :--- | :--- |
+| ❌ | ❌ | **文生视频** | 纯文字驱动 |
+| ✅ | ❌ | **图生视频** | 从首帧图开始，自由发展 |
+| ✅ | ✅ | **首尾帧控制** | 从首帧图开始，以尾帧图结束 |
+
+### 输入限制
+
+| 项目 | 限制 |
+| :--- | :--- |
+| **图片数量** | 0、1 或 2 张 |
+| **图片尺寸** | 宽高 256-5760 像素 |
+| **宽高比** | 5:2 到 2:5 之间 |
+| **一致性** | 首尾帧图片需保持相同宽高比 |
+
+### 提示词写法示例（首尾帧模式）
+
+```text
+CRITICAL REFERENCE RULE:
+- <Picture 1> is Du Ziteng appearance reference.
+- <Picture 2> is the START frame — Du Ziteng sitting on the bed, looking down, expression sad.
+- <Picture 3> is the END frame — Du Ziteng standing at the window, looking up, expression hopeful and smiling.
+
+subject_definitions:
+Du Ziteng = appearance from <Picture 1> converted to flat cartoon — blonde hair, amber eyes, short (155cm).
+
+SCENE LAYOUT:
+Hotel room. START frame: Du Ziteng on the left side of bed, head down, dim lighting. END frame: Du Ziteng by the window on the right side, bright backlight, silhouette visible.
+
+MOTION DESCRIPTION:
+[0s-2s] START FRAME: Du Ziteng sits on the edge of the bed, head hanging down, hands clasped in lap. Sound: Quiet, sad ambient.
+[2s-4s] She slowly lifts her head, looks towards the window, expression shifts from sadness to hope.
+[4s-6s] END FRAME: She stands up, walks to the window, looks up with a gentle smile, sunlight hitting her face. Sound: Soft, uplifting ambient.
+```
+
+### ⚠️ 首尾帧关键注意事项
+
+| 要点 | 说明 |
+| :--- | :--- |
+| **首尾帧图不要包含字幕/文字** | 会干扰生成，已在规范中强制 `NO subtitles` |
+| **首尾帧宽高比必须一致** | 确保画面平滑过渡 |
+| **分镜描述聚焦“演变”** | 重点描述从首帧到中段到尾帧的**动态变化过程** |
+| **首尾帧仅提供构图参考** | 角色外观仍由 `subject_definitions` 中的参考图锁定 |
+
+
+## 六、音频控制规范
+
+### 无BGM（标准写法）
+
+```text
+non_diegetic_music: N/A
+```
+
+### 有BGM（指定时间段）
+
+```text
+non_diegetic_music: [0s-5s] soft piano melody, melancholic mood
+```
+
+### 音效/环境音
+
+写在 `MOTION DESCRIPTION` 的 `Sound:` 字段中：
+
+```text
+Sound: distant applause echoes faintly, a drum cymbal vibrates softly. (Diegetic)
+```
+
+### 对白/台词规范
+
+| 要素 | 规范 |
+| :--- | :--- |
+| **说话人标识** | `(S1)` `(S2)` 等，按出场顺序分配 |
+| **对话标签** | `<d>` 包裹对话内容 |
+| **语言标注** | `<d>[中文]` `<d>[日语]` `<d>[English]` |
+| **位置** | 写在 `Sound:` 字段中 |
+
+
+## 七、分镜设计规则
+
+### 时长分配指南
+
+| 总时长 | 推荐段数 | 每段时长 | 适用场景 |
+| :--- | :--- | :--- | :--- |
+| **4-5秒** | 2段 | 2-2.5秒 | 单一动作、微表情、对话 |
+| **6-7秒** | 2-3段 | 2-3秒 | 标准叙事 |
+| **8-10秒** | 3-4段 | 2.5-3秒 | 完整叙事 |
+| **11-13秒** | 4段 | 2.5-3.5秒 | 复杂叙事（高风险） |
+| **14-15秒** | 5段 | 2.8-3秒 | ⚠️ 极高风险，易崩溃 |
+
+### 景别交替原则
+
+```text
+全景 → 中景 → 特写 → 中景 → 远景
+```
+
+### 每段动作密度控制
+
+| 动作复杂度 | 安全时长 | 说明 |
+| :--- | :--- | :--- |
+| 单一动作 | 2-3秒 | 稳定 |
+| 2个连续动作 | 2.5-3.5秒 | 稳定 |
+| 3个及以上连续动作 | 3.5-4秒 | ⚠️ 高风险，需分割 |
+
+
+## 八、稳定性控制
+
+### 避免的问题与对策
+
+| 问题 | 对策 |
+| :--- | :--- |
+| **人物崩坏** | `subject_definitions` 一次绑定 + 显式写明发色瞳色 + 分镜中只提人名 |
+| **手部畸形** | 特写不超过3秒，指定具体动作 |
+| **跳切后服装突变** | `subject_definitions` 锁定服装参考图 |
+| **性别漂移** | `CHARACTER DEFINITION` 中声明 `Gender: FEMALE/MALE` |
+| **面部不一致** | `subject_definitions` 锁定面部参考图 + 显式写明关键面部特征 |
+| **BGM/字幕残留** | `non_diegetic_music: N/A` + `NO subtitles, NO on-screen text` |
+| **写实质感残留** | `CRITICAL STYLE RULE` 中明确 `Render as 2D cartoon, NOT realistic` |
+| **多角色串脸** | 每个角色绑定独立图片 + `subject_definitions` + `CHARACTER DEFINITION` 双重锁定 |
+| **参考视频抢特征** | `CRITICAL REFERENCE RULE` 中声明 `video ONLY for motion/camera, NOT for appearance` |
+| **首尾帧构图错位** | 保持首尾帧图宽高比一致，分镜中明确从首帧→尾帧的动态路径 |
+
+
+## 九、风格应用决策树
+
+```text
+参考图是什么类型？
+│
+├─ 已经是2D动画/卡通图
+│  │
+│  ├─ 想要保留原人物外观 → 只用「画风版」：只改光影/色调/背景
+│  │  └─ 例：GoHands、90年代OVA、Helltaker画风版
+│  │
+│  └─ 想改成另一种卡通风格 → 用「外观版」：改变比例/轮廓
+│     └─ 例：Helltaker外观版、Q版化
+│
+└─ 是3D模型/真人照片/写实图
+   │
+   ├─ 需要强制转2D卡通 → 用「外观版」 + 3D→2D转换公式
+   │  └─ 必须写：Render as 2D cartoon, NOT realistic + 比例描述 + NO PBR
+   │
+   └─ 想保留写实人物但改背景 → 不支持，H3对写实图支持有限
+
+是否需要参考视频？
+│
+├─ 是 → 在 CRITICAL REFERENCE RULE 中声明视频用途（动作/运镜/节奏）
+│  └─ 视频里的角色外观会被图片覆盖，不会影响角色设计
+│
+└─ 否 → 跳过视频相关描述
+
+是否使用首尾帧控制？
+│
+├─ 是 → 明确标注 START frame 和 END frame 图片
+│  └─ 分镜中描述从首帧到中段到尾帧的动态演变
+│
+└─ 否 → 跳过首尾帧描述
+```
+
+
+## 十、快速启动模板
+
+### 模板A：纯画风迁移（单角色）
+
+```text
+CRITICAL STYLE RULE: [画风描述]
+
+CRITICAL REFERENCE RULE:
+- <Picture 1> is [角色名] appearance reference — [关键特征].
+- <Audio 1> is [角色名] voice reference（如有）.
+
+subject_definitions:
+[角色名] = appearance from <Picture 1> converted to flat cartoon — [发色、瞳色、配饰等].
+
+CHARACTER DEFINITION — [角色名]:
+- Gender: FEMALE/MALE
+- Key traits: [发色、瞳色、配饰]
+- Personality: [性格]
+
+non_diegetic_music: N/A
+
+SCENE LAYOUT:
+[全局场景描述]
+
+MOTION DESCRIPTION:
+[0s-Xs] [景别] [动作] [音效] (Diegetic)
+```
+
+### 模板B：强制卡通化（3D→2D）
+
+```text
+CRITICAL STYLE RULE: [目标风格] — flat cartoon character design with [具体比例描述]. Thick bold outlines defining every character edge. Flat cel-shaded coloring with heavy block shadows, no gradients. Render the character as a 2D cartoon, NOT as realistic. NO photorealistic textures, NO realistic skin shading, NO 3D proportions, NO PBR materials.
+
+CRITICAL REFERENCE RULE:
+- <Picture 1> is [角色名] appearance reference — CONVERT to flat 2D cartoon proportions.
+
+subject_definitions:
+[角色名] = appearance from <Picture 1> converted to flat cartoon — [关键特征]. DO NOT copy 3D proportions or realistic anatomy.
+
+CHARACTER DEFINITION — [角色名]:
+- Gender: FEMALE/MALE
+- Build: [具体比例描述]
+
+non_diegetic_music: N/A
+
+SCENE LAYOUT:
+[全局场景描述]
+
+MOTION DESCRIPTION:
+[0s-Xs] ...
+```
+
+### 模板C：多角色全家福
+
+```text
+CRITICAL STYLE RULE: [画风描述]
+
+CRITICAL REFERENCE RULE:
+- <Picture 1> is [角色A] appearance reference.
+- <Picture 2> is [角色B] appearance reference.
+...（每个角色独立绑定）
+
+subject_definitions:
+[角色A] = appearance from <Picture 1> converted to flat cartoon — [发色、瞳色、配饰、身高、特殊标记].
+[角色B] = appearance from <Picture 2> converted to flat cartoon — [发色、瞳色、配饰、身高、特殊标记].
+...（每个角色独立定义）
+
+CHARACTER DEFINITION — [角色A]:
+- Gender: FEMALE
+- Key traits: [发色、瞳色、配饰]
+- Personality: [性格]
+
+...（重复为每个角色）
+
+non_diegetic_music: N/A
+
+SCENE LAYOUT:
+[场景描述 + 角色排列顺序]
+
+MOTION DESCRIPTION:
+[0s-Xs] Wide shot. All characters stand in a row...
+```
+
+### 模板D：带参考视频（v2.3 新增）
+
+```text
+CRITICAL STYLE RULE: [画风描述]
+
+CRITICAL REFERENCE RULE:
+- <Picture 1> is [角色A] appearance reference.
+- <Picture 2> is [角色B] appearance reference.
+- <Video 1> is motion and camera movement reference ONLY — use ONLY the action sequence and camera pans. DO NOT copy characters, clothing, or environment from <Video 1>. All characters must match <Picture 1> and <Picture 2>.
+- <Audio 1> is [角色A] voice reference.
+
+subject_definitions:
+[角色A] = appearance from <Picture 1> converted to flat cartoon — [关键特征].
+[角色B] = appearance from <Picture 2> converted to flat cartoon — [关键特征].
+
+CHARACTER DEFINITION — [角色A]:
+- Gender: FEMALE/MALE
+- Personality: [性格]
+
+CHARACTER DEFINITION — [角色B]:
+- Gender: FEMALE/MALE
+- Personality: [性格]
+
+non_diegetic_music: N/A
+
+SCENE LAYOUT:
+[全局场景描述]
+
+MOTION DESCRIPTION:
+[0s-Xs] [景别] [动作 — 参考 <Video 1> 的动作路径，但角色替换为 <Picture 1>]
+[Xs-Ys] [景别] [动作] [音效] (Diegetic)
+```
+
+### 模板E：首尾帧控制（v2.3 新增）
+
+```text
+CRITICAL STYLE RULE: [画风描述]
+
+CRITICAL REFERENCE RULE:
+- <Picture 1> is [角色名] appearance reference.
+- <Picture 2> is the START frame — [起始画面描述].
+- <Picture 3> is the END frame — [结束画面描述].
+
+subject_definitions:
+[角色名] = appearance from <Picture 1> converted to flat cartoon — [关键特征].
+
+CHARACTER DEFINITION — [角色名]:
+- Gender: FEMALE/MALE
+- Personality: [性格]
+
+non_diegetic_music: N/A
+
+SCENE LAYOUT:
+[全局场景描述]
+START frame: [画面具体内容]
+END frame: [画面具体内容]
+
+MOTION DESCRIPTION:
+[0s-Xs] START FRAME: [起始画面]...
+[Xs-Ys] [从起始到结束的演变过程]...
+[Ys-Zs] END FRAME: [结束画面]...
+```
+
+
+## 十一、关键规则速查卡（v2.3）
+
+| 项目 | 正确写法 | 错误写法 |
+| :--- | :--- | :--- |
+| **参考素材绑定** | `subject_definitions` 中一次声明 + 显式特征 | 分镜中反复提 `<Picture X>` |
+| **分镜中的角色** | 直接写人名（如 `杜紫藤`） | 每段都写 `<Picture X>` + 外观特征 |
+| **参考视频用途** | `Video 1 is motion reference ONLY` | 未声明用途，模型可能照抄视频角色 |
+| **首帧图** | `Picture X is the START frame` | 未标注，模型不知道是首帧控制 |
+| **尾帧图** | `Picture Y is the END frame` | 未标注，模型不知道有尾帧约束 |
+| **首尾帧一致性** | 保持首尾帧图宽高比一致 | 宽高比不同导致画面跳跃 |
+| **无BGM** | `non_diegetic_music: N/A` | 混在风格描述里 |
+| **无字幕** | `NO subtitles` 在 `CRITICAL STYLE RULE` 中 | 写在 `禁止ワード` 列表中 |
+| **场景信息** | 独立 `SCENE LAYOUT` 字段 | 分散在各分镜时间段内 |
+| **对话** | `<d>[语言] 内容</d>` | 纯文本无标签 |
+| **画风+外观** | 画风在 `STYLE RULE`，外观在 `subject_definitions` | 混在一起 |
+
+
+## 十二、常用画风关键词库
+
+| 风格 | 关键词 |
+| :--- | :--- |
+| 赛璐珞 | `cel-shaded`, `flat colors`, `hard shadows`, `bold outlines` |
+| 手绘感 | `hand-drawn`, `2D animation`, `watercolor textures` |
+| 柔光 | `soft atmospheric lighting`, `bokeh depth of field` |
+| 硬光 | `dramatic lighting`, `high contrast`, `sharp shadows` |
+| 胶片感 | `film grain`, `retro color palette`, `vintage anime aesthetic` |
+| 卡通化比例 | `exaggerated proportions`, `simplified anatomy`, `flat geometric shapes` |
+
+### 常用参考标签
+
+| 类型 | 标签格式 |
+| :--- | :--- |
+| 图片参考 | `<Picture 1>` `~ <Picture 9>` |
+| 视频参考 | `<Video 1>` `~ <Video 3>` |
+| 音频参考 | `<Audio 1>` `~ <Audio 3>` |
+
+
+## 十三、实测案例
+
+### 案例1：6人全家福（纯图片参考）
+
+见 v2.2 第十二节，已验证稳定运行。
+
+### 案例2：旅馆场景 + 首尾帧控制（v2.3 新增）
+
+```text
+CRITICAL STYLE RULE: Helltaker game visual aesthetic. Flat cartoon character design with exaggerated proportions. Thick, bold, jagged black outlines. High contrast black/white/deep red color palette. Flat cel-shaded coloring with heavy block shadows. Render ALL characters as 2D cartoons, NOT as realistic. NO photorealistic textures, NO 3D proportions, NO PBR materials. NO subtitles. NO frontal nudity — Wei shown only from behind.
+
+CRITICAL REFERENCE RULE:
+- <Picture 1> is Du Ziteng appearance reference.
+- <Picture 2> is Wei appearance reference.
+- <Picture 3> is the START frame — Du Ziteng sitting on bed, head down, sad expression.
+- <Picture 4> is the END frame — Du Ziteng standing at window, face lit up with excitement, heart effect.
+
+subject_definitions:
+Du Ziteng = appearance from <Picture 1> converted to flat cartoon — short (155cm).
+Wei = appearance from <Picture 2> converted to flat cartoon — dark green hair, mole near right mouth corner, tall (165cm).
+
+CHARACTER DEFINITION — Du Ziteng:
+- Gender: FEMALE
+- Height: 155cm
+- Personality: Lovesick, expressive.
+
+CHARACTER DEFINITION — Wei:
+- Gender: FEMALE
+- Height: 165cm
+- Personality: Gentle, calm.
+
+non_diegetic_music: N/A
+
+SCENE LAYOUT:
+Hotel room — double bed on left, bathroom door on right, window on back wall.
+START frame: Du Ziteng on bed, dim light, sad posture.
+END frame: Du Ziteng by window, bright backlight, excited expression.
+
+MOTION DESCRIPTION:
+[0s-2s] START FRAME: Medium shot. Du Ziteng sits on the bed, head down, hands in lap. Sad expression. Wei is not visible yet.
+[2s-4s] Du Ziteng slowly lifts her head, looks toward the bathroom door, her expression shifts from sadness to anticipation.
+[4s-6s] END FRAME: Du Ziteng stands by the window, face fully lit with excitement, cartoon heart floating above her head. Wei is in the background (back only, visible from behind), her dark green hair confirming her identity.
+```
+
+
+> **v2.3 核心更新总结**：
+> 1. **新增参考视频使用规范** — 明确视频用途声明（动作/运镜/节奏），防止视频中的角色/服装干扰生成；标注输入限制（≤3段，每段2-15秒，≤50MB）。
+> 2. **新增首尾帧控制规范** — 明确首帧/尾帧图的标注方式、输入限制（0/1/2张，宽高比一致）、分镜中“动态演变”的描述要点。
+> 3. **更新快速启动模板** — 新增模板D（带参考视频）和模板E（首尾帧控制）。
+> 4. **更新速查卡** — 新增视频和首尾帧相关条目。
+> 5. **更新决策树** — 增加视频和首尾帧的使用判断路径。

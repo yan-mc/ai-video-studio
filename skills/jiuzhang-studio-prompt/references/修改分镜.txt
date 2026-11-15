@@ -1,0 +1,57 @@
+CRITICAL STYLE RULE:
+Helltaker game visual aesthetic. High contrast black/white/deep red color palette.
+Flat cartoon character design with exaggerated proportions — slightly larger head, slender limbs, flat chest and torso, simplified geometric shapes.
+Thick, bold, jagged black outlines defining every character edge. Flat cel-shaded coloring with heavy block shadows, no gradients.
+Render the character as a 2D cartoon, NOT as realistic.
+NO photorealistic textures, NO realistic skin shading, NO 3D proportions, NO PBR materials.
+NO subtitles, NO on-screen text. NO background music.
+Entire video takes place in one single hotel room — background remains completely consistent throughout, no scene changes. NO outfit changes.
+
+CRITICAL REFERENCE RULE:
+- <Picture 1> is Wei Oula appearance reference — includes face, hair, and clothing. All must be copied exactly.
+- <Picture 2> is Fuji Tōko appearance reference — includes face, hair, and clothing. All must be copied exactly.
+- <Audio 1> is the VOICE TIMBRE REFERENCE for (S1) — Wei Oula. Use this audio ONLY for Wei Oula's voice.
+- <Audio 2> is the VOICE TIMBRE REFERENCE for (S2) — Fuji Tōko. Use this audio ONLY for Fuji Tōko's voice.
+
+subject_definitions:
+Wei Oula = appearance from <Picture 1> converted to Helltaker flat cartoon — long dark green hair with straight bangs covering forehead, ash-grey eyes, slender build, fair skin, wearing exactly the same outfit as shown in <Picture 1>, with exaggerated cartoon proportions. This character is the speaker (S1).
+Fuji Tōko = appearance from <Picture 2> converted to Helltaker flat cartoon — purple hair with side-swept bangs, violet eyes, slightly taller than Wei, wearing exactly the same outfit as shown in <Picture 2>, with exaggerated cartoon proportions. This character is the speaker (S2).
+
+CHARACTER DEFINITION — Wei Oula (S1):
+- Gender: FEMALE
+- Height: 158 cm (exaggerated in cartoon style)
+- Key traits: dark green hair, straight bangs, ash-grey eyes, outfit identical to reference
+- Personality: Admiring, earnest, slightly bold in confession.
+- Voice quality: **LIGHT, SOFT, HIGH-PITCHED, BREATHY** — like a gentle whisper, delicate and airy, with a tender, slightly trembling quality when emotional. This is the voice of (S1). Use this vocal quality for ALL dialogue spoken by Wei Oula.
+- Audio lock: <Audio 1> provides timbre reference for this character.
+
+CHARACTER DEFINITION — Fuji Tōko (S2):
+- Gender: FEMALE
+- Height: 155 cm (exaggerated in cartoon style)
+- Key traits: purple hair, side-swept bangs, violet eyes, outfit identical to reference
+- Personality: Shy, flustered, easily embarrassed but soft-hearted.
+- Voice quality: **LOWER, WARMER, SLIGHTLY DEEPER** — more grounded and mature than Wei's voice, with a gentle, hesitant, slightly trembling quality when nervous. Not as high-pitched as Wei. This is the voice of (S2). Use this vocal quality for ALL dialogue spoken by Fuji Tōko.
+- Audio lock: <Audio 2> provides timbre reference for this character.
+
+non_diegetic_music: N/A
+
+SCENE LAYOUT:
+A hotel room in Helltaker minimalist style — stark black walls with a single deep red spotlight from above creating dramatic high-contrast shadows. A double bed with crisp white sheets against the back wall, a small nightstand on the left with a dim amber lamp (rendered as a stark graphic shape), heavy dark curtains on the right. Wei Oula sits on the edge of the bed facing Fuji Tōko, who stands in front of her. This single room is the only setting — no background changes.
+
+
+
+MOTION DESCRIPTION:
+[0s-3s] Extreme close-up on Wei Oula's face. She sits on the edge of the bed, tilting her head up to look at Fuji Tōko with a longing, amorous gaze — eyes half-lidded, lips slightly parted, a faint blush as a flat red shadow block on her cheeks.
+Sound: (S1 — Wei Oula, LIGHT AND BREATHY VOICE) — <d>[Japanese] ミヤコさん、私の中に入れてください！</d>
+
+[3s-5.5s] Medium shot showing both characters. Fuji Tōko's eyes widen in shock, her cheeks flushing bright red (flat red shadow blocks). She stammers, shocked and shy.
+Sound: (S2 — Fuji Tōko, LOWER AND WARMER VOICE) — <d>[Japanese] 本当にいいですの？</d>
+
+[5.5s-8s] Extreme close-up on Wei Oula. She looks up with an admiring, earnest expression, her voice warm and tender.
+Sound: (S1 — Wei Oula, SOFT AND TENDER VOICE, slightly trembling) — <d>[Japanese] 私、ずっとミヤコさんのこと憧れてたから…だから、私の初めて、受け取ってほしいの。</d>
+
+[8s-11s] Extreme close-up on Fuji Tōko. She becomes even more flustered, looking down, unable to meet Wei's eyes, her voice trembling and stammering.
+Sound: (S2 — Fuji Tōko, HESITANT AND SHAKY VOICE, nervous) — <d>[Japanese] でも……私たち、カップルすらじゃないし、こんなに親しくなるのは、やっぱりちょっと……</d>
+
+[11s-13s] Medium shot, both characters in frame. They look at each other in silence — a tense, intimate pause. Only the soft sound of breathing and the faint hum of the lamp.
+Sound: soft breathing, gentle ambient silence (Diegetic).
