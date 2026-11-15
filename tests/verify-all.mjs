@@ -1737,6 +1737,38 @@ const comfy = await import('../host/services/comfy-client.js');
     fs.rmSync(comicTmp, { recursive: true, force: true });
   }
 
+  /* ==================================================================
+   * R40：帧数单一真源 —— h3Length 与 h3Frames 必须完全一致
+   *
+   * 两处各实现过一遍网格算法，漂移后果：脚本拆段给出 4.3 秒时算出
+   * **107 帧**（在网格上但在训练区间 124–362 之外）→ 出"能动但很怪"的片子。
+   * 现在 h3Frames 直接委托 h3Length，这条断言防止再分叉。
+   * ================================================================== */
+  {
+    const { h3Length } = await import('../host/store/models.js');
+    const { h3Frames } = await import('../host/services/h3-prompt.js');
+
+    let worst = 0;
+    for (let d = 1; d <= 30; d += 0.5) {
+      const a = h3Length(d);
+      const b = h3Frames(d);
+      if (a !== b) worst = d;
+    }
+    add('B-回归', 'R40 两个帧数函数在 1–30s 全区间一致', worst === 0,
+      worst ? `首个不一致时长 ${worst}s` : '');
+
+    // 必须夹在训练区间 124–362
+    const cases = [1, 3, 4, 4.3, 5, 8, 15, 20, 60];
+    const bad = cases.filter((d) => {
+      const n = h3Length(d);
+      return n < 124 || n > 362 || (n - 5) % 17 !== 0;
+    });
+    add('B-回归', 'R40 帧数夹在 124–362 且在 17k+5 网格', bad.length === 0, bad.join(','));
+
+    add('B-回归', 'R40 4.3 秒抬到 124 帧（不是 107）', h3Length(4.3) === 124, String(h3Length(4.3)));
+    add('B-回归', 'R40 60 秒截到 362 帧', h3Length(60) === 362, String(h3Length(60)));
+  }
+
 
   // ---- R23 参考视频+音频合计时长 ≤14.8s ----
   {

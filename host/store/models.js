@@ -183,11 +183,33 @@ export function resolutionFor(profileName, ratio = '16:9') {
   return { width: w, height: h, mp: baseKey };
 }
 
-/** H3 length 必须在 17k+5 网格上（124 ≈ 5 秒 @24fps） */
+/**
+ * H3 length 必须在 `17k+5` 网格上。
+ *
+ * 网格：5, 22, 39, …, 107, **124**, 141, …, 362
+ *
+ * ⚠️ 必须夹到 **[124, 362]**，不能只夹下限 5。
+ *
+ *    官方训练区间是 124–362 帧（≈5.17–15.08 秒）。节点 schema 允许
+ *    5–3600 step 17，但**训不出来的长度会退化成噪声**。
+ *    实测：脚本拆段给出 4.3 秒的场景，这里算成 **107 帧**（≈4.46 秒）——
+ *    落在网格上、但在训练区间之外。用户拿到的是"能动但很怪"的片子。
+ *
+ *    以前本函数只 `Math.max(5, …)`，与 `h3-prompt.js` 的 `h3Frames()`
+ *    （那是**对的**，夹到 124–362）不一致 —— 两条链路给出不同帧数。
+ *    现在两边都夹到 124–362。
+ *
+ * @param {number} durationSec 期望时长（秒）
+ * @param {number} [fps=24]
+ * @returns {number} 帧数（在 17k+5 网格上，且 124 ≤ n ≤ 362）
+ */
 export function h3Length(durationSec, fps = 24) {
+  const MIN_FRAMES = 124;
+  const MAX_FRAMES = 362;
   const raw = Math.max(5, Math.round((Number(durationSec) || 5) * fps));
   const k = Math.max(0, Math.ceil((raw - 5) / 17));
-  return Math.min(3600, 5 + k * 17);
+  const frames = 5 + k * 17;
+  return Math.min(MAX_FRAMES, Math.max(MIN_FRAMES, frames));
 }
 
 /** 19 档 H3 模型常量（1.0.59 的 COMFY_H3_* 槽位映射，本地常量前缀 JZ_*） */

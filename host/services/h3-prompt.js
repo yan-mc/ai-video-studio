@@ -52,7 +52,7 @@
  *     所有时间戳 < frames/24。
  */
 
-import { normalizeMode } from '../store/models.js';
+import { normalizeMode, h3Length } from '../store/models.js';
 
 /* ============================================================ 官方枚举 */
 
@@ -893,14 +893,15 @@ function clampDuration(v, warnings) {
 /**
  * 秒 → H3 帧数（`17k+5` 网格）。
  *
- * 与 store/models.js 的 h3Length 保持一致；这里再实现一次是为了
- * h3-prompt 能独立计算"有效时长"给对齐指令用（不引入循环依赖）。
+ * ⚠️ 实现委托给 `store/models.js` 的 `h3Length()` —— **单一真源**。
+ *
+ *    这里原本自己实现了一遍 `Math.ceil((raw-5)/17)`，且只夹了下限 5。
+ *    与 `h3Length` 的逻辑漂移过：脚本拆段给出 4.3 秒时算出 107 帧，
+ *    而 107 不在训练区间 124–362 内（会出"能动但很怪"的片子）。
+ *    现在两边共用同一份实现，任何改动只需要改一处。
  */
 export function h3Frames(durationSec, fps = H3_LIMITS.fps) {
-  const raw = Math.round((Number(durationSec) || 5) * fps);
-  const k = Math.max(0, Math.ceil((raw - 5) / 17));
-  const frames = 5 + k * 17;
-  return Math.min(H3_LIMITS.frames.max, Math.max(H3_LIMITS.frames.min, frames));
+  return h3Length(durationSec, fps);
 }
 
 /** 秒 → `MM:SS.mmm`（官方时间戳格式，毫秒三位） */
