@@ -458,7 +458,7 @@ function compileBase(ctx) {
       if (sc.action) bits.push(sc.action);
       let sentence = `${at} ${bits.filter(Boolean).join(', ')}`.trim();
       if (sc.camera) sentence += `. The camera ${cameraPhrase(sc.camera)}`;
-      desc.push(`${sentence.replace(/\.\./g, '.')}.`.replace(/\.\./g, '.'));
+      desc.push(endSentence(sentence));
 
       const speaker = resolveSpeaker(sc, subjects);
       if (sc.dialogue?.text) {
@@ -734,7 +734,7 @@ function compileRef2VA(ctx) {
       if (sc.action) bits.push(sc.action);
       let sentence = `${at} ${bits.filter(Boolean).join(', ')}`.trim();
       if (sc.camera) sentence += `. The camera ${cameraPhrase(sc.camera)}`;
-      body.push(`${sentence.replace(/\.\.+/g, '.')}.`);
+      body.push(endSentence(sentence));
 
       const speaker = resolveSpeaker(sc, subjects);
       if (sc.dialogue?.text) {
@@ -791,6 +791,21 @@ function summaryTasks(refs, input) {
   if (refs.videos.some((_, i) => refs.videoUses[i] === 'continuation')) tasks.push('video continuation');
   if (refs.audios.length) tasks.push('audio reference');
   return [...new Set(tasks)].join(' + ');
+}
+
+/**
+ * 让一句话**恰好**以一个英文句号结尾。
+ *
+ * ⚠️ 为什么需要它：中文输入的描述自带句号「。」，而官方格式要求半角 `.`。
+ *    旧实现直接 `sentence + '.'`，于是出现 `…吹向一侧。.` ——
+ *    中文句号后面又跟一个英文句号。模型看到的是两个句末符号，
+ *    分段边界变模糊（实测这一步在三条镜头上都复现）。
+ *
+ * 规则：剥掉尾部任意标点（中英文句号/逗号/分号/空白），再补一个 `.`。
+ */
+function endSentence(s) {
+  const t = String(s ?? '').trim().replace(/[。．.，,；;、\s]+$/u, '');
+  return t ? `${t}.` : '';
 }
 
 /* ============================================================ 输出后检查 */
@@ -1135,7 +1150,19 @@ function normalizeRefs(refs) {
 
 function deriveSummary(subjects, scenes) {
   const names = subjects.map((s) => s.name).filter(Boolean).join(' and ') || 'The subject';
-  const first = scenes?.[0]?.action ? String(scenes[0].action).slice(0, 100) : '';
+  /**
+   * ⚠️ 不能再截断成 100 字符。
+   *
+   * 历史缺陷：`scenes[0].action.slice(0, 100)`。而 `action` 通常就是整段
+   * `description`（150–300 字符）。截断的后果不是"变短"，而是**句子断在半截**：
+   * 实测产物是
+   *     summary: … walk side by side along the shoreline from left to right, holding
+   * `holding hands` 被切成 `holding`，模型拿到一个未完成的短语。
+   *
+   * 现在：不切片。`summary` 官方没有长度上限（提示词总长才有 7000 字符限制，
+   * 由 lintCompiledPrompt 统一检查）。
+   */
+  const first = scenes?.[0]?.action ? String(scenes[0].action).trim() : '';
   return `${names} in a short scene. ${first}`.trim();
 }
 

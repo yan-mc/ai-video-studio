@@ -1036,14 +1036,41 @@ export async function handleApi(req, res) {
       const pid = safeId(body.projectId || '');
       const shot = body.shot ?? listShots(pid).find((s) => s.id === body.shotId);
       if (!shot) return sendJson(res, 404, { error: 'SHOT_NOT_FOUND' });
-      const pkg = toShotInputPackage(shot, {
-        styleId: body.styleId ?? shot.styleId ?? null,
-        subjects: body.subjects ?? deriveSubjectsFromShot(shot),
+
+      /**
+       * ⚠️ 必须走**与真实生成相同**的入参准备。
+       *
+       * 历史缺陷：这里用 `deriveSubjectsFromShot(shot)`，而 `/generate` 走的是
+       * `withVaultCards()` → `resolvePictureIndices()`（角色卡优先）。
+       * 后果：用户在预览里看到的提示词**没有角色卡**（`<Subject N>` 缺失、
+       * 只有从 description 猜出来的空壳），但真正送进模型的却有。
+       * 预览与实物不一致，是这个项目最难查的一类 bug。
+       *
+       * 现在：有 pid 就走 withVaultCards，与生成路径完全同一份逻辑。
+       */
+      let prepared = shot;
+      if (pid) {
+        prepared = await withVaultCards(shot, pid, ctx, cfg);
+      }
+      const cardSubjects = Array.isArray(prepared.characterCards)
+        ? resolvePictureIndices(prepared, cfg)
+        : [];
+      const subjects = body.subjects
+        ?? (cardSubjects.length ? cardSubjects : deriveSubjectsFromShot(prepared));
+
+      const pkg = toShotInputPackage(prepared, {
+        styleId: body.styleId ?? prepared.styleId ?? null,
+        subjects,
         scenes: body.scenes,
         seed: body.seed,
       });
       const r = compileH3Prompt(pkg);
-      return sendJson(res, 200, { ...r, package: pkg });
+      return sendJson(res, 200, {
+        ...r,
+        package: pkg,
+        subjectCount: subjects.length,
+        fromVault: cardSubjects.length > 0,
+      });
     }
     if (req.method === 'POST' && route === '/prompt/preview') {
       // 只编译不落盘，供前端实时预览（与 /compile 同，但接受 shot 直传）
