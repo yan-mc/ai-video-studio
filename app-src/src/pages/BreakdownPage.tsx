@@ -13,6 +13,7 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '../api/client';
 import { outputUrl } from '../api/url';
+import type { JobOutput } from '../api/url';
 import {
   Alert, Badge, Button, Field, Icon, Input, Loading, Page, Panel, Select, Tabs, Textarea, useToast,
 } from '../ui';
@@ -44,7 +45,9 @@ export function BreakdownPage() {
 
   const [preview, setPreview] = useState('');
   const [jobId, setJobId] = useState('');
-  const [result, setResult] = useState<{ path?: string; rel?: string } | null>(null);
+  const [result, setResult] = useState<JobOutput | null>(null);
+  const [cardName, setCardName] = useState('');
+  const [savingCard, setSavingCard] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -110,12 +113,24 @@ export function BreakdownPage() {
     const timer = window.setInterval(() => {
       void (async () => {
         try {
-          const jobs = await api.listJobs() as { id: string; status: string; outputs?: { path?: string }[] }[];
+          const jobs = await api.listJobs() as { id: string; status: string; outputs?: JobOutput[] }[];
           const cur = jobs.find((j) => j.id === jobId);
           if (cur && ['completed', 'failed'].includes(cur.status)) {
-            if (cur.status === 'completed' && cur.outputs?.[0]?.path) {
-              setResult(cur.outputs[0]);
-              toast.ok('拆解图完成');
+            /**
+             * ⚠️ 成功判据必须认 `rel`，不能只认 `path`。
+             *
+             * 历史缺陷：守卫写的是 `cur.outputs?.[0]?.path`，而
+             * `outputUrl()` 优先用 `rel`（comfy-client 的 toRel 在跨盘/相对
+             * 路径失败时会给空 rel，但也存在只有 rel 有值的产物）。
+             * `path` 为空就判"生成失败"，哪怕图已经成功产出、rel 就在对象里。
+             * 现在按 `rel || path` 判，与 url.ts 的优先级保持一致。
+             */
+            const out = cur.outputs?.[0] as (JobOutput & { assetId?: string }) | undefined;
+            if (cur.status === 'completed' && (out?.rel || out?.path)) {
+              setResult(out ?? null);
+              toast.ok(out?.assetId
+                ? '拆解图完成，已归档到素材库'
+                : '拆解图完成');
             } else {
               toast.error('生成失败');
             }
@@ -127,6 +142,38 @@ export function BreakdownPage() {
     }, 5000);
     return () => window.clearInterval(timer);
   }, [jobId, toast]);
+
+  /**
+   * 把刚出的拆解图直接存成角色卡。
+   *
+   * 设计文档承诺过 `POST /vault/cards/:id/from-sheet`，但那条路由从没实现，
+   * 于是「立绘 → 拆解 → 设定卡 → 角色卡仓库」这条主线在第三步断掉：
+   * 用户只能去仓库页手动新建，再从几百张自动归档的素材里靠缩略图找。
+   *
+   * 这里用已有的 `vaultUpsert` 直接建卡（后端无需新路由）：
+   * sheet 槽放这张拆解图，refPolicy 用 sheet-first。
+   */
+  async function handleSaveAsCard() {
+    const name = cardName.trim();
+    if (!name) { toast.error('请先填角色名'); return; }
+    const rel = result?.rel ?? result?.path ?? '';
+    if (!rel) { toast.error('还没有可用的拆解图'); return; }
+    setSavingCard(true);
+    try {
+      await api.vaultUpsert({
+        name,
+        description: `由立绘拆解生成${character ? `（${character}）` : ''}`,
+        images: { sheet: [rel] },
+        refPolicy: { mode: 'sheet-first', maxImages: 1 },
+      });
+      toast.ok(`已建角色卡「${name}」，可在角色卡仓库查看`);
+      setCardName('');
+    } catch (e) {
+      toast.error(String((e as Error)?.message ?? e));
+    } finally {
+      setSavingCard(false);
+    }
+  }
 
   if (loading) return <Page title="立绘拆解"><Loading text="载入中" /></Page>;
 
@@ -232,7 +279,16 @@ export function BreakdownPage() {
           <div className="jz-col" style={{ gap: 'var(--jz-sp-4)' }}>
             <Panel title="拆解档位">
               <div className="jz-col" style={{ gap: 8 }}>
-                {levels.map((l) => (
+                {/*
+                  ⚠️ 过滤掉 `full` 档。
+                  「完整设定卡」自 1.0.2 起与「角色设定卡」**逐字相同**
+                  （后端 breakdown.js 共用同一分支，表情差分区已移除），
+                  但 UI 仍把它当独立选项卖 —— 用户选了以为得到了更多，
+                  实际「预览提示词」两次看到的文本和字数完全一样。
+                  档位定义本身保留在后端（有回归断言盯着 desc 文案），
+                  这里只是不把它当作可选项呈现。
+                */}
+                {levels.filter((l) => l.id !== 'full').map((l) => (
                   <button
                     key={l.id}
                     type="button"
@@ -282,7 +338,31 @@ export function BreakdownPage() {
                 <div className="jz-xs jz-mono">{jobId.slice(0, 20)}…</div>
               </div>
             ) : previewUrl ? (
-              <img src={previewUrl} alt="拆解图" style={{ maxWidth: '100%', borderRadius: 6 }} />
+              <div className="jz-col" style={{ gap: 12 }}>
+                <img src={previewUrl} alt="拆解图" style={{ maxWidth: '100%', borderRadius: 6 }} />
+                <div className="jz-row jz-wrap" style={{ gap: 8, alignItems: 'flex-end' }}>
+                  <div style={{ minWidth: 200, flex: '0 0 auto' }}>
+                    <Field label="角色名" hint="填了就能一键建角色卡，省得去仓库页手动挂图">
+                      <Input
+                        value={cardName}
+                        onChange={(e) => setCardName(e.target.value)}
+                        placeholder={character || '如：三角初华'}
+                      />
+                    </Field>
+                  </div>
+                  <Button
+                    variant="primary"
+                    icon={<Icon name="check" size={15} />}
+                    onClick={() => void handleSaveAsCard()}
+                    disabled={savingCard || !cardName.trim()}
+                  >
+                    {savingCard ? '建卡中…' : '存为角色卡'}
+                  </Button>
+                  <span className="jz-xs jz-muted">
+                    拆解图已归档进素材库，建卡后即可在渲染页作为一致性锚点引用。
+                  </span>
+                </div>
+              </div>
             ) : (
               <div className="jz-muted">还没有结果。回到「③ 档位与尺寸」点「生成拆解图」。</div>
             )}

@@ -80,14 +80,83 @@ export function createExtrasService({ cfg, getCfg = loadConfig }) {
     fs.mkdirSync(d, { recursive: true });
     return path.join(d, name);
   }
-  function readJson(f, fallback) {
+  /**
+   * 读 JSON —— **损坏时抛错，不静默清空**。
+   *
+   * ⚠️ 历史缺陷：原来是 `catch { return fallback; }`。一旦文件损坏
+   *    （断电 / 杀进程 / 磁盘满 / 手工编辑出错），readJson 返回 `[]`，
+   *    紧接着 `upsertTemplate` 把**只含新条目的数组**写回去 ——
+   *    用户的自定义模板/服化道**全部消失，且没有任何提示**。
+   *
+   *    这与 `store/json-store.js` 的处理正好相反：那个模块专门修过
+   *    同样的问题（读出错就抛 CORRUPT_JSON 并保留 .corrupt 副本）。
+   *    这里对齐它。
+   *
+   * 文件不存在仍然返回 fallback（这是正常情况，不是损坏）。
+   */
+  function readJson(f, fallback, opts = {}) {
     if (!fs.existsSync(f)) return fallback;
-    try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return fallback; }
+    let text;
+    try { text = fs.readFileSync(f, 'utf8'); } catch { return fallback; }
+    if (!text.trim()) return fallback;
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      // 保留坏文件供人工修复
+      try { fs.copyFileSync(f, `${f}.corrupt`); } catch { /* ignore */ }
+      /**
+       * 写路径必须抛（否则覆盖掉用户数据）；
+       * 读路径（列表展示）**降级为 fallback**，否则一个坏文件会让整个工具箱
+       * 面板打不开 —— 但要把原因记进 warnings 让用户在界面上看到，
+       * 不能像以前那样"空列表 + 什么也不说"。
+       */
+      const msg = `CORRUPT_JSON: ${path.basename(f)} 解析失败（已备份为 .corrupt）`;
+      if (opts.soft) {
+        corruptWarnings.push(msg);
+        return fallback;
+      }
+      const err = new Error(`${msg}：${e.message}`);
+      err.code = 'CORRUPT_JSON';
+      throw err;
+    }
   }
+
+  /**
+   * 读坏过的文件清单 —— 供 `warnings()` 暴露给前端。
+   *
+   * 为什么需要：静默 fallback 是最糟的失败方式（用户以为数据没了，
+   * 或者以为本来就没数据）。至少让面板上出现一行红字。
+   */
+  const corruptWarnings = [];
+
+  /**
+   * 原子写 JSON。
+   *
+   * Windows 上 rename 覆盖已存在文件可能因杀软扫描/句柄占用抛
+   * EPERM/EBUSY/EACCES —— `json-store.js` 有专门的重试，这里补齐，
+   * 否则用户在 Windows 上会遇到随机写入失败。
+   */
   function writeJson(f, v) {
     const tmp = `${f}.${process.pid}.${Date.now()}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(v, null, 2), 'utf8');
-    fs.renameSync(tmp, f);
+    const RETRY = [0, 10, 30, 80, 150];
+    for (let i = 0; i < RETRY.length; i += 1) {
+      if (RETRY[i]) {
+        const until = Date.now() + RETRY[i];
+        while (Date.now() < until) { /* 短自旋：这个模块的写入频率极低 */ }
+      }
+      try {
+        fs.renameSync(tmp, f);
+        return v;
+      } catch (e) {
+        const code = String(e?.code || '');
+        const retriable = code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
+        if (!retriable || i === RETRY.length - 1) {
+          try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
+          throw e;
+        }
+      }
+    }
     return v;
   }
 
@@ -95,7 +164,7 @@ export function createExtrasService({ cfg, getCfg = loadConfig }) {
   const tplFile = () => file('prompt-templates.json');
 
   function listTemplates() {
-    const custom = readJson(tplFile(), []);
+    const custom = readJson(tplFile(), [], { soft: true });
     return [...SYSTEM_PROMPT_TEMPLATES, ...custom];
   }
   function upsertTemplate(t) {
@@ -122,10 +191,53 @@ export function createExtrasService({ cfg, getCfg = loadConfig }) {
   /* ---------------- 服化道 ---------------- */
   const wardFile = () => file('wardrobe.json');
 
+  /* ---------------- 服化道（wardrobe） ---------------- */
+  /**
+   * 服化道 = 服装 / 饰品 / 武器 / 道具的**图 + 文**素材库。
+   *
+   * ⚠️ 历史状态：这块以前是**纯陈列柜** —— 只有 CRUD，全仓没有任何
+   *    提示词 / 参考图 / 生成链路读取它。界面上摆着「服化道」分区，
+   *    用户合理地以为"我在这里录的衣服，做视频时会用上"，实际完全不影响出图。
+   *    `imageRel` 字段能存图但 UI 没有选图入口，所以它恒为 null。
+   *
+   * 现在它真的参与生成：
+   *    · UI 可以给每条挂一张参考图（imageRel）
+   *    · 渲染页的「服化道」多选把选中条目的
+   *        imageRel → 参考图（走 manualImages 通道）
+   *        name + desc → 一句正向描述（拼进画面概要）
+   *    后端不需要新路由 —— `buildRenderPlan.manualImages` 与
+   *    `shot.refs.images` 本来就能吃任意 rel。
+   */
+
+  /**
+   * 把选中的服化道条目转成"参考图 + 提示词片段"。
+   *
+   * 这是**唯一**的转换点：前端只传 id 列表，转换在服务端做，
+   * 保证渲染页 / Agent 工具 / 将来的入口拿到同一份结果。
+   *
+   * @param {string[]} ids
+   * @returns {{ images: string[], notes: string[], items: object[] }}
+   */
+  function wardrobeToGeneration(ids) {
+    const wanted = new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean));
+    if (!wanted.size) return { images: [], notes: [], items: [] };
+    const all = readJson(wardFile(), [], { soft: true });
+    const picked = all.filter((w) => wanted.has(String(w.id)));
+    const images = [];
+    const notes = [];
+    for (const w of picked) {
+      if (w.imageRel) images.push(String(w.imageRel));
+      const bits = [w.name, w.desc].filter(Boolean).join('：');
+      if (bits) notes.push(bits);
+    }
+    return { images, notes, items: picked };
+  }
+
   function listWardrobe(kind) {
-    const all = readJson(wardFile(), []);
+    const all = readJson(wardFile(), [], { soft: true });
     return kind ? all.filter((w) => w.kind === kind) : all;
   }
+
   function upsertWardrobe(item) {
     const all = readJson(wardFile(), []);
     const at = all.findIndex((x) => x.id === item.id);
@@ -277,22 +389,36 @@ export function createExtrasService({ cfg, getCfg = loadConfig }) {
     const PROTECTED_DIRS = new Set(['3d', 'models']);
     const orphans = [];
     let referencedCount = 0;
+    let protectedCount = 0;
+    let unreadable = 0;
     for (const full of files) {
       const relFromAssets = path.relative(assetsDir, full);
       const top = relFromAssets.split(path.sep)[0];
-      if (PROTECTED_DIRS.has(top)) { referencedCount += 1; continue; }
+      /**
+       * `assets/3d/**` 与 `assets/models/**` 是 Blender 直接扫盘的目录，
+       * 里面的文件**不一定**登记在 assets-index 里。为了不误删，它们一律
+       * 跳过清理 —— 但**不能算进"被引用"**：以前把两者混在同一个计数器里，
+       * 于是面板上「N 个被引用」里可能绝大多数根本没被任何地方引用，
+       * 用户无法理解为什么这些文件永远不会被清理。
+       */
+      if (PROTECTED_DIRS.has(top)) { protectedCount += 1; continue; }
       const norm = relFromAssets.replace(/\\/g, '/');
       if (referenced.has(norm) || referenced.has(relFromAssets)) {
         referencedCount += 1;
         continue;
       }
       let st;
-      try { st = fs.statSync(full); } catch { continue; }
+      try { st = fs.statSync(full); } catch { unreadable += 1; continue; }
       orphans.push({ name: norm, path: full, bytes: st.size, mtime: st.mtimeMs });
     }
     return {
       total: files.length,
       referenced: referencedCount,
+      // 受保护目录下的文件数（不参与清理，也不算"被引用"）
+      protected: protectedCount,
+      // stat 失败而既未计入 referenced 也未计入 orphan 的条目数，
+      // 用来让「referenced + protected + orphan + unreadable = total」对得上
+      unreadable,
       orphanCount: orphans.length,
       orphanBytes: orphans.reduce((s, o) => s + o.bytes, 0),
       orphans,
@@ -315,7 +441,7 @@ export function createExtrasService({ cfg, getCfg = loadConfig }) {
   const motionFile = () => file('motion-shots.json');
 
   function listMotionShots(projectId) {
-    const all = readJson(motionFile(), []);
+    const all = readJson(motionFile(), [], { soft: true });
     return projectId ? all.filter((m) => m.projectId === projectId) : all;
   }
   function upsertMotionShot(item) {
@@ -352,7 +478,7 @@ export function createExtrasService({ cfg, getCfg = loadConfig }) {
     return { ok: true };
   }
   function listLogs(limit = 100) {
-    return readJson(file('logs.json'), []).slice(0, Math.max(1, Math.min(LOG_MAX, limit)));
+    return readJson(file('logs.json'), [], { soft: true }).slice(0, Math.max(1, Math.min(LOG_MAX, limit)));
   }
 
   /* ---------------- 批量进度 ---------------- */
@@ -375,6 +501,8 @@ export function createExtrasService({ cfg, getCfg = loadConfig }) {
     listTemplates, upsertTemplate, deleteTemplate,
     // 服化道
     listWardrobe, upsertWardrobe, deleteWardrobe,
+    /** 服化道 → 参考图 + 提示词片段（唯一转换点） */
+    wardrobeToGeneration,
     // 导入
     scanImportDir, previewImportFile,
     // 清理
@@ -385,6 +513,13 @@ export function createExtrasService({ cfg, getCfg = loadConfig }) {
     appendLog, listLogs,
     // 批量
     batchProgress,
+    /**
+     * 数据文件损坏报告。
+     *
+     * 读路径遇到坏 JSON 会降级为空列表（否则整个工具箱面板打不开），
+     * 但必须把这个事实暴露到界面上 —— 静默空列表是最糟的失败方式。
+     */
+    warnings: () => [...new Set(corruptWarnings)],
   };
 }
 

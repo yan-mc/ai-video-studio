@@ -1494,6 +1494,132 @@ const comfy = await import('../host/services/comfy-client.js');
     resetVaultStore();
     fs.rmSync(tmpVault, { recursive: true, force: true });
   }
+
+  /* ==================================================================
+   * R34：渲染计划的两类"静默错"（无测试覆盖，最难排查）
+   *
+   * 一类是**预算算错**（徽标说 8/9，实际提交 9 张，再加一张直接超限）；
+   * 一类是**编号漂移**（无图卡被重新编号，`<Picture N>` 指向别人的图 →
+   * 角色串脸）。两者都不会报错，只会让用户相信一个错误的结果。
+   * ================================================================== */
+  {
+    const { buildRenderPlan, subjectsForPrompt } = await import('../host/services/render-plan.js');
+
+    // ---- 首尾帧必须计入 9 图预算 ----
+    const withFrames = buildRenderPlan({
+      manualImages: Array.from({ length: 8 }, (_, i) => `assets/m${i}.png`),
+      previz: { firstRel: 'previz/f.png' },
+    });
+    add('B-回归', 'R34 首尾帧计入参考图预算',
+      withFrames.stats.total === 9, `total=${withFrames.stats.total}`);
+    add('B-回归', 'R34 首尾帧出现在 images 里',
+      withFrames.images.some((x) => x.source === 'previz-first'));
+
+    // 9 张卡图 + 2 张首尾帧 → 必须裁到 9（且优先砍首尾帧而非卡图）
+    const overFrames = buildRenderPlan({
+      cards: [{
+        id: 'c1', name: '甲',
+        resolvedImages: Array.from({ length: 9 }, (_, i) => ({ slot: 'sheet', rel: `assets/s${i}.png` })),
+      }],
+      previz: { firstRel: 'previz/f.png', lastRel: 'previz/l.png' },
+    });
+    add('B-回归', 'R34 超限时裁到 9 张', overFrames.stats.total === 9, `total=${overFrames.stats.total}`);
+    add('B-回归', 'R34 超限时给出裁剪警告', overFrames.warnings.length > 0);
+
+    // ---- 无图卡必须保持 pictureIndex=null ----
+    const planMixed = buildRenderPlan({
+      cards: [
+        {
+          id: 'c1', name: '有图角色',
+          resolvedImages: [{ slot: 'sheet', rel: 'assets/yes.png' }],
+        },
+        { id: 'c2', name: '无图角色', resolvedImages: [] },
+      ],
+    });
+    const subs = subjectsForPrompt(planMixed);
+    const noImg = subs.find((s) => s.name === '无图角色');
+    add('B-回归', 'R34 无图卡在 plan 里 pictureIndex 为 null',
+      planMixed.subjects.find((s) => s.name === '无图角色')?.pictureIndex === null);
+    add('B-回归', 'R34 subjectsForPrompt 保留 null（不重新编号）',
+      noImg?.pictureIndex === null, JSON.stringify(noImg));
+    add('B-回归', 'R34 subjectsForPrompt 标记 hasImage=false', noImg?.hasImage === false);
+
+    // 下游编译器不能把无图角色写成 <Picture N>
+    const { compileH3Prompt } = await import('../host/services/h3-prompt.js');
+    const compiled = compileH3Prompt({
+      mode: 'ref2va',
+      subjects: subs,
+      references: { images: ['assets/yes.png'] },
+      description: '两人对话',
+      overall_soundscape: 'Room tone',
+    });
+    add('B-回归', 'R34 无图角色不写 <Picture null>', !compiled.prompt.includes('<Picture null>'));
+    add('B-回归', 'R34 无图角色标 text_only',
+      compiled.prompt.includes('text_only') || compiled.prompt.includes('no reference picture'));
+  }
+
+  /* ==================================================================
+   * R35：服化道真的参与生成（此前是纯陈列柜）
+   *
+   * 历史状态：wardrobe 只有 CRUD，全仓没有任何提示词 / 参考图 / 生成
+   * 链路读取它 —— 界面上摆着「服化道」分区，用户以为录了衣服会用上，
+   * 实际完全不影响出图。`imageRel` 字段能存图但 UI 没有入口，恒为 null。
+   *
+   * 这一组锁住"它现在真的被消费"的事实。
+   * ================================================================== */
+  {
+    const extrasTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'jz-r35-'));
+    const { createExtrasService } = await import('../host/services/extras.js');
+    const svc = createExtrasService({
+      cfg: { dataDir: extrasTmp },
+      getCfg: () => ({ dataDir: extrasTmp }),
+    });
+
+    // 有图 + 有文字
+    const withImg = svc.upsertWardrobe({
+      kind: 'costume', name: '蓝色缎面腰封', desc: '维多利亚风格，缎面材质',
+      imageRel: 'assets/belt.png',
+    });
+    // 只有文字
+    const textOnly = svc.upsertWardrobe({
+      kind: 'accessory', name: '细颈链', desc: '银质，细链',
+    });
+
+    add('B-回归', 'R35 服化道条目带 imageRel',
+      withImg.imageRel === 'assets/belt.png', String(withImg.imageRel));
+    add('B-回归', 'R35 无图条目 imageRel 为 null',
+      textOnly.imageRel === null || textOnly.imageRel === undefined);
+
+    const resolved = svc.wardrobeToGeneration([withImg.id, textOnly.id]);
+    add('B-回归', 'R35 服化道解析出参考图',
+      resolved.images.length === 1 && resolved.images[0] === 'assets/belt.png',
+      JSON.stringify(resolved.images));
+    add('B-回归', 'R35 服化道解析出文字描述',
+      resolved.notes.length === 2 && resolved.notes.some((n) => n.includes('腰封')),
+      JSON.stringify(resolved.notes));
+    add('B-回归', 'R35 空选择返回空结果',
+      svc.wardrobeToGeneration([]).images.length === 0
+      && svc.wardrobeToGeneration(null).notes.length === 0);
+    add('B-回归', 'R35 未知 id 被忽略',
+      svc.wardrobeToGeneration(['wd_nope']).items.length === 0);
+
+    // ---- 数据损坏不静默清空 ----
+    const wf = path.join(extrasTmp, 'extras', 'wardrobe.json');
+    fs.writeFileSync(wf, '{{{ broken', 'utf8');
+    add('B-回归', 'R35 读路径降级为空列表（不炸面板）',
+      Array.isArray(svc.listWardrobe()) && svc.listWardrobe().length === 0);
+    add('B-回归', 'R35 损坏被记录到 warnings',
+      svc.warnings().some((w) => w.includes('CORRUPT_JSON')), JSON.stringify(svc.warnings()));
+    add('B-回归', 'R35 损坏文件已备份 .corrupt', fs.existsSync(`${wf}.corrupt`));
+    let refused = false;
+    try { svc.upsertWardrobe({ name: 'x' }); } catch (e) { refused = e.code === 'CORRUPT_JSON'; }
+    add('B-回归', 'R35 写路径拒绝覆盖损坏文件', refused);
+    add('B-回归', 'R35 损坏文件内容未被改写', fs.readFileSync(wf, 'utf8') === '{{{ broken');
+
+    fs.rmSync(extrasTmp, { recursive: true, force: true });
+  }
+
+
   // ---- R23 参考视频+音频合计时长 ≤14.8s ----
   {
     const { buildRenderPlan, MAX_REFS_TOTAL_SEC } = await import('../host/services/render-plan.js');

@@ -654,13 +654,13 @@ def setup_blockout(scene, colored=True):
     sh = scene.display.shading
     # FLAT = 无方向性光照。STUDIO 会引入固定主光方向，模型会照抄。
     sh.light = "FLAT"
-    if colored:
-        # MATERIAL：用材质色（演员按 color 字段上色），身份靠颜色区分
-        sh.color_type = "MATERIAL"
-    else:
-        # SINGLE：单色灰 —— 单角色场景避免模型把灰当配色
-        sh.color_type = "SINGLE"
-        sh.single_color = (0.72, 0.72, 0.72)
+    # 一律 MATERIAL —— 用物体自己的颜色。
+    #
+    # ⚠️ 曾对单角色场景用 SINGLE（统一灰 0.72）以"避免模型把灰当成服装配色"。
+    #    实测是个坏主意：地面本身是灰的，单角色渲出来是**浅灰人站在浅灰地上**，
+    #    剪影完全消失（踩过：整帧只剩一个白脑袋浮在地平线上，四肢看不见）。
+    #    参考视频里的角色必须能被看清，否则模型没东西可跟。
+    sh.color_type = "MATERIAL"
     # 下面四项全部关掉：任何"成片特征"都会被参考视频带进输出
     sh.show_shadows = False
     sh.show_cavity = False
@@ -670,7 +670,8 @@ def setup_blockout(scene, colored=True):
     scene.render.film_transparent = False
     if scene.world is None:
         scene.world = bpy.data.worlds.new("JZ_Blockout_World")
-    scene.world.color = (0.12, 0.12, 0.13)
+    # 背景要**明显暗于**演员与地面，保证剪影在任何颜色下都读得出来
+    scene.world.color = (0.04, 0.04, 0.05)
     # 不做胶片调色：blockout 要的是"原样"的结构，不是好看的画面
     scene.view_settings.view_transform = "Standard"
     scene.view_settings.look = "None"
@@ -1370,10 +1371,9 @@ def main():
     elif MODE == "canny" or MODE == "gray":
         setup_workbench_gray()
     elif MODE == "blockout":
-        # 多角色上色（身份区分），单角色灰（避免灰被当成配色）。
-        # 阈值与理由见 setup_blockout 的 docstring。
-        n_actors = len(spec.get("actors") or [])
-        setup_blockout(scene, colored=(n_actors > 1))
+        # 一律用材质色 —— 理由见 setup_blockout 的 docstring：
+        # 单角色用 SINGLE 灰会让"浅灰人站浅灰地"剪影消失（实测踩过）。
+        setup_blockout(scene, colored=True)
     elif MODE == "preview":
         # 给人看的彩色灰模（不进 H3）
         setup_preview(scene)

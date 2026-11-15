@@ -144,6 +144,17 @@ export function RenderPage() {
   const [plan, setPlan] = useState<RenderPlan | null>(null);
   const [compiled, setCompiled] = useState<CompileResult | null>(null);
   const [error, setError] = useState('');
+  /** 首尾帧（来自镜头卡 previz）—— 参与 9 图预算，所以要进 plan 请求 */
+  const [previzRefs, setPrevizRefs] = useState<{ firstRel: string; lastRel: string }>({ firstRel: '', lastRel: '' });
+  /**
+   * 选中的服化道条目 id。
+   *
+   * 服化道以前只存在于工具箱里，**完全不参与出图** —— 用户录了衣服，
+   * 渲染时一点用都没有。这里把它接进参考图与画面描述：
+   * 选中条目的图走 manualImages，文字拼进 summary。
+   */
+  const [pickedWardrobe, setPickedWardrobe] = useState<string[]>([]);
+  const [wardrobeItems, setWardrobeItems] = useState<Array<{ id: string; kind: string; name: string; desc: string; imageRel?: string | null }>>([]);
 
   /* 参数 */
   const [mode, setMode] = useState('ref2va');
@@ -208,7 +219,7 @@ export function RenderPage() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [cs, meta, as, tpl, asts, catalog] = await Promise.all([
+      const [cs, meta, as, tpl, asts, catalog, wd] = await Promise.all([
         api.vaultCards(),
         api.promptMeta(),
         api.listAssets({}),
@@ -216,10 +227,13 @@ export function RenderPage() {
         // 3D 资产库拿不到不影响渲染，单独 catch 掉（但要在 UI 里说明原因）
         api.blenderAssets().catch(() => ({ assets: [] as ModelAsset[], _failed: true })),
         api.blenderActionCatalog().catch(() => null),
+        // 服化道同理：拿不到就当没有，不让整个渲染页打不开
+        api.toolboxWardrobe().catch(() => [] as unknown[]),
       ]);
       setCards(cs as VaultCardLite[]);
       setAssets((as as AssetItem[]).filter((x) => x.rel));
       setTemplates((tpl as Array<{ id: string; name: string; category: string; content: string }>) ?? []);
+      setWardrobeItems((wd as Array<{ id: string; kind: string; name: string; desc: string; imageRel?: string | null }>) ?? []);
       const m = meta as { styles?: Array<{ id: string; name: string }> };
       setStyles(m.styles ?? []);
       setModelAssets((asts as { assets?: ModelAsset[] })?.assets ?? []);
@@ -283,6 +297,22 @@ export function RenderPage() {
       if (Array.isArray(refs?.audios) && refs.audios.length) {
         setPickedAudios(refs.audios as typeof pickedAudios);
       }
+      /**
+       * 首尾帧也要回填 —— 它们是**占用 9 图预算的参考图**。
+       *
+       * ⚠️ 以前只回填 control，不碰 previz；而 `refreshPlan` 也从不传
+       *    `previz`，于是 `buildRenderPlan` 里那两个 `if (previz?.firstRel)`
+       *    恒不成立 —— 顶栏「参考图 N/9」徽标**永远不算首尾帧**。
+       *    用户已经 8 张卡图 + 1 张首帧时，徽标显示 8/9（安全），
+       *    实际提交 9 张，再加一张就静默超限。
+       */
+      const pv = latest.previz as { firstFramePath?: string; lastFramePath?: string } | null | undefined;
+      if (pv?.firstFramePath || pv?.lastFramePath) {
+        setPrevizRefs({
+          firstRel: pv.firstFramePath ?? '',
+          lastRel: pv.lastFramePath ?? '',
+        });
+      }
       if (!silent) setRestoredShot(String(latest.title ?? '最近镜头'));
       return latest;
     } catch {
@@ -301,11 +331,21 @@ export function RenderPage() {
 
   const refreshPlan = useCallback(async () => {
     try {
+      // 服化道：拿服务端解析出的参考图（唯一转换点，不要在页面里再实现一遍）
+      const wd = pickedWardrobe.length
+        ? await api.toolboxWardrobeResolve(pickedWardrobe).catch(() => ({ images: [] as string[] }))
+        : { images: [] as string[] };
       const p = await api.renderPlan({
         cardIds: pickedCards,
+        manualImages: wd.images ?? [],
         videos: pickedVideos.map((v) => ({ rel: v.rel, name: v.name, hasAudio: v.hasAudio !== false })),
         audios: pickedAudios.map((a) => ({ rel: a.rel, name: a.name })),
         refImageSize,
+        // ⚠️ 首尾帧必须传：它们在 buildRenderPlan 里是 PREVIZ_FIRST/LAST 两类
+        //    参考图，占 9 图预算。不传 → 徽标与实际提交数量对不上。
+        previz: (previzRefs.firstRel || previzRefs.lastRel)
+          ? { firstRel: previzRefs.firstRel || undefined, lastRel: previzRefs.lastRel || undefined }
+          : null,
       }) as RenderPlan;
       setPlan(p);
       // 模式跟着计划推荐（用户手动改过就不覆盖）
@@ -314,14 +354,28 @@ export function RenderPage() {
       setError(describeError(e));
       return null;
     }
-  }, [pickedCards, pickedVideos, pickedAudios, refImageSize]);
+  }, [pickedCards, pickedVideos, pickedAudios, refImageSize, previzRefs, pickedWardrobe]);
 
   useEffect(() => { void refreshPlan(); }, [refreshPlan]);
 
   const recompile = useCallback(async () => {
     try {
+      const wd = pickedWardrobe.length
+        ? await api.toolboxWardrobeResolve(pickedWardrobe).catch(() => ({ images: [] as string[], notes: [] as string[] }))
+        : { images: [] as string[], notes: [] as string[] };
+      /**
+       * 服化道的文字描述拼进画面概要。
+       *
+       * 为什么拼 summary 而不是另开字段：H3 的提示词没有"服装道具"这种
+       * 官方字段，服装差异必须体现在画面描述里（官方顺序：主体 → 动作 →
+       * 镜头 → 光线）。拼在 summary 的**主体段**是对的。
+       */
+      const wardrobeNote = (wd.notes ?? []).length
+        ? `服装与配饰：${(wd.notes ?? []).join('；')}。`
+        : '';
       const r = await api.renderCompile({
         cardIds: pickedCards,
+        manualImages: wd.images ?? [],
         videos: pickedVideos.map((v) => ({ rel: v.rel, name: v.name, hasAudio: v.hasAudio !== false })),
         audios: pickedAudios.map((a) => ({ rel: a.rel, name: a.name })),
         refImageSize,
@@ -329,8 +383,12 @@ export function RenderPage() {
         styleId,
         durationSec: Number(durationSec) || 5,
         ratio,
-        summary,
+        summary: [summary, wardrobeNote].filter(Boolean).join(' '),
         sceneLayout: shotAction,
+        // 与 /render/plan 保持同一份 previz 输入，否则两处预算口径不一致
+        previz: (previzRefs.firstRel || previzRefs.lastRel)
+          ? { firstRel: previzRefs.firstRel || undefined, lastRel: previzRefs.lastRel || undefined }
+          : null,
         ...(soundscape.trim() ? { overall_soundscape: soundscape.trim() } : {}),
         ...(music.trim() && music !== 'N/A' ? { non_diegetic_music: music.trim() } : {}),
         ...(customStyle.trim() ? { styleEn: customStyle.trim() } : {}),
@@ -340,7 +398,7 @@ export function RenderPage() {
     } catch (e) {
       setError(describeError(e));
     }
-  }, [pickedCards, pickedVideos, pickedAudios, refImageSize, mode, styleId, durationSec, ratio, summary, shotAction, soundscape, music, customStyle]);
+  }, [pickedCards, pickedVideos, pickedAudios, refImageSize, mode, styleId, durationSec, ratio, summary, shotAction, soundscape, music, customStyle, previzRefs, pickedWardrobe]);
 
   useEffect(() => { void recompile(); }, [recompile]);
 
@@ -497,6 +555,12 @@ export function RenderPage() {
       // **完全被丢掉**，而且没有任何提示（实测：填入 2151 字手写提示词，
       // 送进模型的却是 1134 字的自动编译版，摘要退化成"一段戏"）。
       const manual = useManualPrompt ? manualPrompt.trim() : '';
+      // 服化道：解析成参考图 + 文字（服务端唯一转换点）
+      const wd = pickedWardrobe.length
+        ? await api.toolboxWardrobeResolve(pickedWardrobe).catch(() => ({ images: [] as string[], notes: [] as string[] }))
+        : { images: [] as string[], notes: [] as string[] };
+      const wardrobeImages = wd.images ?? [];
+      const wardrobeNote = (wd.notes ?? []).length ? `服装与配饰：${(wd.notes ?? []).join('；')}。` : '';
       // 1) 先把当前配置存成镜头卡（渲染以镜头卡为单位）
       const saved = await api.saveShot(currentProjectId, {
         // ⚠️ 必须带上已有 id：不带的话后端 newShot() 每次新建一张镜头卡，
@@ -509,13 +573,16 @@ export function RenderPage() {
         backend: 'h3-local',
         mode,
         refImageSize,
-        description: [summary, shotAction].filter(Boolean).join('。'),
+        // 服化道的文字描述拼进画面描述（H3 没有"服装道具"字段，
+        // 服装差异只能体现在主体描述里 —— 官方顺序：主体 → 动作 → 镜头 → 光线）
+        description: [summary, wardrobeNote, shotAction].filter(Boolean).join('。'),
         // 手工提示词优先；后端 compilePrompt 会优先用 shot.prompt
         ...(manual ? { prompt: manual } : {}),
         // 角色卡通过 cardIds 传，后端解析成图与文字
         cardIds: pickedCards,
         refs: {
-          images: [],
+          // 服化道的图进参考图（manualImages 通道）；没有图的条目只影响文字
+          images: wardrobeImages,
           videos: pickedVideos.map((v) => ({ rel: v.rel, name: v.name, hasAudio: v.hasAudio !== false })),
           audios: pickedAudios.map((a) => ({ rel: a.rel, name: a.name })),
         },
@@ -689,11 +756,57 @@ export function RenderPage() {
               )}
             </Panel>
 
+            {/* ---------------- 服化道 ---------------- */}
+            {/*
+              ⚠️ 这个面板是「服化道」第一次真正影响出图。
+              以前它只是工具箱里的一张表：录了衣服，渲染时完全不用。
+              现在选中条目的 imageRel 进参考图（manualImages 通道），
+              name/desc 拼进画面概要 —— 后端零新增依赖。
+            */}
+            <Panel title={`服化道（已选 ${pickedWardrobe.length}）`}>
+              {wardrobeItems.length === 0 ? (
+                <div className="jz-sm jz-muted">
+                  服化道库还是空的。可在「设置 → 工具 → 服化道」里登记服装/饰品/武器/道具。
+                </div>
+              ) : (
+                <div className="jz-col" style={{ gap: 6, maxHeight: 240, overflow: 'auto' }}>
+                  {wardrobeItems.map((w) => {
+                    const on = pickedWardrobe.includes(w.id);
+                    return (
+                      <button
+                        key={w.id}
+                        type="button"
+                        onClick={() => setPickedWardrobe((p) => (on ? p.filter((x) => x !== w.id) : [...p, w.id]))}
+                        className="jz-card"
+                        style={{
+                          padding: '7px 9px', textAlign: 'left', cursor: 'pointer',
+                          borderColor: on ? 'var(--jz-accent)' : undefined,
+                          borderWidth: on ? 2 : 1,
+                        }}
+                      >
+                        <div className="jz-row" style={{ justifyContent: 'space-between', gap: 6 }}>
+                          <b className="jz-truncate jz-sm">{w.name}</b>
+                          {on
+                            ? <Badge tone="ok">✓</Badge>
+                            : <Badge>{w.imageRel ? '有图' : '仅文字'}</Badge>}
+                        </div>
+                        {w.desc ? <div className="jz-xs jz-muted jz-truncate" style={{ marginTop: 2 }}>{w.desc}</div> : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {pickedWardrobe.length ? (
+                <div className="jz-xs jz-muted" style={{ marginTop: 6 }}>
+                  有图的条目会占用参考图名额；只有文字的会拼进画面概要。
+                </div>
+              ) : null}
+            </Panel>
+
             <Panel title="参考图清单">
               {!plan || plan.images.length === 0 ? (
                 <div className="jz-sm jz-muted">还没有参考图。</div>
-              ) : (
-                <div className="jz-col" style={{ gap: 4 }}>
+              ) : (                <div className="jz-col" style={{ gap: 4 }}>
                   {plan.images.map((im) => (
                     <div key={`${im.index}-${im.rel}`} className="jz-row" style={{ gap: 6, justifyContent: 'space-between' }}>
                       <span className="jz-xs jz-mono">P{im.index}</span>

@@ -150,19 +150,24 @@ export function VaultPage() {
         .filter(Boolean).join(' ').toLowerCase().includes(kw));
   }, [cards, q]);
 
-  // 预算估算：这轮选中的卡一共占几张
+  /**
+   * 预算提示 —— **用后端的真值，不要在这里再算一遍**。
+   *
+   * ⚠️ 历史缺陷：这里原本自己实现了"这张卡占几张"，但只看了
+   *    `sheet` / `origin` 两个槽，漏掉后端 `cardImagesFor` 的两个关键行为：
+   *      ① `heads` / `extras` 槽在名额未满时会**继续补位**（后端 :141-154）；
+   *      ② `sheet-first` 在没有 sheet、没有 origin 但**有 heads** 时会取 heads[0]。
+   *    于是用户看到「本卡占用 1 张」，实际提交 3 张；
+   *    只有 heads 的卡更离谱：页面说 0 张，后端实际带 1 张。
+   *    而「项目」页用的是后端 `imageCount` 求和 —— 同一个数字在两个页面不一致。
+   *
+   *    现在直接用 upsert/enrich 回填的 `resolvedImages` / `imageCount`。
+   *    本地刚改还没保存时这两个字段是旧值（可接受：保存后就准）。
+   */
   const budgetHint = useMemo(() => {
     const max = meta?.limits.maxRefImages ?? 9;
-    const per = Number(draft.refPolicy?.maxImages ?? 1);
-    const mode = draft.refPolicy?.mode ?? 'sheet-first';
-    const sheet = (draft.images?.sheet ?? []).length > 0;
-    const origin = (draft.images?.origin ?? []).length > 0;
-    let used = 0;
-    if (mode === 'both') used = (sheet ? 1 : 0) + (origin ? 1 : 0);
-    else if (mode === 'sheet-only') used = sheet ? 1 : 0;
-    else if (mode === 'origin-first') used = origin ? 1 : 0;
-    else used = sheet || origin ? 1 : 0;
-    return { used: Math.min(used, per), max, per };
+    const used = draft.resolvedImages?.length ?? draft.imageCount ?? 0;
+    return { used, max, per: Number(draft.refPolicy?.maxImages ?? 1) };
   }, [draft, meta]);
 
   if (loading) return <Page title="角色卡仓库"><Loading text="载入中" /></Page>;

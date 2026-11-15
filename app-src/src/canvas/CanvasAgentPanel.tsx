@@ -9,12 +9,18 @@
  */
 import { useCallback, useState } from 'react';
 
-import { api } from '../api/client';
+import { api, describeError } from '../api/client';
 import { Alert, Badge, Button, Input, useToast } from '../ui';
 
 interface CanvasTool { name: string; desc: string; perm: string | null; kind: string }
 interface Perm { id: string; name: string; desc: string }
-interface Meta { tools: CanvasTool[]; permissions: Perm[]; defaults: Record<string, boolean> }
+interface Meta {
+  tools: CanvasTool[];
+  permissions: Perm[];
+  defaults: Record<string, boolean>;
+  /** 服务端当前权限值（GET /canvas-agent/meta 会一并返回） */
+  current?: Record<string, boolean>;
+}
 
 /** 自然语言 → 工具调用的极简规则解析（无需 LLM 也能跑通常见指令） */
 function parseIntent(text: string): { tool: string; args: Record<string, unknown> } | null {
@@ -69,9 +75,27 @@ export function CanvasAgentPanel({ getContext, applyDiff, projectId }: Props) {
     if (meta) return meta;
     const m = await api.canvasAgentMeta() as Meta;
     setMeta(m);
-    setPerms(m.defaults ?? {});
+    // 优先用服务端的**当前**权限值，没带才退回 defaults。
+    // 这保证面板显示的就是后端的真实状态（而不是一厢情愿的本地开关）。
+    setPerms(m.current ?? m.defaults ?? {});
     return m;
   }, [meta]);
+
+  /**
+   * 切换权限位 —— **必须提交到服务端**。
+   *
+   * 服务端是唯一权威（见 canvas-agent.js 的 SERVER_PERMISSIONS 注释），
+   * 本地 state 只是显示。提交成功用返回值回填，失败保持原样并报错。
+   */
+  async function handleTogglePerm(id: string, next: boolean) {
+    try {
+      const r = await api.canvasAgentSetPermissions({ [id]: next }) as { permissions: Record<string, boolean> };
+      setPerms(r.permissions ?? {});
+      toast.ok(next ? `已开启「${id}」` : `已关闭「${id}」`);
+    } catch (e) {
+      toast.error(describeError(e));
+    }
+  }
 
   async function run() {
     const q = input.trim();
@@ -96,7 +120,7 @@ export function CanvasAgentPanel({ getContext, applyDiff, projectId }: Props) {
         name: intent.tool,
         arguments: intent.args,
         projectId: projectId ?? undefined,
-        context: { ...ctx, permissions: perms },
+        context: ctx,
       }) as { ok: boolean; result: unknown; diff?: unknown };
 
       const summary = summarize(intent.tool, r.result);
@@ -148,7 +172,18 @@ export function CanvasAgentPanel({ getContext, applyDiff, projectId }: Props) {
               key={p.id}
               type="button"
               title={p.desc}
-              onClick={() => setPerms((x) => ({ ...x, [p.id]: !x[p.id] }))}
+              /**
+               * ⚠️ 以前这里只 setPerms 改本地 state —— 开关会变亮变暗，
+               *    但后端**从不接收**（/canvas-agent/exec 明确 delete 掉
+               *    请求体里的 permissions，只认服务端的权威值）。
+               *    于是"点了没反应"：canSpend/canDelete 恒为 false，
+               *    generate_image / generate_video / delete_node / call_skill
+               *    四个工具永久不可用。
+               *
+               *    现在改成**先提交到服务端**，成功后用服务端返回的值回填，
+               *    失败则不改变开关状态（避免"看起来开了其实没开"）。
+               */
+              onClick={() => void handleTogglePerm(p.id, !perms[p.id])}
               className="jz-btn jz-btn--sm"
               style={{
                 opacity: perms[p.id] ? 1 : 0.45,

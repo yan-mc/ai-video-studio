@@ -7,9 +7,9 @@
  *
  * 三栏：作业 / 形象库 / 方案库
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { api } from '../api/client';
+import { api, describeError } from '../api/client';
 import {
   Alert, Badge, Button, EmptyState, Field, Icon, IconButton, Input, Loading, Page, Panel,
   Select, Tabs, Textarea, useToast,
@@ -66,6 +66,8 @@ export function ModelWorkbenchPage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [current, setCurrent] = useState<MWJob | null>(null);
+  /** 正在出图的作业 id（用于按钮 loading 态；后端是异步的，不会阻塞其它操作） */
+  const [generatingId, setGeneratingId] = useState('');
 
   // 新建表单
   const [creating, setCreating] = useState(false);
@@ -137,6 +139,21 @@ export function ModelWorkbenchPage() {
     }
   }
 
+  /** 删除形象 —— 后端 /mw/figure/delete 一直存在但前端没有入口，形象库只增不减 */
+  async function handleDeleteFigure(id: string, name: string) {
+    if (!window.confirm(`删除形象「${name}」？`)) return;
+    setBusy(true);
+    try {
+      await api.mwDeleteFigure(id);
+      setFigures((prev) => prev.filter((f) => f.id !== id));
+      toast.ok('已删除形象');
+    } catch (e) {
+      toast.error(describeError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleSavePlan(job: MWJob) {
     const name = window.prompt('方案名称', `${job.name} 方案`);
     if (name === null) return;
@@ -152,6 +169,93 @@ export function ModelWorkbenchPage() {
     }
   }
 
+  /**
+   * 生成套图。
+   *
+   * 为什么以前出不了图：后端 `/mw/job/generate` 一直是通的，
+   * 但前端**没有调用点**（api.mwGenerateJob 定义了却全站零引用）。
+   * 这里补上入口；后端立即返回、异步跑，所以这里只负责提交 + 起轮询。
+   */
+  async function handleGenerate(id: string) {
+    setGeneratingId(id);
+    try {
+      await api.mwGenerateJob({ id });
+      toast.ok('已提交出图，完成后会自动刷新');
+      // 立刻拉一次，让状态从 draft 变 queued
+      await refreshJobs();
+      // 之后靠轮询（见下方 effect）跟进
+      pollUntilDone(id);
+    } catch (e) {
+      toast.error(describeError(e));
+    } finally {
+      setGeneratingId('');
+    }
+  }
+
+  /** 重算提示词（改了风格/描述之后要手动触发） */
+  async function handleReplan(id: string) {
+    setBusy(true);
+    try {
+      const job = await api.mwReplanJob(id) as MWJob;
+      setJobs((prev) => prev.map((j) => (j.id === id ? job : j)));
+      setCurrent((c) => (c?.id === id ? job : c));
+      toast.ok('提示词已重算');
+    } catch (e) {
+      toast.error(describeError(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** 只刷 jobs 列表（不碰 loading，避免整页闪一下） */
+  const refreshJobs = useCallback(async () => {
+    try {
+      const j = await api.mwJobs() as MWJob[];
+      setJobs(j);
+      setCurrent((c) => (c ? (j.find((x) => x.id === c.id) ?? c) : c));
+    } catch { /* 轮询失败不打扰用户 */ }
+  }, []);
+
+  /**
+   * 出图轮询。
+   *
+   * 为什么用轮询而不是等 generate 返回：后端把 runGeneration 挂在
+   * `void (async () => …)` 上立即返回，一次套图要 10 张 × 45–90 秒，
+   * 不可能在一个 HTTP 请求里等完。
+   * 到终态（done/failed/canceled）就停。
+   */
+  const pollTimer = useRef<number | null>(null);
+  /**
+   * jobs 的最新快照。
+   *
+   * 轮询回调是在 setInterval 里跑的，闭包捕获的 `jobs` 会停在注册那一刻。
+   * 用 ref 跟住最新值，避免"刚生成完却判断成还没完"。
+   */
+  const jobsRef = useRef<MWJob[]>([]);
+  useEffect(() => { jobsRef.current = jobs; }, [jobs]);
+
+  function pollUntilDone(id: string) {
+    if (pollTimer.current) window.clearInterval(pollTimer.current);
+    let ticks = 0;
+    pollTimer.current = window.setInterval(() => {
+      ticks += 1;
+      void (async () => {
+        await refreshJobs();
+        const j = (jobsRef.current ?? []).find((x) => x.id === id);
+        const settled = j && ['done', 'failed', 'canceled', 'interrupted'].includes(j.status);
+        // 最多轮 20 分钟（10 张 × 90 秒 + 余量），或到终态
+        if (settled || ticks > 240) {
+          if (pollTimer.current) window.clearInterval(pollTimer.current);
+          pollTimer.current = null;
+        }
+      })();
+    }, 5000);
+  }
+
+  useEffect(() => () => {
+    if (pollTimer.current) window.clearInterval(pollTimer.current);
+  }, []);
+
   const styles = useMemo(
     () => (fMode === 'film' ? meta?.filmStyles : meta?.ecomStyles) ?? [],
     [fMode, meta],
@@ -159,6 +263,12 @@ export function ModelWorkbenchPage() {
   const sizes = useMemo(
     () => (meta?.sizes ?? []).filter((s) => s.id.startsWith(fMode === 'film' ? 'film-' : 'ecom-')),
     [fMode, meta],
+  );
+
+  /** 当前作业里已出的张数（出图进度用） */
+  const doneCount = useMemo(
+    () => (current?.shots ?? []).filter((s) => s.status === 'done').length,
+    [current],
   );
 
   if (loading) return <Page title="模特工作台"><Loading text="载入中" /></Page>;
@@ -312,6 +422,15 @@ export function ModelWorkbenchPage() {
                       <Badge tone={f.locked ? 'ok' : 'warn'}>{f.locked ? '已锁定' : '未锁定'}</Badge>
                     </div>
                     <div className="jz-sm jz-muted" style={{ marginTop: 4 }}>{f.kind ?? '人物'}</div>
+                    <div className="jz-row" style={{ justifyContent: 'flex-end', marginTop: 6 }}>
+                      <IconButton
+                        label={`删除 ${f.name}`}
+                        size={15}
+                        onClick={() => void handleDeleteFigure(f.id, f.name)}
+                      >
+                        <Icon name="trash" size={15} />
+                      </IconButton>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -351,7 +470,6 @@ export function ModelWorkbenchPage() {
                 <Badge>{current.count} 张</Badge>
                 {current.customStyle ? <Badge tone="warn">自定义风格</Badge> : null}
               </div>
-
               <div className="jz-label" style={{ margin: 0 }}>镜头清单 · {current.shots.length} 张</div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 8 }}>
                 {current.shots.map((s) => (
@@ -384,10 +502,38 @@ export function ModelWorkbenchPage() {
                 </>
               ) : null}
 
-              <Alert tone="info">
-                出图需要图像模型通道。当前 H3 只做视频；图像生成等待接入后即可自动跑通
-                「定妆/主图先行 → 过检 → 并行其余」的完整流程。
-              </Alert>
+              {/* ⚠️ 这里以前只有一句提示「图像生成等待接入后即可自动跑通」，
+                  但 H3-Image 其实早就接通了（/mw/job/generate → runH3Image）。
+                  问题的真身是：前端**没有出图按钮**，api.mwGenerateJob 定义了
+                  却全站零调用 → 用户建完作业只能看提示词，永远出不了图。
+                  现在补上按钮，并把过期的 Alert 换成真实进度。 */}
+              <div className="jz-row jz-wrap" style={{ gap: 8 }}>
+                <Button
+                  variant="primary"
+                  icon={<Icon name="image" size={15} />}
+                  onClick={() => void handleGenerate(current.id)}
+                  disabled={busy || generatingId === current.id}
+                >
+                  {generatingId === current.id ? '出图中…' : '生成套图'}
+                </Button>
+                <Button
+                  icon={<Icon name="refresh" size={15} />}
+                  onClick={() => void handleReplan(current.id)}
+                  disabled={busy}
+                >
+                  重算提示词
+                </Button>
+                <span className="jz-sm jz-muted">
+                  共 {current.shots.length} 张，已出 {doneCount}
+                </span>
+              </div>
+
+              {doneCount < current.shots.length ? (
+                <Alert tone="info">
+                  「生成套图」会按「定妆/主图先行 → 过检 → 并行其余」的顺序串行出图；
+                  单张约 45–90 秒（12GB 显存），可随时关闭本页，任务在后端继续。
+                </Alert>
+              ) : null}
             </div>
           </Panel>
         ) : null}

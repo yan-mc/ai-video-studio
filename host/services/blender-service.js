@@ -467,13 +467,27 @@ export function buildSceneSpec(shot, opts = {}) {
   }));
 
   const cam = shot?.camera3d || {};
+  /**
+   * ⚠️ 兜底值也必须走坐标换算。
+   *
+   * `toBlenderVec(v, fallback)` 的 `fallback` 是**原样返回**的 —— 它被
+   * 假设成"已经是 Blender 坐标"。而 `DEFAULT_CAMERA3D` 是**镜头卡坐标**
+   * （x, y=高度, z=深度）。把镜头卡坐标直接当 Blender 坐标用，相机会落在
+   * (0, 1.6, -4.2)：Blender 的 Z-up 里那是"高度 1.6 米但深度 -4.2" →
+   * 相机紧贴人物、几乎贴在演员身上，渲出来是**一整片纯灰**（实测：帧里
+   * 看不到任何演员，只有背景色），而且逐帧完全相同（因为贴太近，
+   * 演员的位移完全落在画面外）。
+   *
+   * 正确做法：先把默认值换算成 Blender 坐标，再把它当作 fallback 传下去。
+   * 这样"没配 camera3d"和"配了等价 camera3d"两条路径得到同一个机位。
+   */
+  const DEFAULT_CAM_BLENDER = toBlenderVec([...DEFAULT_CAMERA3D.position]);
+  const DEFAULT_TARGET_BLENDER = toBlenderVec([...DEFAULT_CAMERA3D.target]);
+
   const camera = {
-    // 默认值取 models.DEFAULT_CAMERA3D —— **单一真源**。
-    // 历史上这里写 [0,1.6,-4.2]（对），models.normalizeCamera3d 写
-    // [0,-4.2,1.6]（错，相机跑到地下），两层不一致导致"有的入口正常、
-    // 有的入口渲出纯灰空画面"。
-    position: toBlenderVec(cam.position, [...DEFAULT_CAMERA3D.position]),
-    target: toBlenderVec(cam.target, [...DEFAULT_CAMERA3D.target]),
+    // 默认值取 models.DEFAULT_CAMERA3D —— **单一真源**，但要先换算坐标系。
+    position: toBlenderVec(cam.position, DEFAULT_CAM_BLENDER),
+    target: toBlenderVec(cam.target, DEFAULT_TARGET_BLENDER),
     fov: Math.min(140, Math.max(5, Number(cam.fov) || DEFAULT_CAMERA3D.fov)),
   };
   if (Array.isArray(cam.keys) && cam.keys.length >= 2) {

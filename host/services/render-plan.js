@@ -495,14 +495,30 @@ function countBy(arr, key) {
  * 关键：pictureIndex 直接用计划里的真实编号。
  */
 export function subjectsForPrompt(plan) {
-  return (plan?.subjects ?? []).map((s, i) => ({
-    id: s.id ?? `S${i + 1}`,
-    name: s.name ?? `角色${i + 1}`,
-    pictureIndex: s.pictureIndex ?? (i + 1),
-    traits: s.traits ?? '',
-    personality: s.personality ?? '',
-    voiceDesc: s.voiceDesc ?? '',
-    heightCm: null,
-    hasImage: s.hasImage !== false,
-  }));
+  return (plan?.subjects ?? []).map((s, i) => {
+    /**
+     * ⚠️ 三态语义必须原样传下去：`null` = **这张卡确实没有图**。
+     *
+     * 历史缺陷：这里写的是 `s.pictureIndex ?? (i + 1)`，而 `??` 对 `null`
+     * 也生效 —— 于是 `buildRenderPlan` 产出的"卡被完全裁掉 → pictureIndex:
+     * null"被静默改写成"第 i+1 张图"。下游 h3-prompt 的 `normalizeSubjects`
+     * 用 `pictureIndex === null` 判断无图，拿到正整数就判成有图 →
+     * subject_definitions 写出 `<Picture N>`（指向**别的角色的图**），
+     * retention_analysis 写出 `fully_preserved`（没有东西可保）。
+     *
+     * 现在：`null` 就走 `null`；只有 `undefined`（字段缺失）才兜底编号。
+     */
+    const explicitNull = s.pictureIndex === null;
+    const hasImage = s.hasImage !== false && !explicitNull;
+    return {
+      id: s.id ?? `S${i + 1}`,
+      name: s.name ?? `角色${i + 1}`,
+      pictureIndex: explicitNull ? null : (s.pictureIndex ?? (hasImage ? i + 1 : null)),
+      traits: s.traits ?? '',
+      personality: s.personality ?? '',
+      voiceDesc: s.voiceDesc ?? '',
+      heightCm: null,
+      hasImage,
+    };
+  });
 }

@@ -907,6 +907,9 @@ export async function handleApi(req, res) {
         prompt,
         params: {
           kind: 'image',
+          // 标记这是立绘拆解任务 —— 图像页的「最近任务」要把它排除，
+          // 否则两类任务混在一起看不出哪个是哪个（它们 backendId 相同）。
+          breakdown: true,
           imageSizeId: body.sizeId ?? 'square',
           width: size.w,
           height: size.h,
@@ -1031,6 +1034,35 @@ export async function handleApi(req, res) {
     if (req.method === 'POST' && route === '/wardrobe/delete') {
       const body = await readJsonBody(req);
       return sendJson(res, 200, ctx.extras.deleteWardrobe(String(body.id)));
+    }
+    /**
+     * 服化道 → 生成入参（参考图 + 提示词片段）。
+     *
+     * 为什么放在服务端而不是前端拼：渲染页、Agent 工具、以及将来任何入口
+     * 都必须拿到同一份转换结果，否则又是"两处各写一份、慢慢漂移"。
+     * 纯计算、无副作用，但仍然走 POST（要带 id 数组，放 query 不合适）。
+     */
+    if (req.method === 'POST' && route === '/wardrobe/resolve') {
+      const body = await readJsonBody(req);
+      const r = ctx.extras.wardrobeToGeneration(body.ids ?? []);
+      return sendJson(res, 200, {
+        ok: true,
+        images: r.images,
+        notes: r.notes,
+        count: r.items.length,
+        items: r.items.map((w) => ({ id: w.id, kind: w.kind, name: w.name, hasImage: Boolean(w.imageRel) })),
+      });
+    }
+
+    /* ---------------- 工具箱数据健康 ---------------- */
+    /**
+     * 数据文件损坏报告。
+     *
+     * extras 的读路径遇到坏 JSON 会降级为空列表（否则整个工具箱打不开），
+     * 但必须让用户看到"你的模板文件坏了、已备份"，而不是静默显示空列表。
+     */
+    if (req.method === 'GET' && route === '/toolbox/health') {
+      return sendJson(res, 200, { ok: true, warnings: ctx.extras.warnings() });
     }
 
     /* ---------------- 分镜目录导入 ---------------- */

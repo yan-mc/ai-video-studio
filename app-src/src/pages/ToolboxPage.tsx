@@ -10,11 +10,13 @@ import {
 } from '../ui';
 
 interface Template { id: string; name: string; category: string; content: string; custom?: boolean }
-interface WardrobeItem { id: string; kind: string; name: string; desc: string; tags: string[] }
+interface WardrobeItem { id: string; kind: string; name: string; desc: string; tags: string[]; imageRel?: string | null }
+interface AssetLite { id: string; name: string; rel?: string; kind?: string }
 interface ScanFile { name: string; path: string; bytes: number; kind: string; matched: { id: string; name: string }[] }
 interface ScanResult { dir: string; total: number; known: number; unknown: number; files: ScanFile[]; skipped: string[] }
 interface Orphans {
-  total: number; referenced: number; orphanCount: number; orphanBytes: number;
+  total: number; referenced: number; protected?: number; unreadable?: number;
+  orphanCount: number; orphanBytes: number;
   orphans: { name: string; path: string; bytes: number; mtime: number }[];
 }
 interface LogEntry { at: number; level?: string; msg?: string; [k: string]: unknown }
@@ -41,6 +43,11 @@ export function ToolboxPanel() {
   const [wdKind, setWdKind] = useState('costume');
   const [wdName, setWdName] = useState('');
   const [wdDesc, setWdDesc] = useState('');
+  /** 服化道参考图（从素材库里选）—— 以前没有这个入口，imageRel 恒为 null */
+  const [wdImageRel, setWdImageRel] = useState('');
+  const [imageAssets, setImageAssets] = useState<AssetLite[]>([]);
+  /** 数据文件损坏警告（extras 读路径降级时上报） */
+  const [dataWarnings, setDataWarnings] = useState<string[]>([]);
   const [scanDir, setScanDir] = useState('');
   const [scan, setScan] = useState<ScanResult | null>(null);
   const [preview, setPreview] = useState('');
@@ -48,15 +55,20 @@ export function ToolboxPanel() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [t, w, o, l, b] = await Promise.all([
+      const [t, w, o, l, b, h, a] = await Promise.all([
         api.toolboxTemplates(), api.toolboxWardrobe(),
         api.toolboxOrphans(), api.toolboxLogs(), api.toolboxBatchProgress(),
+        // 数据健康 + 可选图（拿不到都不阻断，工具箱仍可用）
+        api.toolboxHealth().catch(() => ({ ok: true, warnings: [] as string[] })),
+        api.listAssets({}).catch(() => [] as unknown[]),
       ]);
       setTemplates(t as Template[]);
       setWardrobe(w as WardrobeItem[]);
       setOrphans(o as Orphans);
       setLogs(l as LogEntry[]);
       setBatch(b as BatchProg);
+      setDataWarnings((h as { warnings?: string[] })?.warnings ?? []);
+      setImageAssets((a as AssetLite[]).filter((x) => x.rel && (x.kind === 'image' || /\.(png|jpe?g|webp)$/i.test(x.rel ?? ''))));
     } catch (e) {
       toast.error(String((e as Error)?.message ?? e));
     } finally {
@@ -88,8 +100,14 @@ export function ToolboxPanel() {
     if (!wdName.trim()) { toast.error('名称必填'); return; }
     setBusy(true);
     try {
-      await api.toolboxWardrobeUpsert({ kind: wdKind, name: wdName, desc: wdDesc });
-      setWdName(''); setWdDesc('');
+      await api.toolboxWardrobeUpsert({
+        kind: wdKind,
+        name: wdName,
+        desc: wdDesc,
+        // 有图才传；没图就是纯文字条目（只影响提示词，不占参考图名额）
+        ...(wdImageRel ? { imageRel: wdImageRel } : {}),
+      });
+      setWdName(''); setWdDesc(''); setWdImageRel('');
       await load();
       toast.ok('已入库');
     } catch (e) { toast.error(String((e as Error)?.message ?? e)); }
@@ -135,6 +153,21 @@ export function ToolboxPanel() {
 
   return (
     <div className="jz-col" style={{ gap: 'var(--jz-sp-4)' }}>
+      {/*
+        数据文件损坏必须显式告警。
+        读路径遇到坏 JSON 会降级为空列表（否则整个工具箱打不开），
+        但绝不能像以前那样"显示空列表、什么也不说" —— 用户会以为
+        自己的模板/服化道凭空消失了。损坏文件已备份为 .corrupt。
+      */}
+      {dataWarnings.length ? (
+        <Alert tone="warn">
+          <b>数据文件损坏</b>（已自动备份为 <code>.corrupt</code>，原文件未覆盖）：
+          <ul style={{ margin: '6px 0 0 18px' }}>
+            {dataWarnings.map((w) => <li key={w} className="jz-xs">{w}</li>)}
+          </ul>
+          修复后点「刷新」即可读回；新建条目会拒绝写入，避免覆盖已损坏的原文件。
+        </Alert>
+      ) : null}
       <div className="jz-row" style={{ justifyContent: 'flex-end', gap: 8 }}>
         {batch ? (
           <Badge tone={batch.failed ? 'danger' : batch.running ? 'warn' : 'ok'}>
@@ -200,6 +233,21 @@ export function ToolboxPanel() {
                 <Field label="名称"><Input value={wdName} onChange={(e) => setWdName(e.target.value)} /></Field>
               </div>
               <Field label="描述"><Input value={wdDesc} onChange={(e) => setWdDesc(e.target.value)} /></Field>
+              {/*
+                参考图选择 —— **这是「服化道真的参与出图」的关键一环**。
+                以前没有这个入口，imageRel 恒为 null，条目永远只能靠文字
+                影响生成；有了图才能在渲染页作为参考图传进模型。
+              */}
+              <Field label="参考图（可选）" hint="选了就会在渲染页作为参考图传进模型；不选则只拼文字描述">
+                <Select<string>
+                  value={wdImageRel}
+                  onChange={setWdImageRel}
+                  options={[
+                    { value: '', label: '（不用图，仅文字）' },
+                    ...imageAssets.map((a) => ({ value: a.rel ?? '', label: a.name })),
+                  ]}
+                />
+              </Field>
               <Button variant="primary" style={{ marginTop: 8 }} onClick={() => void saveWardrobe()} disabled={busy}>入库</Button>
             </Panel>
             <Panel title={`服化道库（${wardrobe.length}）`}>
@@ -211,6 +259,7 @@ export function ToolboxPanel() {
                         <div className="jz-row" style={{ gap: 8 }}>
                           <b className="jz-sm">{w.name}</b>
                           <Badge>{{ costume: '服装', accessory: '饰品', weapon: '武器', prop: '道具' }[w.kind] ?? w.kind}</Badge>
+                          {w.imageRel ? <Badge tone="ok">有图</Badge> : <Badge>仅文字</Badge>}
                         </div>
                         <Button onClick={() => void delWardrobe(w.id)}>删除</Button>
                       </div>
@@ -263,6 +312,20 @@ export function ToolboxPanel() {
                 <div className="jz-row jz-wrap" style={{ gap: 8 }}>
                   <Badge>{orphans.total} 个文件</Badge>
                   <Badge tone="ok">{orphans.referenced} 个被引用</Badge>
+                  {/*
+                    ⚠️ 「受保护」必须单列。
+                    以前 3d/models 目录下的文件被算进「被引用」计数，
+                    于是面板显示「120 个被引用」，其中可能 118 个只是
+                    放在 assets/3d/ 里、根本没被任何地方引用 —— 用户无法
+                    理解为什么这些文件永远不会被清理。
+                    现在 referenced + protected + orphan + unreadable = total。
+                  */}
+                  {orphans.protected ? (
+                    <Badge title="assets/3d 与 assets/models 下的文件：Blender 直接扫盘，不参与孤儿判定">
+                      {orphans.protected} 个受保护（3D）
+                    </Badge>
+                  ) : null}
+                  {orphans.unreadable ? <Badge tone="warn">{orphans.unreadable} 个读不到</Badge> : null}
                   <Badge tone={orphans.orphanCount ? 'warn' : 'default'}>{orphans.orphanCount} 个孤儿</Badge>
                   <Badge>{(orphans.orphanBytes / 1024).toFixed(1)} KB 可释放</Badge>
                 </div>

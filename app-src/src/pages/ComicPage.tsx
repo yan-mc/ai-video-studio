@@ -27,6 +27,14 @@ interface ComicDoc {
   pages?: PageDoc[];
   template?: string;
   panelCount?: number;
+  /**
+   * 提示词计划（由 /comic/plan-prompts 落盘）。
+   *
+   * ⚠️ 以前接口里没有声明这个字段，页面也就拿不到 —— 于是
+   *    `planCount` 只在"本次会话点过提示词计划"之后才非 0，
+   *    刷新页面后磁盘上明明有计划，「逐格出图」按钮却是禁用的。
+   */
+  planParts?: Array<{ key?: string; prompt?: string }>;
   preflight?: { ok: boolean; total: number; passed: number; checks: Check[]; blocking: Check[] };
 }
 
@@ -62,6 +70,8 @@ export function ComicPage() {
       const d = await api.getComic(projectId) as ComicDoc | null;
       setDoc(d);
       if (d?.sourceText) setText(d.sourceText);
+      // 提示词计划已落盘时就回填格数，避免刷新后「逐格出图」被误禁用
+      if (Array.isArray(d?.planParts)) setPlanCount(d.planParts.length);
       setErr('');
     } catch (e) {
       setErr(String((e as Error)?.message ?? e));

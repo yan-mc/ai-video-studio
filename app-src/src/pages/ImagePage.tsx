@@ -68,7 +68,24 @@ export function ImagePage() {
       void (async () => {
         try {
           const all = await api.listJobs() as Job[];
-          const imgs = (all ?? []).filter((j) => /^h3-image$|image/i.test(String((j as unknown as { backendId?: string }).backendId ?? '')));
+          // 只显示**真正的 H3-Image 出图任务**。
+          //
+          // ⚠️ 以前的正则 `/^h3-image$|image/i` 有两个问题：
+          //    ① `/i` 让 `|image` 分支匹配任何含 "image" 的串，
+          //       而且它只看 backendId —— kind 从没参与判断；
+          //    ② 立绘拆解（/breakdown/generate）也是 backendId='h3-image'
+          //       + kind='image'，于是被混进来，用户在图像页看到一堆拆解任务。
+          //    现在按 params.breakdown 标记区分（该路由会打这个标记）。
+          const imgs = (all ?? []).filter((j) => {
+            const x = j as unknown as {
+              backendId?: string; kind?: string;
+              params?: { kind?: string; breakdown?: boolean };
+            };
+            const isImage = x.backendId === 'h3-image'
+              || x.kind === 'image'
+              || x.params?.kind === 'image';
+            return isImage && !x.params?.breakdown;
+          });
           setJobs(imgs.slice(0, 12));
         } catch { /* ignore */ }
       })();

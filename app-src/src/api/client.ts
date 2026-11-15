@@ -377,6 +377,13 @@ export const api = {
   mwFigures: () => request<unknown>('GET', '/mw/figures'),
   mwUpsertFigure: (figure: Record<string, unknown>) =>
     request<unknown>('POST', '/mw/figure/upsert', { figure }),
+  /**
+   * 删除形象。
+   *
+   * ⚠️ 后端 `/mw/figure/delete` 一直存在，但前端从没定义过这个方法 ——
+   *    形象库只能增、不能删，figures.json 只增不减。
+   */
+  mwDeleteFigure: (id: string) => request<unknown>('POST', '/mw/figure/delete', { id }),
 
   /* H3 提示词编译 */
   promptMeta: () => request<unknown>('GET', '/prompt/meta'),
@@ -388,6 +395,16 @@ export const api = {
   canvasAgentMeta: () => request<unknown>('GET', '/canvas-agent/meta'),
   canvasAgentExec: (input: Record<string, unknown>) =>
     request<unknown>('POST', '/canvas-agent/exec', input),
+  /**
+   * 设置画布 Agent 的权限位。
+   *
+   * ⚠️ 这条之前不存在，而服务端的 setCanvasPermission() 也没有调用者 ——
+   *    结果 canSpend / canDelete 恒为 false，generate_image /
+   *    generate_video / delete_node / call_skill 四个工具永久不可用。
+   *    权限位必须由服务端持有，这是它唯一的写入口。
+   */
+  canvasAgentSetPermissions: (permissions: Record<string, boolean>) =>
+    request<unknown>('POST', '/canvas-agent/permissions', { permissions }),
 
   /* 工具箱（剩余域） */
   toolboxTemplates: () => request<unknown>('GET', '/templates'),
@@ -400,6 +417,19 @@ export const api = {
   toolboxWardrobeUpsert: (item: Record<string, unknown>) =>
     request<unknown>('POST', '/wardrobe/upsert', item),
   toolboxWardrobeDelete: (id: string) => request<unknown>('POST', '/wardrobe/delete', { id }),
+  /**
+   * 服化道 → 生成入参。
+   *
+   * 服化道以前是**纯陈列柜**（只有 CRUD，没有任何生成链路读它）。
+   * 这条是它真正参与出图的通道：返回选中条目的参考图 rel 与
+   * 可直接拼进提示词的中文描述。
+   */
+  toolboxWardrobeResolve: (ids: string[]) =>
+    request<{ ok: boolean; images: string[]; notes: string[]; count: number }>(
+      'POST', '/wardrobe/resolve', { ids },
+    ),
+  /** 工具箱数据健康（JSON 损坏会在这里暴露，而不是静默空列表） */
+  toolboxHealth: () => request<{ ok: boolean; warnings: string[] }>('GET', '/toolbox/health'),
 
   toolboxImportScan: (input: { dir: string }) => request<unknown>('POST', '/import/scan', input),
   toolboxImportPreview: (input: { path: string; limit?: number }) =>
