@@ -6,7 +6,7 @@
  */
 import { useEffect, useState } from 'react';
 
-import { describeError, getCachedToken } from '../api/client';
+import { describeError, ensureToken } from '../api/client';
 import { ToolboxPanel } from './ToolboxPage';
 import type { BackendId } from '../api/types';
 import { useProjectStore, useUiStore } from '../store';
@@ -48,10 +48,21 @@ export function SettingsPage() {
   const [draft, setDraft] = useState<Record<string, string | number | boolean>>({});
   const [busy, setBusy] = useState(false);
   const [savedAt, setSavedAt] = useState(0);
+  /**
+   * 写操作令牌是否可用。`null` = 还没试过（显示"未知"而不是"缺失"）。
+   *
+   * 为什么要单独一个 state：token 是懒加载的，而 `getCachedToken()` 是
+   * 非响应式读取 —— 设置页首次渲染时必然为空，徽章会恒显示「未获取」。
+   */
+  const [tokenReady, setTokenReady] = useState<boolean | null>(null);
 
   useEffect(() => {
     void loadConfig();
     void refreshHealth();
+    // 主动取一次令牌，让「写操作令牌」徽章反映真实状态
+    void ensureToken()
+      .then(() => setTokenReady(true))
+      .catch(() => setTokenReady(false));
   }, [loadConfig, refreshHealth]);
 
   // 配置到手后初始化草稿（只在首次/刷新后同步）
@@ -214,8 +225,19 @@ export function SettingsPage() {
                     key: t('settings.tokenStatus'),
                     value: (
                       <span className="jz-row">
-                        <Badge tone={getCachedToken() ? 'ok' : 'warn'}>
-                          {getCachedToken() ? t('settings.tokenReady') : t('settings.tokenMissing')}
+                        {/*
+                          ⚠️ 这里以前直接 `getCachedToken()` —— 它是**非响应式**的读：
+                          token 是懒加载的（第一次写操作才去取），所以设置页打开时
+                          缓存为空 → 恒显示「未获取」，而且就算后来取到了，
+                          组件也不会重渲染，徽章永远不更新。
+                          用户看到「写操作令牌 未获取」会以为配置坏了。
+
+                          现在改成主动 ensureToken() 并在 state 里跟住结果。
+                        */}
+                        <Badge tone={tokenReady === null ? 'default' : tokenReady ? 'ok' : 'danger'}>
+                          {tokenReady === null
+                            ? t('app.unknown')
+                            : tokenReady ? t('settings.tokenReady') : t('settings.tokenMissing')}
                         </Badge>
                       </span>
                     ),
