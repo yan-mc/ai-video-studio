@@ -1769,6 +1769,50 @@ const comfy = await import('../host/services/comfy-client.js');
     add('B-回归', 'R40 60 秒截到 362 帧', h3Length(60) === 362, String(h3Length(60)));
   }
 
+  /* ==================================================================
+   * R41：只有服化道/场景图、没有角色卡时的兜底
+   *
+   * 旧实现无条件写 `<Subject 1> … fully_preserved - keep the appearance and
+   * costume shown in the reference pictures.` —— 用户只挂了服化道图时，
+   * 参考图里根本没有角色，模型只能猜（实测会把场景物件当人）。
+   * ================================================================== */
+  {
+    const { compileH3Prompt } = await import('../host/services/h3-prompt.js');
+
+    const withImg = compileH3Prompt({
+      mode: 'ref2va', durationSec: 5,
+      references: { images: ['assets/belt.png'] },
+      description: 'A woman by a window', overall_soundscape: 'Wind',
+    });
+    add('B-回归', 'R41 无角色卡时不谎称 fully_preserved',
+      !withImg.prompt.includes('fully_preserved'), withImg.prompt.slice(0, 0));
+    add('B-回归', 'R41 无角色卡时说明图只提供设定与服装',
+      withImg.prompt.includes('setting and costume details'));
+
+    const noImg = compileH3Prompt({
+      mode: 'ref2va', durationSec: 5,
+      subjects: [{ id: 'S1', name: 'A' }],
+      description: 'x', overall_soundscape: 'y',
+    });
+    // ⚠️ 没有图、也没有 pictureIndex 时，`routeFormat` 正确地退回**基础格式**
+    //    （Ref2VA 的六段在没有任何参考素材时没有意义：subject_definitions /
+    //    retention_analysis 全是"保住参考图里的…"，而参考图不存在）。
+    //    这条断言锁的是"别为了凑六段而编造 `<Subject>`"。
+    add('B-回归', 'R41 完全无图时退回基础格式', noImg.format === 'base', noImg.format);
+    add('B-回归', 'R41 完全无图时不编造 subject_definitions',
+      !noImg.prompt.includes('subject_definitions'));
+
+    // 有声明了 pictureIndex 的角色时，才走六段并给出 text_only / 有图两套措辞
+    const subjNoPic = compileH3Prompt({
+      mode: 'ref2va', durationSec: 5,
+      subjects: [{ id: 'S1', name: 'A', pictureIndex: null, hasImage: false }],
+      references: { images: ['assets/x.png'] },
+      description: 'x', overall_soundscape: 'y',
+    });
+    add('B-回归', 'R41 无图角色标 text_only',
+      subjNoPic.prompt.includes('text_only'), subjNoPic.prompt.slice(0, 0));
+  }
+
 
   // ---- R23 参考视频+音频合计时长 ≤14.8s ----
   {

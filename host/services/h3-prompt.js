@@ -631,8 +631,27 @@ function compileRef2VA(ctx) {
     });
   }
 
+  /**
+   * 兜底：一个 `<Subject>` 都没有时（没有角色卡、没有显式 subjects）。
+   *
+   * ⚠️ 必须分清"有没有参考图"两种情况。
+   *
+   * 旧实现无条件写 `<Subject 1> is defined by the description below.` +
+   * `fully_preserved - keep the appearance and costume shown in the reference
+   * pictures.` —— 当用户**只挂了服化道/场景图、没有任何角色**时，
+   * 提示词里会出现"保住参考图里的外观和服装"，可参考图里根本没有角色。
+   * 模型只能猜，实测会把场景图里的物件当成人。
+   *
+   * 正确做法：
+   *   有图 → 明确说明图里是什么参考，由描述决定内容
+   *   无图 → 明确写"纯文字定义，没有外观参考图"
+   */
   if (!defs.length) {
-    defs.push('<Subject 1> is defined by the description below.');
+    defs.push(
+      refs.images.length
+        ? `<Subject 1> is described in the text below. The ${refs.images.length} reference picture(s) supply setting and costume details only.`
+        : '<Subject 1> is defined by the written description only; no appearance reference pictures were supplied.',
+    );
   }
   out.push(...defs);
   out.push('');
@@ -683,7 +702,11 @@ function compileRef2VA(ctx) {
   });
 
   if (!ret.length) {
-    ret.push('<Subject 1>: fully_preserved - keep the appearance and costume shown in the reference pictures.');
+    ret.push(
+      refs.images.length
+        ? '<Subject 1>: attribute_transfer - take setting and costume details from the reference pictures; appearance follows the description.'
+        : '<Subject 1>: weak_reference - text_only; appearance follows the written description because no reference pictures were supplied.',
+    );
   }
   out.push(...ret);
   out.push('');
