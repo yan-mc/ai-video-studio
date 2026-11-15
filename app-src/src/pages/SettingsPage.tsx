@@ -22,7 +22,6 @@ import {
   Page,
   Panel,
   Select,
-  Switch,
   Tabs,
   useT,
 } from '../ui';
@@ -61,10 +60,6 @@ export function SettingsPage() {
     setDraft({
       comfyUrl: config.comfyUrl ?? '',
       comfyInputDir: config.comfyInputDir ?? '',
-      seedanceEndpoint: config.seedanceEndpoint ?? '',
-      seedanceModel: config.seedanceModel ?? '',
-      seedanceApiKey: '',                       // 后端只回掩码，这里留空表示"不修改"
-      seedanceMock: config.seedanceMock ?? true,
       defaultBackend: config.defaultBackend ?? 'h3-local',
       defaultProfile: config.defaultProfile ?? 'P12-draft',
       maxConcurrentLocal: config.maxConcurrentLocal ?? 1,
@@ -77,18 +72,12 @@ export function SettingsPage() {
       const patch: Record<string, unknown> = {
         comfyUrl: String(draft['comfyUrl'] ?? ''),
         comfyInputDir: String(draft['comfyInputDir'] ?? ''),
-        seedanceEndpoint: String(draft['seedanceEndpoint'] ?? ''),
-        seedanceModel: String(draft['seedanceModel'] ?? ''),
-        seedanceMock: Boolean(draft['seedanceMock']),
         defaultBackend: String(draft['defaultBackend'] ?? 'h3-local') as BackendId,
         defaultProfile: String(draft['defaultProfile'] ?? 'P12-draft'),
         maxConcurrentLocal: Number(draft['maxConcurrentLocal']) || 1,
         theme,
         accent,
       };
-      // 只有用户真的输入了新 key 才提交（空 = 保持不变）
-      const newKey = String(draft['seedanceApiKey'] ?? '').trim();
-      if (newKey && newKey !== '***') patch['seedanceApiKey'] = newKey;
       await saveConfig(patch);
       setSavedAt(Date.now());
       toast.ok(t('settings.configSaved'));
@@ -165,37 +154,6 @@ export function SettingsPage() {
                     placeholder="留空表示不额外指定"
                   />
                 </Field>
-                <Field label={t('settings.seedanceEndpoint')}>
-                  <Input
-                    value={String(draft['seedanceEndpoint'] ?? '')}
-                    onChange={(e) => set('seedanceEndpoint', e.target.value)}
-                    mono
-                  />
-                </Field>
-                <Field label={t('settings.seedanceModel')}>
-                  <Input
-                    value={String(draft['seedanceModel'] ?? '')}
-                    onChange={(e) => set('seedanceModel', e.target.value)}
-                    mono
-                    placeholder="留空则使用默认"
-                  />
-                </Field>
-                <Field label={t('settings.seedanceApiKey')} hint={t('settings.seedanceApiKeyHint')}>
-                  <Input
-                    value={String(draft['seedanceApiKey'] ?? '')}
-                    onChange={(e) => set('seedanceApiKey', e.target.value)}
-                    placeholder="粘贴新的 API Key（留空保持不变）"
-                    mono
-                    title={t('settings.tokenHint')}
-                  />
-                </Field>
-                <Field label={t('settings.seedanceMock')}>
-                  <Switch
-                    checked={Boolean(draft['seedanceMock'])}
-                    onChange={(v) => set('seedanceMock', v)}
-                    label={Boolean(draft['seedanceMock']) ? 'Mock（无 key 也能跑通）' : '真实调用'}
-                  />
-                </Field>
               </div>
             </Panel>
 
@@ -207,8 +165,7 @@ export function SettingsPage() {
                     onChange={(v) => set('defaultBackend', v)}
                     options={[
                       { value: 'h3-local', label: 'H3 本地' },
-                      { value: 'seedance-cloud', label: 'Seedance 云端' },
-                      { value: 'mock', label: 'Mock' },
+                      { value: 'mock', label: 'Mock（占位片，仅测试）' },
                     ]}
                   />
                 </Field>
@@ -242,18 +199,6 @@ export function SettingsPage() {
                     value: (
                       <Badge tone={health?.h3?.ok ? 'ok' : health ? 'danger' : 'default'}>
                         {health?.h3?.ok ? t('app.ready') : health ? t('app.offline') : t('app.unknown')}
-                      </Badge>
-                    ),
-                  },
-                  {
-                    key: t('settings.healthSeedance'),
-                    value: (
-                      <Badge tone={health?.seedance?.ok === true ? 'ok' : 'warn'}>
-                        {typeof health?.seedance?.detail === 'string'
-                          ? health.seedance.detail
-                          : health?.seedance?.ok === 'mock'
-                            ? t('app.unknown')
-                            : t('app.unknown')}
                       </Badge>
                     ),
                   },
@@ -367,8 +312,7 @@ export function SettingsPage() {
                   onChange={(v) => set('defaultBackend', v)}
                   options={[
                     { value: 'h3-local', label: 'H3 本地（ComfyUI）' },
-                    { value: 'seedance-cloud', label: 'Seedance 云端' },
-                    { value: 'mock', label: 'Mock（占位片）' },
+                    { value: 'mock', label: 'Mock（占位片，仅测试）' },
                   ]}
                 />
               </Field>
@@ -381,7 +325,6 @@ export function SettingsPage() {
                     { value: 'P16-std', label: 'P16-std · 960×544' },
                     { value: 'P24-quality', label: 'P24-quality · 1056×608' },
                     { value: 'P768-quality', label: 'P768-quality · 1344×768' },
-                    { value: 'cloud-fallback', label: 'cloud-fallback · Seedance' },
                   ]}
                 />
               </Field>
@@ -434,7 +377,7 @@ export function SettingsPage() {
           <Panel title="价格说明">
             <div className="jz-col" style={{ gap: 'var(--jz-sp-3)' }}>
               <Alert tone="ok">
-                本地 H3 生成不产生费用（仅消耗本机显卡）。Seedance 云端按量计费。
+                本地 H3 生成不产生费用（仅消耗本机显卡）。Mock 后端只出占位色卡，不产生费用。
               </Alert>
               <KeyValue
                 rows={[
@@ -442,7 +385,6 @@ export function SettingsPage() {
                   { key: 'H3 本地 · 544p', value: '免费（约 170s）' },
                   { key: 'H3 本地 · 608p', value: '免费（约 211s）' },
                   { key: 'H3 本地 · 768p', value: '免费（约 336s）' },
-                  { key: 'Seedance 云端', value: '按方舟官方计费' },
                 ]}
               />
             </div>

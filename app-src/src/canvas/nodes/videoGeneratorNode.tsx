@@ -2,7 +2,7 @@
  * videoGeneratorNode —— 26 个节点里最复杂的一个（报告 §4.1 / §8.3）。
  *
  * 它的参数面板必须覆盖：
- *   1. **模型选择**：H3 19 档（含 5SEG 五段流）+ Seedance 4 档，按后端分组
+ *   1. **模型选择**：H3 19 档（含 5SEG 五段流）
  *   2. **首尾帧**：首帧 / 尾帧（FL2V 模式必需），既可从连线来，也可手填地址
  *   3. **参考图**：最多 9 张（后端 validateShot 的硬约束）
  *   4. **五段流**：段数 1~5，每段独立提示词 + 起点图 + 时长；段间尾接头
@@ -20,7 +20,6 @@ import {
   getDefinition,
   paramGroupsFor,
   VIDEO_MODEL_OPTIONS,
-  SEEDANCE_MODEL_OPTIONS,
 } from '../nodeRegistry';
 import { paramList, paramNum, paramSegments, paramStr } from '../types';
 import {
@@ -40,10 +39,9 @@ import { useNodeActions } from '../nodeActions';
 
 const DEF = getDefinition('videoGeneratorNode');
 
-/** 模型下拉分组：H3 在前、Seedance 在后，各带分组标题 */
+/** 模型下拉分组：只剩本地 H3 一组 */
 const MODEL_GROUPS = [
   { title: 'H3 本地（19 档）', options: VIDEO_MODEL_OPTIONS.filter((o) => o.value.startsWith('h3:')) },
-  { title: 'Seedance 云端（4 档）', options: SEEDANCE_MODEL_OPTIONS.map((o) => ({ value: `seedance:${o.value}`, label: o.label })) },
 ];
 
 /* ========================================================================== */
@@ -82,12 +80,12 @@ export function VideoGeneratorNode(props: NodeProps) {
     '开关': false,
   });
 
-  const backendLabel = backend === 'seedance-cloud' ? 'Seedance' : 'H3';
+  const backendLabel = backend === 'mock' ? 'Mock' : 'H3';
   const slotLabel =
     MODEL_GROUPS.flatMap((g) => g.options).find((o) => o.value === model)?.label ?? model;
 
   const setBackend = (next: string) => {
-    // 切后端时同步挑一个该后端的档位，避免出现"后端=Seedance 但模型=h3:xxx"的非法组合
+    // 切后端时同步挑一个该后端的档位，避免出现"后端=某后端 但模型=别的后端档位"的非法组合
     const options = modelOptionsForBackend(next);
     const keep = options.some((o) => o.value === model) ? model : (options[0]?.value ?? 'h3:T2V');
     actions.patchParams(props.id, { backend: next, model: keep });
@@ -131,7 +129,7 @@ export function VideoGeneratorNode(props: NodeProps) {
     >
       {/* 模型摘要行（常显，不折叠） */}
       <div className="jz-node__vmodel" title={slotLabel}>
-        <Icon name={backend === 'seedance-cloud' ? 'spark' : 'cube'} size={12} />
+        <Icon name="cube" size={12} />
         <span className="jz-node__vmodel-name">{slotLabel}</span>
       </div>
 
@@ -143,7 +141,6 @@ export function VideoGeneratorNode(props: NodeProps) {
             value={backend}
             options={[
               { value: 'h3-local', label: 'H3 本地' },
-              { value: 'seedance-cloud', label: 'Seedance 云端' },
             ]}
             onChange={setBackend}
           />

@@ -53,12 +53,17 @@ export const WARDROBE_KINDS = Object.freeze([
 
 /* ------------------------------------------------------- 分镜导入 */
 
-/** 可识别的产物类型（参考实现 storyboardImport） */
+/**
+ * 可识别的产物类型（参考实现 storyboardImport）。
+ *
+ * 命名与 `kind` 都保持**后端中立**：导入能力认的是"文件长什么样"，
+ * 不是"哪个后端产的"。原本这里的 id/name 挂着一个已删除的云端后端名字，
+ * 会让用户以为导入只支持那一家；现在统一叫 `document`（分镜/镜头表/提示词）。
+ */
 export const IMPORT_SOURCES = Object.freeze([
-  { id: 'seedance-meta', name: 'Seedance 元数据', pattern: /seedance.*\.json$/i, kind: 'seedance' },
-  { id: 'seedance-storyboard', name: 'Seedance 分镜', pattern: /storyboard.*\.(json|md)$/i, kind: 'seedance' },
-  { id: 'seedance-shotlist', name: 'Seedance 镜头表', pattern: /shot.*list.*\.(json|csv)$/i, kind: 'seedance' },
-  { id: 'seedance-prompt', name: 'Seedance 提示词', pattern: /prompt.*\.txt$/i, kind: 'seedance' },
+  { id: 'storyboard', name: '分镜表', pattern: /storyboard.*\.(json|md)$/i, kind: 'document' },
+  { id: 'shotlist', name: '镜头表', pattern: /shot.*list.*\.(json|csv)$/i, kind: 'document' },
+  { id: 'prompt-text', name: '提示词文本', pattern: /prompt.*\.txt$/i, kind: 'document' },
   { id: 'h3-prompt-pack', name: 'H3 提示词包', pattern: /h3.*prompt.*\.(json|txt|md)$/i, kind: 'h3' },
   { id: 'h3-segments', name: 'H3 分段', pattern: /segment.*\.(json|md)$/i, kind: 'h3' },
   { id: 'h3-assets', name: 'H3 资产表', pattern: /asset.*\.(json|csv)$/i, kind: 'h3' },

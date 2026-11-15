@@ -155,7 +155,6 @@ export const PROFILES = Object.freeze({
   'P16-std':     { backend: 'h3-local', mp: 0.5,  steps: 4, cfg: 1.0, label: '12G 标准 544p（960×544）' },
   'P24-quality': { backend: 'h3-local', mp: 0.6,  steps: 4, cfg: 1.0, label: '12G 高质 608p（1056×608）' },
   'P768-quality':{ backend: 'h3-local', mp: 0.98, steps: 4, cfg: 1.0, label: '768p 官方档（1344×768）' },
-  'cloud-fallback': { backend: 'seedance-cloud', mp: 0.7, steps: 0, cfg: 0, label: '云端兜底（Seedance 1280×720）' },
 });
 
 export function profileOf(name) {

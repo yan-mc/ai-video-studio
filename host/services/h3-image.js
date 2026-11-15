@@ -42,9 +42,14 @@ export const IMAGE_SAMPLING = Object.freeze({
 
 /**
  * 官方原生尺寸表（宽 × 高）。
- * 模型调优面积约 16 MP；`auto` 走 2048×2048。
+ * 模型调优面积约 4.2 MP；`auto` 走 2048×2048。
  *
  * id 命名约定：`<方向>-<宽>:<高>`，方向 p=竖(portrait) / l=横(landscape) / sq=方 / v=竖屏视频 / h=横屏视频。
+ *
+ * ⚠️ `mp` 是**真实生效的显存/面积指标**，不是装饰字段。
+ *    历史缺陷：`mp` 以前只用来拼 UI 文案，从没参与任何判断 ——
+ *    于是 12GB 卡的用户可以直接在下拉里选 4096²（16.8 MP，是 2048² 的 4 倍面积）
+ *    然后 OOM。现在 `runH3Image` 会拿它跟 `imageMaxMP` 和实际空闲显存比对。
  *
  * ⚠️ 历史包袱（不要改 id，会破坏存量数据）：
  *    - `v-16x9` 的实际尺寸是 1440×2560（9:16 竖屏），id 里的 16x9 是**早期笔误**。
@@ -53,19 +58,29 @@ export const IMAGE_SAMPLING = Object.freeze({
  *      这里**改名为 `p-2x3-film`**（几何与名字对齐），旧 id 作为别名继续可用。
  */
 export const IMAGE_SIZES = Object.freeze([
-  { id: 'auto', name: '自动 2048²', w: 0, h: 0, mp: 4.2 },
-  { id: 'sq-2048', name: '方图 2048²', w: 2048, h: 2048, mp: 4.2 },
-  { id: 'p-4x3', name: '竖图 3:4', w: 1776, h: 2368, mp: 4.2 },
-  { id: 'l-4x3', name: '横图 4:3', w: 2368, h: 1776, mp: 4.2 },
-  { id: 'p-2x3-film', name: '人物卡 2:3', w: 1600, h: 2400, mp: 3.8 },
-  { id: 'v-16x9', name: '视频竖 9:16（id 为历史遗留）', w: 1440, h: 2560, mp: 3.7 },
-  { id: 'h-16x9', name: '视频横 16:9', w: 2560, h: 1440, mp: 3.7 },
-  { id: 'ecom-sq', name: '电商方图', w: 2048, h: 2048, mp: 4.2 },
-  { id: 'ecom-45', name: '电商竖 4:5', w: 1832, h: 2290, mp: 4.2 },
-  { id: 'comic-page', name: '漫画页 3:4', w: 1776, h: 2368, mp: 4.2 },
-  { id: 'h3-4k-sq', name: '4K 方图 4096²', w: 4096, h: 4096, mp: 16.8 },
-  { id: 'h3-4k-169', name: '4K 横 16:9', w: 5472, h: 3072, mp: 16.8 },
+  { id: 'auto', name: '自动 2048²', w: 0, h: 0, mp: 4.2, vramGb: 12 },
+  { id: 'sq-2048', name: '方图 2048²', w: 2048, h: 2048, mp: 4.2, vramGb: 12 },
+  { id: 'p-4x3', name: '竖图 3:4', w: 1776, h: 2368, mp: 4.2, vramGb: 12 },
+  { id: 'l-4x3', name: '横图 4:3', w: 2368, h: 1776, mp: 4.2, vramGb: 12 },
+  { id: 'p-2x3-film', name: '人物卡 2:3', w: 1600, h: 2400, mp: 3.8, vramGb: 12 },
+  { id: 'v-16x9', name: '视频竖 9:16（id 为历史遗留）', w: 1440, h: 2560, mp: 3.7, vramGb: 12 },
+  { id: 'h-16x9', name: '视频横 16:9', w: 2560, h: 1440, mp: 3.7, vramGb: 12 },
+  { id: 'ecom-sq', name: '电商方图', w: 2048, h: 2048, mp: 4.2, vramGb: 12 },
+  { id: 'ecom-45', name: '电商竖 4:5', w: 1832, h: 2290, mp: 4.2, vramGb: 12 },
+  { id: 'comic-page', name: '漫画页 3:4', w: 1776, h: 2368, mp: 4.2, vramGb: 12 },
+  // 4K 档：面积是 2048² 的 4 倍，12GB 卡必 OOM（README 实测 2048² 已用 11.4GB）
+  { id: 'h3-4k-sq', name: '4K 方图 4096²', w: 4096, h: 4096, mp: 16.8, vramGb: 48 },
+  { id: 'h3-4k-169', name: '4K 横 16:9', w: 5472, h: 3072, mp: 16.8, vramGb: 48 },
 ]);
+
+/**
+ * 默认出图面积上限（MP）。
+ *
+ * 为什么是 4.3：2048² = 4.19 MP 是本机（12GB）实测能跑的最大档，
+ * 再大就要 `--lowvram` 反复换页，耗时翻几倍且随时 OOM。
+ * 用户可以在配置里调 `imageMaxMP` 覆盖（有 48GB 卡的人应该调大）。
+ */
+export const DEFAULT_MAX_MP = 4.3;
 
 /** 旧尺寸 id → 新 id（历史数据兼容） */
 export const IMAGE_SIZE_ALIASES = Object.freeze({
@@ -249,6 +264,9 @@ export function normalizeImagePrompt(prompt, opts = {}) {
  */
 export async function runH3Image({
   workflow, job, prompt, sizeId = 'auto', width, height, refImages = [], cfg = loadConfig(), onSubmitted,
+  // 显式放行面积/显存守卫。只有明确知道自己在做什么的调用方（例如批量
+  // 后处理、离线超分）才该传 true；普通出图不要传。
+  allowOversize = false,
 }) {
   if (!workflow) throw new Error('WORKFLOW_MISSING: 缺少 data/workflows/h3-image.json');
 
@@ -260,6 +278,46 @@ export async function runH3Image({
   const size = imageSize(sizeId);
   const W = Number.isFinite(Number(width)) && Number(width) > 0 ? Math.round(Number(width) / 32) * 32 : size.w;
   const H = Number.isFinite(Number(height)) && Number(height) > 0 ? Math.round(Number(height) / 32) * 32 : size.h;
+
+  /* ---------------------------------------------------- 面积 / 显存守卫 */
+  //
+  // ⚠️ 历史缺陷：`IMAGE_SIZES` 无条件暴露 4096² 与 5472×3072（16.8 MP），
+  //    而 `runH3Image` 只做 /32 对齐，**没有任何面积或显存判断**。
+  //    README 实测 2048² 已用掉 11.4 GB / 12 GB —— 4K 是它的 4 倍面积，
+  //    用户在下拉里一点就 OOM，且错误信息来自 ComfyUI 内部（看不懂）。
+  //
+  //    现在两道闸：
+  //      ① 面积上限（默认 4.3 MP，可由 cfg.imageMaxMP 覆盖）
+  //      ② 空闲显存（拿得到 VRAM 状态时比对，防"面积合法但卡上没地方"）
+  //
+  //    两道闸都可**显式放行**：传 `allowOversize: true`（配置层调用方用）。
+  //    拒绝时说清楚上限是多少、去哪调，不要让用户猜。
+  const maxMP = Number.isFinite(Number(cfg?.imageMaxMP)) && Number(cfg.imageMaxMP) > 0
+    ? Number(cfg.imageMaxMP)
+    : DEFAULT_MAX_MP;
+  const wantMP = ((W || 2048) * (H || 2048)) / 1e6;
+  if (!allowOversize && wantMP > maxMP + 1e-6) {
+    const hint = size.vramGb ? `；该档建议 ${size.vramGb} GB 显存` : '';
+    throw new Error(
+      `IMAGE_TOO_LARGE: 请求 ${W || 2048}×${H || 2048} = ${wantMP.toFixed(1)} MP，`
+      + `超过上限 ${maxMP} MP${hint}。`
+      + `请在设置里改「单张出图面积上限」（imageMaxMP）或选更小的尺寸。`,
+    );
+  }
+
+  // 显存闸：只在拿得到空闲量时判断，拿不到就放过（不能让探测失败阻断生成）
+  if (!allowOversize) {
+    const vram = await comfy.vramStatus(cfg).catch(() => null);
+    const freeGb = Number(vram?.freeBytes) / (1024 ** 3);
+    // 面积每 1 MP 大约吃 2.6 GB（2048² 实测 11.4 GB 含模型常驻，这里只算增量）
+    const needGb = size.vramGb ?? Math.ceil(wantMP * 2.6);
+    if (Number.isFinite(freeGb) && freeGb > 0 && freeGb + 2 < needGb) {
+      throw new Error(
+        `IMAGE_VRAM_LOW: 空闲显存约 ${freeGb.toFixed(1)} GB，`
+        + `该尺寸估计需要 ${needGb} GB。请先关掉其它生成任务，或换小尺寸。`,
+      );
+    }
+  }
 
   // 参考图 → ComfyUI（编辑模式）。必须 await：图片没送进去就直接报错，
   // 不能像旧实现那样静默退化成纯文生图。

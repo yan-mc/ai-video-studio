@@ -12,7 +12,7 @@ import { compilePrompt, listShots, upsertShot, writeShots, cleanupProjectArtifac
 import { withVaultCards } from './services/shot-context.js';
 import { readWorkflowCached } from './services/workflow-paths.js';
 import * as comfy from './services/comfy-client.js';
-import * as seedanceClient from './services/seedance-client.js';
+import * as mockBackend from './services/mock-backend.js';
 import { extractAssets, segmentScript } from './services/h3-workshop.js';
 import { runH3Local } from './services/generator.js';
 import { SCRIPT_GENRES, SCRIPT_STAGES, checkConsistency } from './services/script-service.js';
@@ -107,7 +107,7 @@ export function registerTools(ctx) {
       nodeTypes: NODE_TYPES.map((t) => ({ type: t, label: NODE_LABELS[t] })),
       assetTypes: ASSET_TYPES.map((t) => ({ type: t, label: ASSET_TYPE_LABELS[t] })),
       projectCategories: PROJECT_CATEGORY_LABELS,
-      backends: { h3: await comfy.health(loadConfig()), seedance: { mode: seedanceClient.isAvailable(loadConfig()) ? 'real' : 'mock' } },
+      backends: { h3: await comfy.health(loadConfig()) },
       runtime: runtimeStats(),
     }),
   )));
@@ -289,13 +289,13 @@ export function registerTools(ctx) {
   /* ---------------------------------------------------------- 生成 */
   disposers.push(reg(tool(
     'studio_generate',
-    '提交生成任务。backend=h3-local|h3-image|seedance-cloud|mock。立即返回 job，异步执行。',
+    '提交生成任务。backend=h3-local|h3-image|mock。立即返回 job，异步执行。',
     {
       type: 'object',
       properties: {
         projectId: { type: 'string' },
         shotId: { type: 'string' },
-        backend: { type: 'string', enum: ['h3-local', 'h3-image', 'seedance-cloud', 'mock'] },
+        backend: { type: 'string', enum: ['h3-local', 'h3-image', 'mock'] },
         seed: { type: 'number' },
       },
       required: ['projectId', 'shotId'],
@@ -312,7 +312,7 @@ export function registerTools(ctx) {
       //    旧实现不校验，任何拼错的名字（甚至 'h3-image'）都会掉进最后的
       //    runMock 分支 → 产出 ffmpeg 占位视频且状态 completed，
       //    用户拿到"假视频"还以为成了。REST /generate 有这道校验，工具没有。
-      const VALID = new Set(['h3-local', 'h3-image', 'seedance-cloud', 'mock']);
+      const VALID = new Set(['h3-local', 'h3-image', 'mock']);
       if (!VALID.has(backendId)) {
         throw new Error(`UNKNOWN_BACKEND: ${JSON.stringify(backendId)} 不是有效后端。可选：${[...VALID].join(' / ')}`);
       }
@@ -356,8 +356,9 @@ export function registerTools(ctx) {
           cfg,
           onSubmitted: hooks?.onSubmitted,
         });
-        if (backendId === 'seedance-cloud') return seedanceClient.runSeedance({ cfg, job: running, shot: shotWithCards, prompt: running.prompt });
-        return seedanceClient.runMock({ cfg, job: running, shot: shotWithCards, prompt: running.prompt });
+        // mock 是**测试占位后端**（services/mock-backend.js）：只出 ffmpeg 色卡，
+        // 不做推理。真实产出走 h3-local / h3-image。
+        return mockBackend.runMock({ cfg, job: running, shot: shotWithCards, prompt: running.prompt });
       }).catch(() => {});
 
       return job;
@@ -387,7 +388,7 @@ export function registerTools(ctx) {
       if (args.action === 'cancel') {
         return (await cancelJob(args.jobId, async (job) => {
           // 与 API 层保持一致：只有真正提交到 ComfyUI 的本地后端才有远端可取消。
-          // 旧实现在这里不校验 backendId，对 mock / seedance 也会去调 /interrupt。
+          // 旧实现在这里不校验 backendId，对 mock 也会去调 /interrupt。
           if (job.remoteId && isLocalBackendOf(job.backendId)) {
             await comfy.cancelRemote(loadConfig(), job.remoteId);
           }

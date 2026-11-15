@@ -8,7 +8,6 @@
  */
 import {
   H3_MODEL_SLOT_OPTIONS,
-  SEEDANCE_MODEL_OPTIONS,
   DEFAULT_VIDEO_SEGMENTS,
 } from './nodeRegistry';
 import { paramList, paramNum, paramSegments, paramStr } from './types';
@@ -59,13 +58,16 @@ export const MODE_REQUIREMENTS: Readonly<
   '5seg': { segments: true },
 });
 
-/** 后端 → 该后端可用的模型档位 */
+/**
+ * 后端 → 该后端可用的模型档位。
+ *
+ * 现在只剩本地 H3 一个能出视频的后端（mock 是测试占位后端，档位沿用 H3 的），
+ * 所以函数保留但不再分支 —— 保留这层是因为调用点（切后端时同步挑档位）
+ * 需要"某个后端下有哪些合法档位"这个语义。
+ */
 export function modelOptionsForBackend(
-  backend: string,
+  _backend: string,
 ): ReadonlyArray<{ value: string; label: string }> {
-  if (backend === 'seedance-cloud') {
-    return SEEDANCE_MODEL_OPTIONS.map((o) => ({ value: `seedance:${o.value}`, label: o.label }));
-  }
   return H3_MODEL_SLOT_OPTIONS.map((o) => ({ value: `h3:${o.value}`, label: o.label }));
 }
 
@@ -73,9 +75,8 @@ export function modelOptionsForBackend(
 export function parseModelValue(value: string): { backend: string; slot: string } {
   const idx = value.indexOf(':');
   if (idx < 0) return { backend: 'h3-local', slot: value };
-  const prefix = value.slice(0, idx);
   return {
-    backend: prefix === 'seedance' ? 'seedance-cloud' : 'h3-local',
+    backend: 'h3-local',
     slot: value.slice(idx + 1),
   };
 }
@@ -186,7 +187,7 @@ export function summarizeVideoParams(params: Record<string, unknown> | undefined
   const segs = paramSegments(params, 'segments', DEFAULT_VIDEO_SEGMENTS);
   return {
     backend,
-    backendLabel: backend === 'seedance-cloud' ? 'Seedance' : 'H3',
+    backendLabel: backend === 'mock' ? 'Mock' : 'H3',
     model,
     mode,
     segmentCount: segs.length,

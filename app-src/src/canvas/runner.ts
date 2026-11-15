@@ -25,7 +25,7 @@ import type { CanvasFlowNode } from './types';
 // 具体后端在 runNodeGeneration 里按节点类型分发：
 //   - realtime  → 走 /image/generate（H3-Image 文生图）
 //   - imageEdit → 走 /breakdown/generate（参考图编辑）
-//   - video     → 走 /generate（H3 / Seedance / mock）
+//   - video     → 走 /generate（H3 本地 / mock 占位）
 /**
  * 哪些节点能发起生成、以及走哪条路线。
  *

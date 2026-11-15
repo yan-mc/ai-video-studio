@@ -50,7 +50,8 @@ function clearCancelled(jobId) { cancelled.delete(jobId); }
  *    runH3ImageLocal），于是视频和图像可以同时上 12GB 卡 → OOM。
  *    这两条链路现在都改成 withLocalSlot(...) 包一层。
  *
- * 非本地后端（seedance 云端）不占槽位。
+ * 非本地后端不占槽位（当前所有可用后端都是本地的，保留该判断是为了
+ * 将来接入远端服务时不必回头改并发闸门）。
  */
 export async function withLocalSlot(backendId, fn) {
   const local = isLocalBackend(backendId);

@@ -9,7 +9,7 @@
 
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 
-export type BackendId = 'h3-local' | 'seedance-cloud' | 'mock';
+export type BackendId = 'h3-local' | 'h3-image' | 'mock';
 
 export type ProjectCategory = 'drama' | 'comic' | 'ecommerce' | 'free' | 'uncategorized';
 
@@ -32,11 +32,6 @@ export interface AppConfig {
   assetRoot?: string;
   comfyUrl?: string;
   comfyInputDir?: string;
-  seedanceEndpoint?: string;
-  seedanceModel?: string;
-  /** 掩码后为 '***' */
-  seedanceApiKey?: string;
-  seedanceMock?: boolean;
   defaultBackend?: BackendId;
   defaultProfile?: string;
   maxConcurrentLocal?: number;
@@ -312,7 +307,6 @@ export interface MonitorPayload {
     [k: string]: unknown;
   };
   h3: HealthState;
-  seedance: { mode: 'real' | 'mock' };
   /** Blender 预演引擎状态（旧 three.js 引擎已下线） */
   blender: HealthState;
   disk: { freeBytes: number; totalBytes: number } | null;
@@ -322,7 +316,6 @@ export interface MonitorPayload {
 export interface HealthPayload {
   ok: boolean;
   h3: HealthState;
-  seedance: { ok?: boolean | string; detail?: string };
   /** Blender 预演引擎状态（旧 three.js 引擎已下线） */
   blender: HealthState;
 }

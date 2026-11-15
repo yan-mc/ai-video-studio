@@ -12,7 +12,7 @@
  * ③ 这里加定义；④ nodes/ 加组件；⑤ nodes/index.ts 加映射。缺一步测试会报。
  *
  * 参数来源：`02_报告/03_主UI_节点画布工作台.md` §4.1 的逐节点"功能要点"。
- * 模型档位来源：后端 `host/store/models.js` 的 H3_MODEL_SLOTS（19 档）与 Seedance 目录。
+ * 模型档位来源：后端 `host/store/models.js` 的 H3_MODEL_SLOTS（19 档）。
  */
 import { NODE_LABELS, NODE_TYPE_KEYS } from './nodeKeys';
 import type { NodeTypeKey } from './nodeKeys';
@@ -54,15 +54,7 @@ export const H3_MODEL_SLOT_OPTIONS: ReadonlyArray<{ value: string; label: string
   { value: 'U32', label: 'H3 · 专项 U32' },
 ];
 
-/** Seedance 云端模型（火山引擎 2.x 系列） */
-export const SEEDANCE_MODEL_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
-  { value: 'volc/doubao-seedance-2-5', label: 'Seedance 2.5' },
-  { value: 'volc/doubao-seedance-2-0', label: 'Seedance 2.0' },
-  { value: 'volc/doubao-seedance-2-0-mini', label: 'Seedance 2.0 Mini' },
-  { value: 'volc/doubao-seedance-2-0-fast', label: 'Seedance 2.0 Fast' },
-];
-
-/** 视频节点的模型选择：backend 决定可用档位（H3 19 档 / Seedance 4 档） */
+/** 视频节点的模型选择：只有一个本地后端，档位即 H3 的 19 档 */
 export const VIDEO_MODEL_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
   { value: 'h3:T2V', label: 'H3 本地 · 文生视频（T2V）' },
   { value: 'h3:I2V', label: 'H3 本地 · 图生视频（I2V）' },
@@ -71,7 +63,6 @@ export const VIDEO_MODEL_OPTIONS: ReadonlyArray<{ value: string; label: string }
   ...H3_MODEL_SLOT_OPTIONS.filter((o) => !['T2V', 'I2V', 'FLF', '5SEG'].includes(o.value)).map(
     (o) => ({ value: `h3:${o.value}`, label: o.label }),
   ),
-  ...SEEDANCE_MODEL_OPTIONS.map((o) => ({ value: `seedance:${o.value}`, label: o.label })),
 ];
 
 const ASPECT_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
@@ -84,13 +75,12 @@ const ASPECT_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
   { value: '2:1', label: '2:1 全景' },
 ];
 
-/** 六种生成档位（后端 PROFILES） */
+/** 四种生成档位（后端 PROFILES） */
 const PROFILE_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
   { value: 'P12-draft', label: 'P12 草稿 480p' },
   { value: 'P16-std', label: 'P16 标准 544p' },
   { value: 'P24-quality', label: 'P24 高质 608p' },
   { value: 'P768-quality', label: '768p 官方档' },
-  { value: 'cloud-fallback', label: '云端兜底 720p' },
 ];
 
 const LLM_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
@@ -597,7 +587,6 @@ const DEFS: NodeDefinition[] = [
         default: 'h3-local',
         options: [
           { value: 'h3-local', label: 'H3 本地（ComfyUI）' },
-          { value: 'seedance-cloud', label: 'Seedance 云端' },
         ],
       },
       {
@@ -769,13 +758,13 @@ const DEFS: NodeDefinition[] = [
     shortLabel: '剧集画布',
     icon: 'canvas',
     category: 'storyboard',
-    description: '镜头表：批量通过/退回/提交、Seedance 串行生成、尾帧继承、分镜板',
+    description: '镜头表：批量通过/退回/提交、串行生成、尾帧继承、分镜板',
     size: { width: 300, height: 320 },
     tone: 'accent',
     capabilities: { generative: true, preview: true, needsBackend: true },
     fields: [
       { kind: 'number', key: 'episode', label: '集号', min: 1, max: 60, step: 1, default: 1 },
-      { kind: 'switch', key: 'serialGenerate', label: '串行生成（Seedance）', default: true },
+      { kind: 'switch', key: 'serialGenerate', label: '串行生成', default: true },
       { kind: 'switch', key: 'inheritLastFrame', label: '尾帧继承', default: true },
       { kind: 'switch', key: 'autoSubmit', label: '完成后自动提交下一镜', default: false },
       {

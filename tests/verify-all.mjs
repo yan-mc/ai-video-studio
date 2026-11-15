@@ -156,7 +156,7 @@ const REQUIRED = [
   'host/api/index.js',
   'host/store/json-store.js', 'host/store/models.js',
   'host/services/job-runner.js', 'host/services/job-store.js', 'host/services/comfy-client.js',
-  'host/services/seedance-client.js', 'host/services/blender-service.js',
+  'host/services/mock-backend.js', 'host/services/blender-service.js',
   'host/services/h3-workshop.js', 'host/services/post.js', 'host/services/asset-service.js',
   'app-dist/index.html', 'data/workflows/h3.json',
 ];
@@ -176,7 +176,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'jz-verify-'));
 process.env.DSH_JZ_CONFIG_FILE = path.join(tmp, 'config.json');
 process.env.DSH_JZ_DATA_DIR = tmp;
 
-const { resetConfigCache, loadConfig, saveConfig, sanitizeConfigPatch, maskConfig } = await import('../host/config.js');
+const { resetConfigCache, loadConfig, saveConfig, sanitizeConfigPatch, maskConfig, DEPRECATED_CONFIG_KEYS, WRITABLE_CONFIG_KEYS } = await import('../host/config.js');
 resetConfigCache();
 const cfg = loadConfig();
 add('B-配置', '默认 dataDir 指向隔离目录', cfg.dataDir === tmp, cfg.dataDir);
@@ -186,9 +186,30 @@ const inj = sanitizeConfigPatch({ ffmpeg: 'C:/evil.exe', previzExe: 'x', comfyUr
 add('B-配置', 'ffmpeg 不可注入', !('ffmpeg' in inj));
 add('B-配置', 'previzExe 不可注入', !('previzExe' in inj));
 add('B-配置', 'comfyUrl 可配置', 'comfyUrl' in inj);
-add('B-配置', '掩码回填被丢弃', Object.keys(sanitizeConfigPatch({ seedanceApiKey: '***' })).length === 0);
-saveConfig({ seedanceApiKey: 'sk-test-123' });
-add('B-配置', '密钥读取时掩码', maskConfig(loadConfig()).seedanceApiKey === '***');
+
+// 掩码回填保护 —— 这条行为仍然成立，只是不再有"密钥类"配置键当样本：
+// 后端下发的是掩码值 '***'，如果前端原样回填，绝不能把库里已存的真实值覆盖掉。
+// 这里用仍可写的 comfyUrl 当样本（白名单内任何字符串键都走同一条清洗逻辑）。
+add('B-配置', '掩码回填被丢弃', Object.keys(sanitizeConfigPatch({ comfyUrl: '***' })).length === 0);
+saveConfig({ comfyUrl: 'http://127.0.0.1:9999' });
+// 模拟前端把 GET /config 的结果原样回填：'***' 不该覆盖已存值
+saveConfig(sanitizeConfigPatch({ comfyUrl: '***' }));
+add('B-配置', '掩码回填不覆盖已存值', loadConfig().comfyUrl === 'http://127.0.0.1:9999', loadConfig().comfyUrl);
+// 占位文案同样丢弃（"保持不变"不是真值）
+add('B-配置', '占位文案被丢弃', Object.keys(sanitizeConfigPatch({ comfyUrl: '*** 保持不变 ***' })).length === 0);
+// 读取侧：maskConfig 仍是"对外出口"，字段值原样保留（当前无敏感键）
+add('B-配置', 'maskConfig 不篡改普通键', maskConfig(loadConfig()).comfyUrl === 'http://127.0.0.1:9999');
+
+// 已废弃配置键：老 config.json 里的 Seedance 字段必须既读不回来、也写不进去
+{
+  const dep = new Set(DEPRECATED_CONFIG_KEYS);
+  const want = ['seedanceEndpoint', 'seedanceModel', 'seedanceApiKey', 'seedanceMock'];
+  add('B-配置', 'DEPRECATED 含 4 个 seedance 键', want.every((k) => dep.has(k)), [...dep].join(','));
+  add('B-配置', 'DEPRECATED 键不在写白名单', want.every((k) => !WRITABLE_CONFIG_KEYS.includes(k)));
+  const back = sanitizeConfigPatch({ seedanceApiKey: 'sk-old', seedanceEndpoint: 'http://x' });
+  add('B-配置', 'DEPRECATED 键无法重新写入', Object.keys(back).length === 0, JSON.stringify(back));
+  add('B-配置', 'DEPRECATED 键不回流到 cfg', !('seedanceApiKey' in loadConfig()));
+}
 
 // 安全
 const { safeId, safeJoin, isSameOrigin } = await import('../host/security.js');
@@ -214,7 +235,7 @@ const { NODE_TYPES, ASSET_TYPES, resolutionFor, h3Length, PROFILES, H3_MODEL_SLO
 add('B-模型', '26 种节点', NODE_TYPES.length === 26, NODE_TYPES.length);
 add('B-模型', '15 类资产（含人设卡）', ASSET_TYPES.length === 15, ASSET_TYPES.length);
 add('B-模型', '19 档 H3 槽位', H3_MODEL_SLOTS.length === 19, H3_MODEL_SLOTS.length);
-add('B-模型', '5 个生成档位', Object.keys(PROFILES).length === 5);
+add('B-模型', '4 个生成档位', Object.keys(PROFILES).length === 4);
 add('B-模型', 'P24 16:9 = 1056x608', resolutionFor('P24-quality', '16:9').width === 1056);
 add('B-模型', 'P24 9:16 = 608x1056', resolutionFor('P24-quality', '9:16').width === 608);
 add('B-模型', '5s = 124 帧', h3Length(5) === 124);
@@ -401,7 +422,7 @@ const comfy = await import('../host/services/comfy-client.js');
 // (6) 未知 backend 必须报错，不能静默降级成 mock 假视频
 {
   const { VALID_BACKENDS } = await import('../host/api/index.js');
-  add('B-后端', 'backend 有显式枚举', VALID_BACKENDS.size >= 4, [...VALID_BACKENDS].join(','));
+  add('B-后端', 'backend 枚举恰好 3 个', VALID_BACKENDS.size === 3, [...VALID_BACKENDS].join(','));
   const apiSrc = fs.readFileSync(path.join(ROOT, 'host/api/index.js'), 'utf8');
   add('B-后端', '未知 backend 抛 UNKNOWN_BACKEND', apiSrc.includes('UNKNOWN_BACKEND'));
   // 兜底不能是无条件 runMock
@@ -411,9 +432,82 @@ const comfy = await import('../host/services/comfy-client.js');
 // (7) h3-image 必须算本地后端（否则绕过并发闸门 + 取消不发 /interrupt）
 {
   const { LOCAL_BACKENDS, isLocalBackendOf } = await import('../host/services/job-store.js');
+  const { VALID_BACKENDS } = await import('../host/api/index.js');
   add('B-后端', 'h3-image 在 LOCAL_BACKENDS 内', LOCAL_BACKENDS.has('h3-image'));
   add('B-后端', 'h3-image 被识别为本地后端', isLocalBackendOf('h3-image'));
+  // seedance-cloud 已被整体删除：两个集合都不该再认它
   add('B-后端', 'seedance-cloud 不是本地后端', !isLocalBackendOf('seedance-cloud'));
+  add('B-后端', 'seedance-cloud 已不在 VALID_BACKENDS 内', !VALID_BACKENDS.has('seedance-cloud'));
+  // mock 仍是合法后端（测试占位），且仍走并发闸门
+  add('B-后端', 'mock 仍是合法后端', VALID_BACKENDS.has('mock') && isLocalBackendOf('mock'));
+}
+
+/* ============================================================
+ * B-清理：Seedance 云端后端已整体删除（死链路清理的验收网）
+ *
+ * 这一组存在的意义：删除一个横跨 host + SPA + 测试的特性，最容易留下的
+ * 是"半条命"——某个 import 还指着旧文件、某个枚举里还写着 old id、
+ * 某个 UI 下拉还留着一项。这些都不会让现有测试变红，只会在运行时炸。
+ * 所以这里直接对**源码文本**做否定断言，并且允许一个白名单例外：
+ * config.js 的 DEPRECATED_CONFIG_KEYS 与解释性注释（那是刻意保留的）。
+ * ============================================================ */
+
+{
+  // ① 旧客户端文件必须真的没了
+  add('B-清理', 'seedance-client.js 已删除',
+    !fs.existsSync(path.join(ROOT, 'host/services/seedance-client.js')));
+
+  // ② host/ 与 app-src/src/ 里不允许再出现该标识符（大小写不敏感）——
+  //    但只针对**代码**：注释里保留一句历史沿革（"这段是从旧客户端拆出来的"）
+  //    是允许的，它不参与运行。所以先剥注释再查。
+  const stripComments = (s) => s
+    .replace(/\/\*[\s\S]*?\*\//g, '')      // 块注释
+    .replace(/(^|[^:\\])\/\/[^\n]*/g, '$1'); // 行注释（避开 http:// 这类）
+  const SCAN_DIRS = ['host', 'app-src/src'];
+  const ALLOW = new Set(['host/config.js']);   // 废弃键清单必须留着旧键名
+  const codeHits = [];
+  const commentHits = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(path.join(ROOT, dir), { withFileTypes: true })) {
+      const rel = `${dir}/${e.name}`;
+      if (e.isDirectory()) { walk(rel); continue; }
+      if (!/\.(js|ts|tsx|mjs)$/.test(e.name)) continue;
+      if (ALLOW.has(rel)) continue;
+      const src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+      if (/seedance/i.test(stripComments(src))) codeHits.push(rel);
+      else if (/seedance/i.test(src)) commentHits.push(rel);
+    }
+  };
+  for (const d of SCAN_DIRS) walk(d);
+  add('B-清理', 'host/ 与 app-src/src/ 无残留代码引用', codeHits.length === 0, codeHits.join(', '));
+  // 注释里只允许"历史沿革"式提及，且必须落在已知的少数文件上
+  const COMMENT_OK = new Set(['host/services/ffmpeg-tools.js']);
+  add('B-清理', '残留注释提及仅限历史沿革说明',
+    commentHits.every((r) => COMMENT_OK.has(r)), commentHits.join(', '));
+
+  // ③ 唯一允许的例外：config.js 的废弃键清单必须**恰好**包含这 4 个键
+  const cfgSrc = fs.readFileSync(path.join(ROOT, 'host/config.js'), 'utf8');
+  const depStart = cfgSrc.indexOf('export const DEPRECATED_CONFIG_KEYS');
+  // 从 depStart 之后再找 WRITABLE —— 废弃键的说明注释里也会提到 WRITABLE，
+  // 直接 indexOf 会取到注释里的那一次，把切片切空。
+  const depEnd = depStart >= 0 ? cfgSrc.indexOf('export const WRITABLE_CONFIG_KEYS', depStart) : -1;
+  const depBlock = depStart >= 0 && depEnd > depStart ? cfgSrc.slice(depStart, depEnd) : '';
+  const depKeys = ['seedanceEndpoint', 'seedanceModel', 'seedanceApiKey', 'seedanceMock'];
+  add('B-清理', 'config.js 废弃键清单保留 4 个旧键',
+    depKeys.every((k) => depBlock.includes(k)), depKeys.filter((k) => !depBlock.includes(k)).join(','));
+  // 同时确认它们没混回写白名单
+  add('B-清理', '废弃键不在 WRITABLE_CONFIG_KEYS',
+    depKeys.every((k) => !WRITABLE_CONFIG_KEYS.includes(k)));
+
+  // 新后端模块只导出 runMock + PLACEHOLDER，不得再带云端残留
+  const mockSrc = fs.readFileSync(path.join(ROOT, 'host/services/mock-backend.js'), 'utf8');
+  add('B-清理', 'mock-backend 导出 PLACEHOLDER', /export const PLACEHOLDER = true/.test(mockSrc));
+  add('B-清理', 'mock-backend 导出 runMock', /export async function runMock\(/.test(mockSrc));
+  add('B-清理', 'mock-backend 无 fetch/云端调用', !/\bfetch\(|Authorization|Bearer/.test(mockSrc));
+
+  // ④ PROFILES 不再有云端兜底档位
+  add('B-清理', 'PROFILES 无 cloud-fallback', !('cloud-fallback' in PROFILES),
+    Object.keys(PROFILES).join(','));
 }
 
 
@@ -667,8 +761,8 @@ const comfy = await import('../host/services/comfy-client.js');
   const comfySrc = fs.readFileSync(path.join(ROOT, 'host/services/comfy-client.js'), 'utf8');
   add('B-可移植', 'comfy 产出含 rel', /rel:\s*toRel\(/.test(comfySrc));
   add('B-可移植', 'toRel 已导出', /export function toRel\(/.test(comfySrc));
-  const seedSrc = fs.readFileSync(path.join(ROOT, 'host/services/seedance-client.js'), 'utf8');
-  add('B-可移植', 'seedance 产出含 rel', (seedSrc.match(/rel:\s*toRel\(/g) || []).length >= 2);
+  const mockSrc = fs.readFileSync(path.join(ROOT, 'host/services/mock-backend.js'), 'utf8');
+  add('B-可移植', 'mock 产出含 rel', (mockSrc.match(/rel:\s*toRel\(/g) || []).length >= 1);
 }
 
 // (12) post / extractFrame 对图片输入要报清晰错误
@@ -1103,7 +1197,7 @@ const comfy = await import('../host/services/comfy-client.js');
     const seg = toolsSrc.slice(toolsSrc.indexOf("'studio_generate'"), toolsSrc.indexOf("'studio_jobs'"));
     add('B-回归', 'R4 studio_generate 校验后端名', /UNKNOWN_BACKEND/.test(seg));
     add('B-回归', 'R4 studio_generate 有 h3-image 分支', /runH3ImageLocal/.test(seg));
-    add('B-回归', 'R4 不再有"未知后端掉进 mock"', !/return seedanceClient\.runMock[\s\S]{0,40}\}\s*\);\s*\n\s*\}\)\;\s*\n\s*return job/.test(seg) || /VALID\.has\(backendId\)/.test(seg));
+    add('B-回归', 'R4 不再有"未知后端掉进 mock"', /VALID\.has\(backendId\)/.test(seg) && !/return\s+\w+\.runMock[\s\S]{0,40}\}\s*\);\s*\n\s*\}\);\s*\n\s*return job/.test(seg));
     add('B-回归', 'R5 studio_generate 解析角色卡', /withVaultCards/.test(seg));
   }
 

@@ -130,7 +130,6 @@ function TopBar({ route }: { route: RouteId }) {
 
   const h3Ok = monitor?.h3?.ok;
   const previzOk = monitor?.blender?.ok;
-  const seedanceMode = monitor?.seedance?.mode;
   const currentLabel = t(NAV.find((n) => n.key === route)?.labelKey ?? 'nav.canvas');
 
   const dot = (v: boolean | string | undefined): string =>
@@ -161,10 +160,6 @@ function TopBar({ route }: { route: RouteId }) {
         <span className="jz-status__item" title={t('settings.healthH3')}>
           <i className={dot(h3Ok)} />
           H3
-        </span>
-        <span className="jz-status__item" title={t('settings.healthSeedance')}>
-          <i className={seedanceMode === 'real' ? 'jz-dot jz-dot--ok' : 'jz-dot jz-dot--mid'} />
-          Seedance {seedanceMode === 'real' ? '' : 'Mock'}
         </span>
         <span className="jz-status__item" title={t('settings.healthBlender')}>
           <i className={dot(previzOk)} />

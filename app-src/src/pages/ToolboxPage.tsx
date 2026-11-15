@@ -226,7 +226,7 @@ export function ToolboxPanel() {
         {domain === 'import' ? (
           <div className="jz-col" style={{ gap: 'var(--jz-sp-4)' }}>
             <Panel title="扫描目录">
-              <Field label="目录绝对路径" hint="识别 seedance / H3 产物">
+              <Field label="目录绝对路径" hint="识别分镜表 / 镜头表 / 提示词 / H3 产物">
                 <Input value={scanDir} onChange={(e) => setScanDir(e.target.value)} mono placeholder="项目\第01集\产物 或 绝对路径" />
               </Field>
               <Button variant="primary" style={{ marginTop: 8 }} onClick={() => void doScan()} disabled={busy}>扫描</Button>

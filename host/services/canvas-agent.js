@@ -7,7 +7,6 @@
  *           skill_task_status / update_node / insert_image / batch /
  *           delete_node / generate_image / generate_video / call_skill
  *  4 权限位：canWriteCanvas / canSpend / canDelete / autoRun
- *  沙箱 run_script：10 秒、无网络、无 DOM
  *
  * 定位差异（重要）：
  *  参考实现这 17 个是**画布内** Agent 工具 —— 用户在画布上与 AI 对话，
@@ -21,6 +20,8 @@
  *  - 所有变更返回 diff（前端可预览/撤销）
  */
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
 /** 4 个权限位（实测） */
 export const CANVAS_PERMISSIONS = Object.freeze([
@@ -73,17 +74,86 @@ export const DEFAULT_CANVAS_PERMISSIONS = Object.freeze({
  *    真正的边界必须在服务端。
  *
  * 现在：服务端维护一份权威权限，请求体里同名字段一律忽略。
+ *
+ * ⚠️ 第二个历史缺陷（本条更严重）：`setCanvasPermission()` 曾经**全仓库零调用**，
+ *    而 `canSpend` / `canDelete` 的初值都是 false —— 于是
+ *    `generate_image` / `generate_video` / `delete_node` / `call_skill`
+ *    四个工具**永久不可用**，用户没有任何办法开启；前端那 4 个开关
+ *    只改本地 React state，从来不上送。
+ *
+ *    现在补了 HTTP 入口 `POST /canvas-agent/permissions`（写操作受
+ *    X-JZ-Token + 同源校验保护），并把授权结果持久化到 dataDir，
+ *    重启后不用每次重开。
  */
 const SERVER_PERMISSIONS = { ...DEFAULT_CANVAS_PERMISSIONS };
+
+/**
+ * 权限持久化文件。
+ * 权限是"用户对我的信任级别"，属于配置性状态，应当跨重启保留。
+ */
+let _permFile = null;
+function permissionsFile(cfg) {
+  if (_permFile) return _permFile;
+  try {
+    const dir = cfg?.dataDir;
+    if (dir) _permFile = path.join(dir, 'canvas-permissions.json');
+  } catch { /* ignore */ }
+  return _permFile;
+}
+
+/** 从磁盘载入权限（启动/首次读取时调一次；失败回落默认值） */
+export function loadCanvasPermissions(cfg) {
+  const f = permissionsFile(cfg);
+  if (!f) return getCanvasPermissions();
+  try {
+    const raw = JSON.parse(fs.readFileSync(f, 'utf8') || '{}');
+    for (const k of Object.keys(SERVER_PERMISSIONS)) {
+      if (typeof raw[k] === 'boolean') SERVER_PERMISSIONS[k] = raw[k];
+    }
+  } catch { /* 文件不存在或损坏 → 保留当前值 */ }
+  return getCanvasPermissions();
+}
 
 export function getCanvasPermissions() {
   return { ...SERVER_PERMISSIONS };
 }
 
-/** 显式授权（供设置页/Agent 决策调用，不接受 HTTP 直接改） */
-export function setCanvasPermission(key, value) {
+/**
+ * 显式授权 —— **有 HTTP 入口**（`POST /canvas-agent/permissions`）。
+ *
+ * 每次变更都落盘，避免"重启后又要重新授权"。
+ * `cfg` 可选：不传就只改内存（测试用）。
+ */
+export function setCanvasPermission(key, value, cfg = null) {
   if (!(key in SERVER_PERMISSIONS)) throw new Error(`UNKNOWN_PERMISSION: ${key}`);
   SERVER_PERMISSIONS[key] = Boolean(value);
+  const f = cfg ? permissionsFile(cfg) : null;
+  if (f) {
+    try {
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      const tmp = `${f}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(SERVER_PERMISSIONS, null, 2), 'utf8');
+      fs.renameSync(tmp, f);
+    } catch { /* 落盘失败不影响本次授权，只是重启后要重开 */ }
+  }
+  return getCanvasPermissions();
+}
+
+/** 批量授权（前端一次提交多个开关） */
+export function setCanvasPermissions(patch, cfg = null) {
+  if (!patch || typeof patch !== 'object') return getCanvasPermissions();
+  for (const [k, v] of Object.entries(patch)) {
+    if (k in SERVER_PERMISSIONS) SERVER_PERMISSIONS[k] = Boolean(v);
+  }
+  const f = cfg ? permissionsFile(cfg) : null;
+  if (f) {
+    try {
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      const tmp = `${f}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(SERVER_PERMISSIONS, null, 2), 'utf8');
+      fs.renameSync(tmp, f);
+    } catch { /* ignore */ }
+  }
   return getCanvasPermissions();
 }
 
@@ -273,6 +343,12 @@ export function createCanvasAgent({ cfg, getProject, listAssets, runGenerate, ru
           position: args.position ?? { x: Number(args.x) || 0, y: Number(args.y) || 0 },
           data: {
             title: text(args.title) || '插入的图片',
+            // ⚠️ 数据契约必须与画布渲染一致。
+            //    以前写进 `params.fileUrl`，而画布只读 `result.url`
+            //    （见 app-src/src/canvas/nodes/_shared.tsx 的 PreviewBox）→
+            //    节点插进去了但**显示为空占位**，用户以为没生效。
+            //    上传链路（CanvasArea）写的就是 `{url, path}`，这里对齐它。
+            result: { url: src },
             params: { fileUrl: src },
           },
         };
@@ -342,7 +418,11 @@ export function createCanvasAgent({ cfg, getProject, listAssets, runGenerate, ru
       tools: CANVAS_TOOLS,
       permissions: CANVAS_PERMISSIONS,
       defaults: DEFAULT_CANVAS_PERMISSIONS,
-      runScript: RUN_SCRIPT_LIMITS,
+      // ⚠️ 这里以前下发 `runScript: RUN_SCRIPT_LIMITS`，宣称有一个
+      //     "10 秒、无网络、无 DOM 的沙箱 run_script 工具" ——
+      //     但 CANVAS_TOOLS 里**没有这个工具**，exec() 的 switch 也没有
+      //     对应 case。这个字段只是把一份不存在的限制原样吐给前端，
+      //     属于"文档里承诺了、代码里没有"的幽灵功能，已删除。
     };
   }
 

@@ -18,7 +18,14 @@ import path from 'node:path';
 import { resolveUserPath, safeId } from '../security.js';
 import { loadConfig } from '../config.js';
 
-/** 11 套版式模板（实测） */
+/**
+ * 11 套版式模板（实测）。
+ *
+ * ⚠️ 模板的 `cells` 字段才是**真实格数** —— `perPage` 以前用 `rows × cols`，
+ *    让 top_wide/bottom_wide 以为自己有 4 格（实际 3 格）、five_panel 以为 6 格
+ *    （实际 5 格），多出来的格无处安放 → 叠在别的格上。
+ *    现在统一走 `templatePanelCount()`。
+ */
 export const LAYOUT_TEMPLATES = Object.freeze([
   { id: 'splash', name: '整页单格', rows: 1, cols: 1 },
   { id: 'split_h', name: '横双格', rows: 2, cols: 1 },
@@ -27,9 +34,12 @@ export const LAYOUT_TEMPLATES = Object.freeze([
   { id: 'grid_3x1', name: '三横格', rows: 3, cols: 1 },
   { id: 'grid_2x3', name: '六宫格（2×3）', rows: 2, cols: 3 },
   { id: 'grid_3x2', name: '六宫格（3×2）', rows: 3, cols: 2 },
-  { id: 'top_wide', name: '上宽下双', rows: 2, cols: 2, special: 'top_wide' },
-  { id: 'bottom_wide', name: '上双下宽', rows: 2, cols: 2, special: 'bottom_wide' },
-  { id: 'five_panel', name: '五格分布', rows: 3, cols: 2, special: 'five' },
+  // 上宽下双：上排 1 格 + 下排 2 格 = 3 格（cols=2 即下排格数）
+  { id: 'top_wide', name: '上宽下双', rows: 1, cols: 2, special: 'top_wide', cells: 3 },
+  // 上双下宽：上排 2 格 + 下排 1 格 = 3 格（cols=2 即上排格数）
+  { id: 'bottom_wide', name: '上双下宽', rows: 1, cols: 2, special: 'bottom_wide', cells: 3 },
+  // 五格分布：上 2×2 + 底部整宽 = 5 格
+  { id: 'five_panel', name: '五格分布', rows: 1, cols: 5, special: 'five', cells: 5 },
   { id: 'strip_4', name: '条漫四格', rows: 4, cols: 1 },
 ]);
 
@@ -66,7 +76,7 @@ export function extractBoardFromText(text, { pages = 1, template = 'grid_2x2' } 
   if (!src) return { pages: [] };
 
   const tpl = LAYOUT_TEMPLATES.find((t) => t.id === template) ?? LAYOUT_TEMPLATES[3];
-  const perPage = tpl.rows * tpl.cols;
+  const perPage = templatePanelCount(tpl);
   const pageCount = Math.max(1, Math.min(100, Number(pages) || 1));
 
   // 按段落/句号切分镜
@@ -99,22 +109,105 @@ export function extractBoardFromText(text, { pages = 1, template = 'grid_2x2' } 
 
 /**
  * 计算一格在页面里的归一化几何（0..1）。
- * 参考实现有独立的 geom 编辑器，这里给出模板默认几何。
+ *
+ * ⚠️ 三套"特殊版式"以前全部算错，实测几何两两相交或越界：
+ *
+ *   top_wide   (旧 rows:2 cols:2)  i=3 → x=1.0, x+w=1.5  **越界到画布外**
+ *   bottom_wide(旧 rows:2 cols:2)  i=2 → 与整宽底栏 i=3 左侧半边**完全重叠**
+ *   five_panel (旧 rows:3 cols:2)  i=4 → 与整宽底栏 i=5 **完全重叠**（且叫五格出六格）
+ *
+ * 根因是"特殊格"抢占了默认网格的位置，但默认网格没有同步让位。
+ * 现在的做法：**先按版式规则重新定义整套格位**，再按 i 取值 ——
+ * 不再"先铺满网格再打补丁"。
+ *
+ * @param {object} tpl 版式模板
+ * @param {number} i   格序号（从 0 开始）
  */
 export function panelGeometry(tpl, i) {
-  const { rows, cols, special } = tpl;
+  const cells = layoutCells(tpl);
+  if (i >= 0 && i < cells.length) return cells[i];
+  // 超出模板格数：退化成按网格铺（调用方一般不会走到这里）
+  const { rows, cols } = tpl;
   const w = 1 / cols;
   const h = 1 / rows;
-  let r = Math.floor(i / cols);
-  let c = i % cols;
+  return { x: (i % cols) * w, y: Math.floor(i / cols) * h, w, h };
+}
 
-  // 特殊版式：顶/底整宽
-  if (special === 'top_wide' && i === 0) return { x: 0, y: 0, w: 1, h: h };
-  if (special === 'top_wide' && i > 0) { r = 1; c = i - 1; return { x: c * (1 / 2), y: h, w: 1 / 2, h }; }
-  if (special === 'bottom_wide' && i === rows * cols - 1) return { x: 0, y: 1 - h, w: 1, h };
-  if (special === 'five' && i === rows * cols - 1) return { x: 0, y: 2 / 3, w: 1, h: 1 / 3 };
+/**
+ * 一套版式的**全部格位**（按阅读顺序）。
+ *
+ * 这是几何的**唯一真源**：`panelGeometry(i)` 只是它的索引访问。
+ * 单独抽出来是因为 preflight 需要遍历所有格做越界/重叠检测。
+ */
+export function layoutCells(tpl) {
+  const { rows, cols, special } = tpl;
 
-  return { x: c * w, y: r * h, w, h };
+  // ---- 上宽下双：上排整宽 1 格，下排等分 2（或更多）格 ----
+  //
+  // ⚠️ 分层不能用 `rows`：这些特殊版式的 rows 是为了让"默认分支"有个
+  //    合理退化值才写的 1，直接拿它当高度会把上排铺满整页。
+  //    这里把"两层"写死（TOP_SPLIT = 0.5），与 cols 解耦。
+  if (special === 'top_wide') {
+    const below = Math.max(1, cols);            // 下排格数
+    const topH = 0.5;                           // 上排占一半
+    const cells = [{ x: 0, y: 0, w: 1, h: topH }];
+    for (let k = 0; k < below; k += 1) {
+      cells.push({ x: k / below, y: topH, w: 1 / below, h: 1 - topH });
+    }
+    return cells;
+  }
+
+  // ---- 上双下宽：上排等分，下排整宽 1 格 ----
+  if (special === 'bottom_wide') {
+    const above = Math.max(1, cols);            // 上排格数
+    const bottomH = 0.5;                        // 下排占一半
+    const cells = [];
+    for (let k = 0; k < above; k += 1) {
+      cells.push({ x: k / above, y: 0, w: 1 / above, h: 1 - bottomH });
+    }
+    cells.push({ x: 0, y: 1 - bottomH, w: 1, h: bottomH });
+    return cells;
+  }
+
+  // ---- 五格：上 2×2 四格 + 底部整宽一格 ----
+  //
+  // 以前模板写 rows:3 cols:2（6 格）再把最后一格改成整宽 →
+  // 第 5 格被整宽那格盖住。现在直接定义成 5 格，名字与格数一致。
+  if (special === 'five') {
+    const half = 2 / 3;                          // 上四格占上方 2/3
+    const cells = [
+      { x: 0, y: 0, w: 0.5, h: half / 2 },
+      { x: 0.5, y: 0, w: 0.5, h: half / 2 },
+      { x: 0, y: half / 2, w: 0.5, h: half / 2 },
+      { x: 0.5, y: half / 2, w: 0.5, h: half / 2 },
+      { x: 0, y: half, w: 1, h: 1 - half },
+    ];
+    return cells;
+  }
+
+  // ---- 默认：规则网格 ----
+  const w = 1 / cols;
+  const h = 1 / rows;
+  const cells = [];
+  for (let r = 0; r < rows; r += 1) {
+    for (let c = 0; c < cols; c += 1) {
+      cells.push({ x: c * w, y: r * h, w, h });
+    }
+  }
+  return cells;
+}
+
+/**
+ * 一个版式的**真实格数**。
+ *
+ * ⚠️ 不能再用 `rows * cols` 当格数：特殊版式的 rows/cols 是为了让
+ *    "默认分支"有个合理退化值，它们的真实格数写在 `cells` 字段。
+ *    以前 `perPage = rows * cols` 让 top_wide 以为自己有 4 格（实际 3 格），
+ *    抽出来的第 4 格无处安放 → 叠在别的格上。
+ */
+export function templatePanelCount(tpl) {
+  if (Number.isFinite(tpl?.cells) && tpl.cells > 0) return tpl.cells;
+  return (tpl?.rows ?? 1) * (tpl?.cols ?? 1);
 }
 
 /* --------------------------------------------------------- 拼版导出（本地） */
@@ -278,7 +371,7 @@ export function createComicService({ cfg, getCfg = loadConfig }) {
     const page = (cur.pages ?? []).find((p) => p.index === pageIndex);
     if (!page) throw new Error('PAGE_NOT_FOUND');
 
-    const perPage = tpl.rows * tpl.cols;
+    const perPage = templatePanelCount(tpl);
     const panels = Array.from({ length: perPage }, (_, i) => ({
       index: i + 1,
       text: page.panels?.[i]?.text ?? '',
@@ -294,29 +387,41 @@ export function createComicService({ cfg, getCfg = loadConfig }) {
     return next;
   }
 
+  /**
+   * 把一页里已出的格图内嵌成 data URI，让 SVG 自包含。
+   *
+   * ⚠️ 抽成单一实现是**修漏洞**，不是为了整洁：
+   *    `exportPageSvg` 早就用 `resolveUserPath({mustExist:true})` 做了越界校验，
+   *    但 `exportAllSvg` 还留着裸 `path.join(dataDir, imageRel)`。
+   *    `imageRel` 是**数据文件里的字段**，`/comic` 的写接口可以把它塞成
+   *    `"../../../Windows/System32/drivers/etc/hosts"` ——
+   *    `path.join` 不做越界检查，于是 `/comic/export/all`
+   *    能把数据目录外的**任意文件** base64 内嵌进导出 SVG。
+   *    两条实现必须共用同一段代码，否则下次还会漂。
+   */
+  function inlinePanelImages(page) {
+    const images = {};
+    for (const pn of page?.panels ?? []) {
+      if (!pn.imageRel) continue;
+      try {
+        const abs = resolveUserPath({ root: C().dataDir, input: pn.imageRel, mustExist: true });
+        if (!fs.existsSync(abs)) continue;
+        const buf = fs.readFileSync(abs);
+        const ext = path.extname(abs).toLowerCase();
+        const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+        images[pn.imageRel] = `data:${mime};base64,${buf.toString('base64')}`;
+      } catch { /* 越界 / 不存在 / 读失败：跳过这一格，不炸整页导出 */ }
+    }
+    return images;
+  }
+
   /** 导出单页 SVG（零费用本地渲染） */
   function exportPageSvg(projectId, pageIndex, opts = {}) {
     const cur = load(projectId);
     if (!cur) throw new Error('COMIC_NOT_FOUND');
     const page = (cur.pages ?? []).find((p) => p.index === pageIndex);
     if (!page) throw new Error('PAGE_NOT_FOUND');
-    // 把已出的格图内嵌成 data URI，让 SVG 自包含
-    const images = {};
-    for (const pn of page.panels ?? []) {
-      if (!pn.imageRel) continue;
-      try {
-        // ⚠️ 必须走 resolveUserPath：imageRel 是**数据文件里的字段**，
-        //    可以被 /comic 的写接口塞进 "../../../x.png"，
-        //    path.join 不做越界检查 → 任意文件被 base64 内嵌进导出 SVG。
-        const abs = resolveUserPath({ root: C().dataDir, input: pn.imageRel, mustExist: true });
-        if (fs.existsSync(abs)) {
-          const buf = fs.readFileSync(abs);
-          const ext = path.extname(abs).toLowerCase();
-          const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
-          images[pn.imageRel] = `data:${mime};base64,${buf.toString('base64')}`;
-        }
-      } catch { /* ignore */ }
-    }
+    const images = inlinePanelImages(page);
     const svg = renderPageSvg(page, { ...opts, images });
     const outDir = path.join(C().dataDir, 'comic', 'export');
     fs.mkdirSync(outDir, { recursive: true });
@@ -339,20 +444,7 @@ export function createComicService({ cfg, getCfg = loadConfig }) {
     fs.mkdirSync(outDir, { recursive: true });
     const files = [];
     for (const page of cur.pages ?? []) {
-      // 内嵌已出的格图
-      const images = {};
-      for (const pn of page.panels ?? []) {
-        if (!pn.imageRel) continue;
-        try {
-          const abs = path.join(C().dataDir, pn.imageRel);
-          if (fs.existsSync(abs)) {
-            const buf = fs.readFileSync(abs);
-            const ext = path.extname(abs).toLowerCase();
-            const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
-            images[pn.imageRel] = `data:${mime};base64,${buf.toString('base64')}`;
-          }
-        } catch { /* ignore */ }
-      }
+      const images = inlinePanelImages(page);
       const svg = renderPageSvg(page, { ...opts, images });
       const out = path.join(outDir, `page_${page.index}_${Date.now().toString(36)}.svg`);
       fs.writeFileSync(out, svg, 'utf8');
@@ -398,7 +490,13 @@ export function createComicService({ cfg, getCfg = loadConfig }) {
         // 本格内容
         if (pn.text) parts.push(`画面内容：${pn.text}`);
         // 构图
-        parts.push(`构图：单格漫画分镜，${pn.geometry ? '横向构图' : '方形构图'}，主体居中，留出对白空间`);
+        //
+        // ⚠️ 以前写成 `pn.geometry ? '横向构图' : '方形构图'` ——
+        //    geometry 是必填对象、永远 truthy，所以**恒为横向**。
+        //    现在按真实宽高比判断。
+        const g = pn.geometry ?? {};
+        const widePanel = (Number(g.w) || 1) >= (Number(g.h) || 1);
+        parts.push(`构图：单格漫画分镜，${widePanel ? '横向' : '纵向'}构图，主体居中，留出对白空间`);
         // 台词提示（不要求模型写字，只提示氛围）
         if (pn.bubble) parts.push(`情绪氛围：角色正在说话，${pn.bubble}`);
         // 质量

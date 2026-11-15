@@ -10,7 +10,7 @@ import { loadConfig, saveConfig, maskConfig, sanitizeConfigPatch, resetConfigCac
 import { guard, safeId, safeJoin, resolveUserPath, getWriteToken, isSameOrigin as _isSameOrigin, isLoopbackHost as _isLoopbackHost } from '../security.js';
 import { dirs, projects, newProject, newShot, validateShot, PROFILES, resolutionFor, h3Length, H3_MODEL_SLOTS, NODE_TYPES, NODE_LABELS, ASSET_TYPES, ASSET_TYPE_LABELS, PROJECT_CATEGORY_LABELS, normalizeMode, normalizeControl, normalizeActors, normalizeProps, normalizeCamera3d, listActionCatalog } from '../store/models.js';
 import * as comfy from '../services/comfy-client.js';
-import * as seedance from '../services/seedance-client.js';
+import * as mockBackend from '../services/mock-backend.js';
 import { runJob, cancelJob, runtimeStats, markCancelled, withLocalSlot, CancelledError } from '../services/job-runner.js';
 import { newJob, jobs as jobsStore, isLocalBackendOf } from '../services/job-store.js';
 import { runH3Local, runH3ImageLocal, jobKind } from '../services/generator.js';
@@ -28,7 +28,7 @@ import { buildRenderPlan, subjectsForPrompt, buildMediaNotes } from '../services
 import { probeMedia } from '../services/media-probe.js';
 import { blenderStatus, buildSceneSpec, renderControl, BLENDER_MODES, listModelAssets, listAssetActions, openInBlender, prunePrevizRuns } from '../services/blender-service.js';
 import { resolveFfmpeg } from '../services/ffmpeg-tools.js';
-import { createCanvasAgent, getCanvasPermissions } from '../services/canvas-agent.js';
+import { createCanvasAgent, getCanvasPermissions, setCanvasPermissions, loadCanvasPermissions } from '../services/canvas-agent.js';
 import { getRuntime } from '../runtime.js';
 // 工作流模板定位 —— 单一真源（模板随插件分发，不跟随 dataDir）
 import { readWorkflowCached, workflowDiagnostics } from '../services/workflow-paths.js';
@@ -40,7 +40,7 @@ import {
 /* ------------------------------------------------------------- 工具函数 */
 
 /** 合法后端枚举 —— 单一真源，路由与执行器共用 */
-export const VALID_BACKENDS = new Set(['h3-local', 'h3-image', 'seedance-cloud', 'mock']);
+export const VALID_BACKENDS = new Set(['h3-local', 'h3-image', 'mock']);
 
 async function readJsonBody(req, limit = 4 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
@@ -220,6 +220,10 @@ export async function handleApi(req, res) {
 
     const cfg = loadConfig();
 
+    // 画布 Agent 的权限位落盘在 dataDir 里，首次用到时载入一次。
+    // （loadCanvasPermissions 只在文件不存在/损坏时静默回落默认值）
+    if (route.startsWith('/canvas-agent')) loadCanvasPermissions(cfg);
+
     /* ---------------- 监测器 / 元信息 ---------------- */
     if (req.method === 'GET' && route === '/monitor') {
       return sendJson(res, 200, await monitorPayload(ctx));
@@ -237,17 +241,13 @@ export async function handleApi(req, res) {
       });
     }
     if (req.method === 'GET' && route === '/health') {
-      const [h3, sd] = await Promise.all([
-        comfy.health(cfg),
-        Promise.resolve({ ok: seedance.isAvailable(cfg) ? true : 'mock', detail: seedance.isAvailable(cfg) ? 'Seedance 已配置' : 'Seedance 走 Mock（无 key）' }),
-      ]);
+      const h3 = await comfy.health(cfg);
       // 工作流模板是否就位 —— 首装最容易踩的坑，直接在健康检查里暴露
       const wfH3 = workflowDiagnostics('h3', cfg);
       const wfImg = workflowDiagnostics('image', cfg);
       return sendJson(res, 200, {
         ok: true,
         h3,
-        seedance: sd,
         blender: blenderStatus(),
         workflows: {
           h3: { exists: wfH3.exists, dir: wfH3.dir },
@@ -1128,7 +1128,24 @@ export async function handleApi(req, res) {
 
     /* ---------------- 画布内置 Agent ---------------- */
     if (req.method === 'GET' && route === '/canvas-agent/meta') {
-      return sendJson(res, 200, ctx.canvasAgent.meta());
+      return sendJson(res, 200, { ...ctx.canvasAgent.meta(), permissions: getCanvasPermissions() });
+    }
+    /**
+     * 授权写入口 —— **修 P0**。
+     *
+     * 历史缺陷：`setCanvasPermission()` 全仓库零调用，而 canSpend/canDelete
+     * 的初值都是 false → generate_image / generate_video / delete_node /
+     * call_skill 四个工具**永久不可用**，前端 4 个开关只改本地 state。
+     *
+     * 这条路由是 PUT/PATCH 语义的写操作，已经过 guard() 的
+     * 同源校验 + X-JZ-Token 校验，所以可以放心接受调用。
+     * 授权结果落盘（dataDir/canvas-permissions.json），重启后保留。
+     */
+    if ((req.method === 'POST' || req.method === 'PUT') && route === '/canvas-agent/permissions') {
+      const body = await readJsonBody(req);
+      const patch = body?.permissions ?? body ?? {};
+      const next = setCanvasPermissions(patch, cfg);
+      return sendJson(res, 200, { ok: true, permissions: next });
     }
     if (req.method === 'POST' && route === '/canvas-agent/exec') {
       const body = await readJsonBody(req);
@@ -1184,8 +1201,15 @@ export async function handleApi(req, res) {
         return sendJson(res, 400, { error: 'IMAGE_MODEL_MISSING', missing: models.missing });
       }
 
-      // 尺寸按用途映射
-      const sizeId = job.mode === 'film' ? 'p-2x3-film' : 'ecom-sq';
+      // 尺寸：优先用作业里用户选的，没选才按用途兜底。
+      //
+      // ⚠️ 以前硬编码 `job.mode === 'film' ? 'p-2x3-film' : 'ecom-sq'`，
+      //    `job.sizeId`（用户在页面上选的 ecom-45 / film-916 / film-21）
+      //    被完全忽略 —— 用户改尺寸没反应，且不报错。
+      const hasSize = ctx.mw.sizes().some((s) => s.id === job.sizeId);
+      const sizeId = hasSize
+        ? job.sizeId
+        : (job.mode === 'film' ? 'p-2x3-film' : 'ecom-sq');
       const seed = body.seed ?? Math.floor(Math.random() * 2147483647);
 
       // 异步跑，立即返回
@@ -1399,8 +1423,8 @@ export async function handleApi(req, res) {
     /* ---------------- 文件服务（产物/资产，带 Range） ---------------- */
     //
     // ⚠️ 只允许 dataDir 下的**指定子目录**，不是整个 dataDir。
-    //    safeJoin 挡住了 `../`，但 dataDir 根下还有 config.json（含明文
-    //    seedanceApiKey）、jobs.json、projects.json 等。实测
+    //    safeJoin 挡住了 `../`，但 dataDir 根下还有 config.json（可能含明文
+    //    密钥等敏感字段）、jobs.json、projects.json 等。实测
     //    `/file?path=config.json` 会 200 并把掩码保护的密钥原样吐出来 ——
     //    等于绕过了 /config 的掩码。
     //    这些文件没有任何前端需要，直接排除。
@@ -1910,7 +1934,6 @@ async function monitorPayload(ctx) {
   return {
     jobs: { total: allJobs.length, running, queued, failed, ...stats },
     h3,
-    seedance: { mode: seedance.isAvailable(cfg) ? 'real' : 'mock' },
     blender: blenderStatus(),
     disk: diskFree(cfg.dataDir),
     updatedAt: Date.now(),
@@ -1950,21 +1973,20 @@ async function executeBackend(job, shot, ctx, cfg, hooks) {
     return runH3ImageLocal({ workflow: wf, job, shot, prompt, cfg, onSubmitted });
   }
 
-  if (job.backendId === 'seedance-cloud') {
-    return seedance.runSeedance({ cfg, job, shot, prompt });
-  }
-
   // ⚠️ 只有显式 backendId === 'mock' 才走 mock。
+  //    mock 是**测试占位后端**（services/mock-backend.js）：它不做任何推理，
+  //    只用 ffmpeg 出一张把提示词烧在画面上的色卡视频，供无显卡环境下跑通
+  //    流程。真实产出必须走 h3-local / h3-image。
   //    修掉"未知 backend 静默降级成 mock"：以前任何拼错的后端名（如写 'h3'
   //    而不是 'h3-local'）都会落进 mock，生成 ffmpeg 占位视频且状态 completed，
   //    用户拿到"假视频"还以为成了。
   if (job.backendId === 'mock') {
-    return seedance.runMock({ cfg, job, shot, prompt });
+    return mockBackend.runMock({ cfg, job, shot, prompt });
   }
 
   throw new Error(
     `UNKNOWN_BACKEND: ${JSON.stringify(job.backendId)} 不是有效后端。`
-    + `可选：h3-local / h3-image / seedance-cloud / mock`,
+    + `可选：h3-local / h3-image / mock`,
   );
 }
 

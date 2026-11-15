@@ -25,6 +25,31 @@ Blender 预演渲染器 —— 把镜头场景 JSON 渲成 H3 能吃的控制序
   pose   —— 骨架火柴人序列，对应 pose 条件
   canny  —— 硬边缘序列，对应 canny 条件
   gray   —— 灰模整体渲染，对应 gray 条件
+  preview —— 给人看的彩色灰模（不走控制通道）
+  blockout —— **灰模参考视频**（社区标准交付物，见下）
+
+关于 `blockout`（常规替代方案，推荐默认）
+--------------------------------------------------------------------------
+社区主流做法不是"渲四条控制通道喂进控制塔"，而是：
+
+    Blender 白模（只管运动与空间） → 一段灰模参考视频
+      → H3 `MiniMaxH3ReferenceToVideo.ref_videos.ref_video_1`
+      → 六段式提示词里用 `<Video 1>` 声明"只取运镜/走位/节奏"
+
+区别：
+  · depth/pose/canny/gray 是**控制塔（Fun ControlNet）**的输入，
+    需要额外的 control patch 模型，且通道间会互相打架（skip 相加会过饱和）。
+  · blockout 是**参考视频**，不需要额外模型，直接吃 Ref2VA。
+    实测：180° 环绕用 blockout 参考 6/6 成功，纯文字 0/6 稳定。
+
+blockout 的渲染要求（与 preview 的差别，都是有理由的）：
+  · **平光 + 无阴影 + 无 AO + 无轮廓线**：任何方向性光影都会被模型
+    当成"要生成的光照"，从而与提示词里的光影描述打架。
+  · **可辨色（MATERIAL）而不是纯灰**：多角色时必须靠颜色区分身份
+    （研究原话："an all-gray playblast has lost identity"）。
+    单角色时反而建议单色，避免模型把色号当成服装配色。
+  · **不高光、无景深、无运动模糊**：这些是"成片特征"，会被参考视频带进输出。
+  · 帧数必须等于目标模型的帧数（H3 是 17k+5，5 秒 = 124 帧）。
 
 产物写到 <outDir>/<mode>/f_%05d.png 与 <outDir>/<mode>/control.mp4（ffmpeg 由 JS 侧调）。
 """
@@ -603,6 +628,54 @@ def setup_workbench_gray():
     sc.render.film_transparent = False
     sc.world = bpy.data.worlds.new("W") if not sc.world else sc.world
     sc.world.color = (0.05, 0.055, 0.06)
+
+
+def setup_blockout(scene, colored=True):
+    """灰模**参考视频**模式 —— 社区标准交付物（不是控制塔通道）。
+
+    与 setup_preview 的差别都是刻意的：
+
+    | 项 | preview（给人看） | blockout（给模型当参考） |
+    |---|---|---|
+    | 光照 | STUDIO 带方向，有阴影 | **FLAT 平光**，关阴影、关 AO |
+    | 颜色 | MATERIAL 彩色 | 多角色 MATTER 彩色 / 单角色 SINGLE 灰 |
+    | 轮廓线 | 有 | **无**（轮廓线会变成画面里的墨线） |
+    | 高光/腔体 | 有 | **关**（会被当成材质高光） |
+
+    为什么关阴影/AO：参考视频会被 H3 整段 24fps VAE 编码进同一序列，
+    光影与材质会被一起复刻（社区为此专门做了 ReferenceVideoFade patch）。
+    平光 + 无阴影是"纯结构说明书"，模型只会拿到运动与空间。
+
+    为什么多角色要上色：全灰 playblast 会让模型丢失身份区分，
+    实测多人同框时左右会互换。色号也在提示词里被引用
+    （"<Subject 1> 的走位对应画面里那个红色高个胶囊体"）。
+    """
+    scene.render.engine = "BLENDER_WORKBENCH"
+    sh = scene.display.shading
+    # FLAT = 无方向性光照。STUDIO 会引入固定主光方向，模型会照抄。
+    sh.light = "FLAT"
+    if colored:
+        # MATERIAL：用材质色（演员按 color 字段上色），身份靠颜色区分
+        sh.color_type = "MATERIAL"
+    else:
+        # SINGLE：单色灰 —— 单角色场景避免模型把灰当配色
+        sh.color_type = "SINGLE"
+        sh.single_color = (0.72, 0.72, 0.72)
+    # 下面四项全部关掉：任何"成片特征"都会被参考视频带进输出
+    sh.show_shadows = False
+    sh.show_cavity = False
+    sh.show_object_outline = False
+    sh.show_specular_highlight = False
+    scene.display.render_aa = "8"
+    scene.render.film_transparent = False
+    if scene.world is None:
+        scene.world = bpy.data.worlds.new("JZ_Blockout_World")
+    scene.world.color = (0.12, 0.12, 0.13)
+    # 不做胶片调色：blockout 要的是"原样"的结构，不是好看的画面
+    scene.view_settings.view_transform = "Standard"
+    scene.view_settings.look = "None"
+    # 参考视频会被 H3 按 24fps 读取，帧率必须与目标模型一致
+    scene.render.fps = int(SPEC.get("fps") or 24)
 
 
 def compute_depth_range(spec, dmin_allowed=0.05):
@@ -1296,6 +1369,11 @@ def main():
         pose_rigs = setup_pose(scene, actor_objs)
     elif MODE == "canny" or MODE == "gray":
         setup_workbench_gray()
+    elif MODE == "blockout":
+        # 多角色上色（身份区分），单角色灰（避免灰被当成配色）。
+        # 阈值与理由见 setup_blockout 的 docstring。
+        n_actors = len(spec.get("actors") or [])
+        setup_blockout(scene, colored=(n_actors > 1))
     elif MODE == "preview":
         # 给人看的彩色灰模（不进 H3）
         setup_preview(scene)

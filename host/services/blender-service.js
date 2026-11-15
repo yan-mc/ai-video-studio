@@ -26,13 +26,49 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { loadConfig } from '../config.js';
 import { safeJoin } from '../security.js';
-import { DEFAULT_CAMERA3D } from '../store/models.js';
+import { DEFAULT_CAMERA3D, h3Length } from '../store/models.js';
 
-/** 支持的输出通道 —— 与 render_shot.py 的 MODE 一一对应 */
-export const BLENDER_MODES = Object.freeze(['depth', 'pose', 'canny', 'gray', 'preview']);
+/**
+ * 支持的输出通道 —— 与 render_shot.py 的 MODE 一一对应。
+ *
+ * 分两类，别混：
+ *
+ *  **控制塔通道**（CONTROL_MODES）：depth / pose / canny / gray
+ *    喂给 H3 Fun ControlNet Union。需要额外 4.22 GB 的 control patch 模型，
+ *    且通道之间会互相打架（skip 相加 → 过饱和，实测 depth 1.0 + pose 1.0
+ *    约等于单塔 2.0，画面发白人物糊）。
+ *
+ *  **参考视频通道**（REFERENCE_MODES）：blockout
+ *    **社区标准交付物**。Blender 只负责运动与空间，渲一段灰模视频，
+ *    直接进 Ref2VA 的 `ref_videos.ref_video_1`，不需要任何额外模型。
+ *    实测：180° 环绕用 blockout 参考 6/6 成功，纯文字 0/6 稳定。
+ *
+ *  **人眼预览**：preview（彩色灰模，不参与任何生成）
+ */
+export const BLENDER_MODES = Object.freeze(['depth', 'pose', 'canny', 'gray', 'preview', 'blockout']);
 
-/** 控制通道（喂给 H3 的）；preview 只给人看，不参与控制 */
+/** 控制塔通道（喂给 Fun ControlNet） */
 export const CONTROL_MODES = Object.freeze(['depth', 'pose', 'canny', 'gray']);
+
+/**
+ * 参考视频通道（喂给 Ref2VA 的 ref_videos）—— **常规替代方案**。
+ *
+ * 为什么把 blockout 单独列出来：它的用途、接法与四个控制通道完全不同。
+ * 以前把它们混成一个"控制视频"概念，用户既分不清该渲哪个，也不知道
+ * 渲完该填到镜头卡的哪个字段。
+ */
+export const REFERENCE_MODES = Object.freeze(['blockout']);
+
+/** 这个人眼预览，不参与生成 */
+export const PREVIEW_MODES = Object.freeze(['preview']);
+
+/** 某个 mode 的产物该怎么用 */
+export function modeUsage(mode) {
+  if (CONTROL_MODES.includes(mode)) return 'control';
+  if (REFERENCE_MODES.includes(mode)) return 'reference';
+  if (PREVIEW_MODES.includes(mode)) return 'preview';
+  return 'unknown';
+}
 
 const HERE = import.meta.dirname;
 const SCRIPT = path.join(HERE, '..', 'blender', 'render_shot.py');
@@ -90,8 +126,36 @@ export function blenderStatus() {
     exe,
     available,
     modes: [...BLENDER_MODES],
+    // 分类给前端：让用户一眼看出"该渲哪个"
+    controlModes: [...CONTROL_MODES],
+    referenceModes: [...REFERENCE_MODES],
+    previewModes: [...PREVIEW_MODES],
     script: fs.existsSync(SCRIPT) ? SCRIPT : null,
     detail: available ? '已就绪' : '未找到 Blender（设 DSH_BLENDER 或放入 tools/blender-<版本>）',
+    /**
+     * 推荐路线 —— 常规替代方案优先。
+     *
+     * 为什么默认推荐 blockout 而不是 depth：控制塔要多下一个 4.22 GB 模型，
+     * 单镜耗时 +83%，还要调 depth/pose 的强度配比；而灰模参考视频**零额外成本**，
+     * 且社区实测成功率更高。控制塔只在"必须硬锁结构"时才值得。
+     */
+    recommended: 'blockout',
+    routes: [
+      {
+        id: 'blockout',
+        name: '灰模参考视频（推荐）',
+        mode: 'blockout',
+        needsExtraModel: false,
+        description: 'Blender 只渲一段灰模视频 → 填进镜头「参考视频」→ Ref2VA 的 <Video N> 取运镜与走位。不需要任何额外模型。',
+      },
+      {
+        id: 'control',
+        name: '控制塔（结构锁）',
+        mode: 'depth',
+        needsExtraModel: true,
+        description: '渲 depth/pose → 填进镜头「控制视频」→ Fun ControlNet。需 4.22 GB control patch，单镜耗时 +83%。建议 depth 0.3 + pose 0.7。',
+      },
+    ],
   };
 }
 
@@ -349,7 +413,21 @@ export function sizeForRatio(ratio, pixels = 0.4 * 1024 * 1024) {
 export function buildSceneSpec(shot, opts = {}) {
   const fps = 24;
   const dur = Math.min(15, Math.max(1, Number(shot?.durationSec) || 5));
-  const frames = Math.max(5, Math.round(opts.frames || dur * fps));
+
+  /**
+   * 帧数必须落在 H3 的 `17k+5` 网格上。
+   *
+   * ⚠️ 历史缺陷：这里以前写 `frames = round(dur * fps)`，5 秒 → **120 帧**。
+   *    而 H3 的长度约束是 17k+5（124 / 141 / … / 362），120 根本不是合法值。
+   *    后果：渲出来的控制/参考视频比目标视频**短 4 帧**，尾部的走位没人跟，
+   *    模型只能自己编最后 1/6 秒 —— 表现为"最后一下动作突然失真"。
+   *    参考视频被裁短这件事，社区已经专门记录过（120 帧 blockout 被裁成 107）。
+   *
+   *    现在统一按 h3Length() 取网格值，与生成时用的 `{{LENGTH}}` 完全一致。
+   *    （h3Length 是 store/models.js 的**单一真源**，不要再在别处重算。）
+   */
+  const frames = Math.max(5, Math.round(opts.frames || h3Length(dur)));
+
   const { width, height } = sizeForRatio(shot?.ratio, opts.pixels);
 
   const derived = !Array.isArray(shot?.actors) || shot.actors.length === 0;
@@ -536,6 +614,7 @@ export async function renderControl({ mode, spec, cfg = loadConfig(), jobId = ''
   return {
     ok: true,
     mode,
+    usage: modeUsage(mode),
     dir: framesDir,
     mp4,
     rel: path.relative(cfg.dataDir, mp4).replace(/\\/g, '/'),
@@ -548,6 +627,12 @@ export async function renderControl({ mode, spec, cfg = loadConfig(), jobId = ''
     blender: st.exe,
     exitCode: r.code,
     missingAssets: prepared.missing,
+    // 直接告诉调用方"这个产物该填到哪"
+    hint: modeUsage(mode) === 'control'
+      ? '填进镜头的「控制视频」字段（shot.control.videoRel），走 Fun ControlNet'
+      : modeUsage(mode) === 'reference'
+        ? '填进镜头的「参考视频」列表（shot.refs.videos），走 Ref2VA 的 <Video N>'
+        : '仅供人眼验收，不要填进镜头卡',
   };
 }
 

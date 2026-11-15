@@ -11,7 +11,7 @@
  *
  * 本实现策略：
  *  - **完整状态机 + 数据模型 + 规则引擎先落地**（不依赖图像模型）
- *  - 出图走已有的 H3/Seedance 通道；未配图像模型时给出明确的"待接"提示
+ *  - 出图走已有的 H3 通道；未配图像模型时给出明确的"待接"提示
  *  - 镜头清单由套件模板 + 风格展开，可逐镜改
  */
 import fs from 'node:fs';
@@ -146,8 +146,19 @@ export function suiteShots({ mode = 'ecom', count, kind = 'person' } = {}) {
 export function planPrompts(job) {
   const mode = job.mode ?? 'ecom';
   const styles = mode === 'film' ? FILM_STYLES : ECOM_STYLES;
-  const style = typeof job.style === 'string' && job.style.trim()
-    ? { id: 'custom', name: job.style, hint: job.style }
+
+  /**
+   * 风格解析 —— 自定义优先。
+   *
+   * ⚠️ 历史缺陷：这里以前只判断 `job.style`，而 `createJob` 存的是
+   *    **`customStyle`**，全仓库没有任何地方给 `job.style` 赋值。
+   *    于是用户在「自定义风格」输入框里写的原文**永远不生效**，
+   *    而且不报错 —— 属于最难被发现的一类失效。
+   *    现在优先读 `customStyle`（`job.style` 保留做旧数据兼容）。
+   */
+  const custom = String(job.customStyle ?? job.style ?? '').trim();
+  const style = custom
+    ? { id: 'custom', name: custom, hint: custom }
     : styles.find((s) => s.id === job.styleId) ?? styles[0];
 
   const size = MW_SIZES.find((s) => s.id === job.sizeId) ?? MW_SIZES[0];
@@ -501,6 +512,8 @@ export function createModelWorkbench({ cfg, getCfg = loadConfig }) {
     savePlan, applyPlan, deletePlan, listPlans,
     listFigureItems, upsertFigure, deleteFigure,
     planPrompts, dir, runGeneration,
+    /** 尺寸表（供 API 校验作业里选的 sizeId 是否合法） */
+    sizes: () => MW_SIZES,
   };
 }
 

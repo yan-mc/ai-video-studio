@@ -33,10 +33,6 @@ const DEFAULTS = Object.freeze({
   workflowDir: '',
   comfyUrl: 'http://127.0.0.1:8188',
   comfyInputDir: '',
-  seedanceEndpoint: 'https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks',
-  seedanceModel: '',
-  seedanceApiKey: '',
-  seedanceMock: true,           // 无 key 时走 mock，保证全流程可测
   defaultBackend: 'h3-local',
   defaultProfile: 'P12-draft',
   maxConcurrentLocal: 1,
@@ -48,6 +44,9 @@ const DEFAULTS = Object.freeze({
   imageModelRoot: '',               // 空 = 自动推导为 comfyInputDir 的兄弟目录 models
   imageSizeId: 'auto',              // auto = 2048x2048
   imageSteps: 6,                    // 采样步数（蒸馏 checkpoint 默认 6；夹在 4–12）
+  // 单张出图面积上限（MP）。2048² = 4.19 MP 是 12GB 卡实测能跑的最大档，
+  // 4K 档（16.8 MP）需要 48GB 以上。调大之前先确认显存，否则必 OOM。
+  imageMaxMP: 4.3,
   // 模型文件名覆盖（key 见 generator.js 的 MODEL_DEFAULTS）。
   // 空 = 自动从 ComfyUI 的实际列表里挑（见 resolveModelNames），
   // 所以**不需要**为了换个量化版本去改代码。
@@ -62,17 +61,27 @@ const DEFAULTS = Object.freeze({
  *   `<workspace>/工作室/资产包/`。现已移除；存量配置里的该字段会在
  *   下次 saveConfig 时自然丢弃（sanitizeConfigPatch 只取白名单键）。
  * `imageBackend`：同上，路由始终走 'h3-image'，没有第二实现可选。
+ * `seedanceEndpoint` / `seedanceModel` / `seedanceApiKey` / `seedanceMock`：
+ *   Seedance（火山方舟）云端后端已整体删除 —— 它从来没有过 API key，
+ *   是一条永远走占位产物的死链路。这四个键列入此处有**两个**目的：
+ *     1) 存量 config.json 里残留的值不会被 `pick(WRITABLE_CONFIG_KEYS)`
+ *        重新捞回运行时配置（否则老用户升级后 `cfg.seedanceApiKey` 还在，
+ *        肉眼看不出后端已经没了）；
+ *     2) 声明式记录"这些键曾经存在、为什么消失"，避免以后又被加回来。
+ *   注意它们**不在** `WRITABLE_CONFIG_KEYS` 内，因此不会再被写盘。
  */
-export const DEPRECATED_CONFIG_KEYS = Object.freeze(['assetRoot', 'imageBackend']);
+export const DEPRECATED_CONFIG_KEYS = Object.freeze([
+  'assetRoot', 'imageBackend',
+  'seedanceEndpoint', 'seedanceModel', 'seedanceApiKey', 'seedanceMock',
+]);
 
 /** 允许通过 API 修改的字段（白名单）。可执行路径类字段刻意不在其中。 */
 export const WRITABLE_CONFIG_KEYS = Object.freeze([
   'dataDir', 'workflowDir', 'comfyUrl', 'comfyInputDir',
-  'seedanceEndpoint', 'seedanceModel', 'seedanceApiKey', 'seedanceMock',
   'defaultBackend', 'defaultProfile', 'maxConcurrentLocal',
   'theme', 'accent', 'locale',
   // 图像生成（H3-Image）
-  'imageModelRoot', 'imageSizeId', 'imageSteps', 'modelNames',
+  'imageModelRoot', 'imageSizeId', 'imageSteps', 'imageMaxMP', 'modelNames',
 ]);
 
 let cache = null;
@@ -139,10 +148,20 @@ export function saveConfig(patch) {
   return next;
 }
 
-/** 对外输出时掩码敏感字段 */
+/**
+ * 需要对外掩码的敏感配置键 —— 目前**为空**。
+ *
+ * 原本这里只有 `seedanceApiKey`，而 Seedance 后端已整体删除（其配置键见
+ * `DEPRECATED_CONFIG_KEYS`）。常量与下面的掩码循环刻意保留：`/config` 的
+ * 对外契约里"读回来的密钥一律是 `***`"这一条不能因为暂时没有密钥类配置就
+ * 失传，以后再加任何密钥键只需往这里加一项，所有调用点自动生效。
+ */
+const SENSITIVE_CONFIG_KEYS = Object.freeze([]);
+
+/** 对外输出时掩码敏感字段（当前无敏感键，等价于浅拷贝） */
 export function maskConfig(cfg = loadConfig()) {
   const out = { ...cfg };
-  for (const key of ['seedanceApiKey']) {
+  for (const key of SENSITIVE_CONFIG_KEYS) {
     if (out[key]) out[key] = '***';
   }
   return out;
