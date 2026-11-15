@@ -483,12 +483,13 @@ export function createComicService({ cfg, getCfg = loadConfig }) {
         const parts = [];
         // 画风（英文优先，模型对英文画风响应更准）
         parts.push(styleText);
+        // 质量词紧跟画风 —— 不能放末尾（放末尾会被当成画面要求，
+        // 实测被模型抄进对话框）
+        parts.push('高质量，细节清晰，线条干净');
         // 角色
         if (charDesc) parts.push(`角色：${charDesc}`);
         // 场景
         if (sceneDesc) parts.push(`场景：${sceneDesc}`);
-        // 本格内容
-        if (pn.text) parts.push(`画面内容：${pn.text}`);
         // 构图
         //
         // ⚠️ 以前写成 `pn.geometry ? '横向构图' : '方形构图'` ——
@@ -496,11 +497,34 @@ export function createComicService({ cfg, getCfg = loadConfig }) {
         //    现在按真实宽高比判断。
         const g = pn.geometry ?? {};
         const widePanel = (Number(g.w) || 1) >= (Number(g.h) || 1);
-        parts.push(`构图：单格漫画分镜，${widePanel ? '横向' : '纵向'}构图，主体居中，留出对白空间`);
-        // 台词提示（不要求模型写字，只提示氛围）
-        if (pn.bubble) parts.push(`情绪氛围：角色正在说话，${pn.bubble}`);
-        // 质量
-        parts.push('高质量，细节清晰，线条干净');
+
+        /**
+         * 对白处理 —— **实测踩过的坑**。
+         *
+         * 旧提示词无条件写「留出对白空间」但不给台词时，模型会自己在那个
+         * 空间里画一个对话框，并把提示词里的文字（"高质量，细节清晰"）
+         * 抄进去当台词 —— 成片里出现气泡写着"高质量，细节清晰"。
+         * （见 docs/probes/e2e-2026-11-15/）
+         *
+         * 所以三种情况必须分开写：
+         *   ① 有台词 → 明确给出要写在气泡里的原文
+         *   ② 无台词 → 明确「本格无对白、不要画对话框」
+         */
+        const bubble = String(pn.bubble ?? '').trim();
+        const speaker = String(pn.speaker ?? '').trim();
+        if (bubble) {
+          parts.push(
+            `构图：单格漫画分镜，${widePanel ? '横向' : '纵向'}构图，主体居中，`
+            + `画面中${speaker ? `${speaker}的` : ''}对话框内写「${bubble}」`,
+          );
+        } else {
+          parts.push(
+            `构图：单格漫画分镜，${widePanel ? '横向' : '纵向'}构图，主体居中，`
+            + '本格没有对白，画面中不要出现任何对话框、文字或标注',
+          );
+        }
+        // 本格内容（放构图之后，让"画面内容"成为最后的强约束）
+        if (pn.text) parts.push(`画面内容：${pn.text}`);
 
         plans.push({
           pageIndex: page.index,
@@ -514,7 +538,16 @@ export function createComicService({ cfg, getCfg = loadConfig }) {
 
     const next = { ...cur, planParts: plans, style: styleText };
     save(projectId, next);
-    return { ok: true, count: plans.length, plans, style: styleText };
+    /**
+     * 同时给 `plans` 与 `parts` 两个键。
+     *
+     * ⚠️ 以前只返回 `plans`，而调用方（以及开发时的直觉）读的是 `parts` ——
+     *    于是 `count` 有值、`parts` 是 undefined，前端拿不到任何一条提示词。
+     *    两个名字都保留，避免再一次"契约对不上"。
+     */
+    return {
+      ok: true, count: plans.length, plans, parts: plans, style: styleText,
+    };
   }
 
   /** 取某一格的提示词（出图时用） */

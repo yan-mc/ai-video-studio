@@ -1688,6 +1688,55 @@ const comfy = await import('../host/services/comfy-client.js');
     add('B-回归', 'R38 不出现两个连续句号', !/\.\.[^.]/.test(r.prompt.replace(/\.\.\./g, '')));
   }
 
+  /* ==================================================================
+   * R39：漫画出图提示词 —— 实测发现"对话框里写着质量提示词"
+   *
+   * 旧写法无条件说「留出对白空间」但不给台词，于是模型自己补一个对话框，
+   * 把提示词里剩下的文字（"高质量，细节清晰"）抄进去当成台词。
+   * 见 docs/probes/e2e-2026-11-15/08-comic-panel-FIXED.png 的前后对比。
+   * ================================================================== */
+  {
+    const comicTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'jz-r39-'));
+    const { createComicService } = await import('../host/services/comic-service.js');
+    const svc = createComicService({
+      cfg: { dataDir: comicTmp },
+      getCfg: () => ({ dataDir: comicTmp }),
+    });
+
+    const pid = 'proj_r39';
+    // 造一页五格，第 1 格无台词、第 2 格有台词
+    svc.extract(pid, { text: '第一格：她推开门。第二格：屋里空无一人！', template: 'five_panel', pages: 1 });
+    const doc = svc.load(pid);
+    doc.pages[0].panels[1].bubble = '有人吗？';
+    doc.pages[0].panels[1].speaker = '她';
+    svc.save(pid, doc);
+
+    const r = await svc.planPrompts(pid, {});
+    add('B-回归', 'R39 plan-prompts 同时返回 plans 与 parts',
+      Array.isArray(r.plans) && Array.isArray(r.parts) && r.parts.length === r.plans.length,
+      `plans=${r.plans?.length} parts=${r.parts?.length}`);
+
+    const p1 = r.parts.find((x) => x.panelIndex === 1)?.prompt ?? '';
+    const p2 = r.parts.find((x) => x.panelIndex === 2)?.prompt ?? '';
+
+    add('B-回归', 'R39 无台词格明确写"没有对白"',
+      p1.includes('没有对白') || p1.includes('不要出现任何对话框'));
+    add('B-回归', 'R39 无台词格不再出现"留出对白空间"',
+      !p1.includes('留出对白空间'));
+    add('B-回归', 'R39 有台词格给出原文',
+      p2.includes('有人吗？'), p2.slice(-80));
+    add('B-回归', 'R39 有台词格指明写进对话框',
+      p2.includes('对话框内写'));
+
+    // 质量词不能放末尾（放末尾会被当成画面要求，实测被抄进对话框）
+    add('B-回归', 'R39 质量词不在末尾',
+      !p1.trimEnd().endsWith('线条干净'), p1.slice(-40));
+    add('B-回归', 'R39 质量词紧跟画风',
+      p1.indexOf('高质量') < p1.indexOf('构图'), `q=${p1.indexOf('高质量')} c=${p1.indexOf('构图')}`);
+
+    fs.rmSync(comicTmp, { recursive: true, force: true });
+  }
+
 
   // ---- R23 参考视频+音频合计时长 ≤14.8s ----
   {

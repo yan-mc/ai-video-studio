@@ -526,7 +526,30 @@ export async function handleApi(req, res) {
 
       // 只渲染指定页（默认全部）
       const onlyPage = body.pageIndex ? Number(body.pageIndex) : null;
-      const targets = doc.planParts.filter((p) => !onlyPage || p.pageIndex === onlyPage);
+      let targets = doc.planParts.filter((p) => !onlyPage || p.pageIndex === onlyPage);
+
+      /**
+       * 只渲染指定格。
+       *
+       * ⚠️ 以前只支持 `pageIndex`，`panelIndices` / `panelIndex` 一律被忽略 ——
+       *    调用方想"只重出一格"，实际会把整页全渲一遍（12GB 卡上一格 75 秒，
+       *    白白多花几分钟）。这是文档里写了、代码里没有的一类偏差。
+       */
+      const wantedPanels = Array.isArray(body.panelIndices)
+        ? body.panelIndices.map(Number).filter((n) => Number.isFinite(n))
+        : (Number.isFinite(Number(body.panelIndex)) ? [Number(body.panelIndex)] : []);
+      if (wantedPanels.length) {
+        const set = new Set(wantedPanels);
+        targets = targets.filter((p) => set.has(Number(p.panelIndex)));
+      }
+      if (!targets.length) {
+        return sendJson(res, 400, {
+          error: 'NO_TARGET_PANELS',
+          detail: `没有匹配的格：pageIndex=${onlyPage ?? '(全部)'} `
+            + `panelIndices=${wantedPanels.length ? wantedPanels.join(',') : '(全部)'}`,
+        });
+      }
+
       const limit = Math.max(1, Math.min(50, Number(body.limit) || targets.length));
       const todo = targets.slice(0, limit);
 
@@ -589,8 +612,26 @@ export async function handleApi(req, res) {
               : (r.outputs ?? []);
             await jobsStore().upsert({ ...j, status: 'completed', outputs: outputsWithArchive, finishedAt: Date.now() });
           } catch (e) {
-            // 单格失败不中断整批
-            ctx.extras?.appendLog?.({ level: 'error', msg: `漫画出图失败 p${plan.pageIndex}-${plan.panelIndex}: ${String(e?.message ?? e)}` });
+            /**
+             * 单格失败不中断整批 —— 但**必须把这一格标成 failed**。
+             *
+             * ⚠️ 历史缺陷：这里只写了一条日志，任务记录永远停在 `queued`。
+             *    后果：任务列表里永远有一个"排队中"的幽灵任务，
+             *    用户既看不到失败原因，又没法重试；`monitor` 的
+             *    `queued` 计数也永远归不了零。
+             *    实测复现：一次 OOM 之后，任务卡在 queued 十几分钟，
+             *    而 ComfyUI 队列早已为空。
+             */
+            const msg = String(e?.message ?? e);
+            ctx.extras?.appendLog?.({ level: 'error', msg: `漫画出图失败 p${plan.pageIndex}-${plan.panelIndex}: ${msg}` });
+            try {
+              await jobsStore().upsert({
+                ...j,
+                status: 'failed',
+                error: msg,
+                finishedAt: Date.now(),
+              });
+            } catch { /* 回写失败也不阻断其它格 */ }
           }
         }
       })();
@@ -1263,37 +1304,52 @@ export async function handleApi(req, res) {
             j.kind = 'image';
             await jobsStore().upsert(j);
 
-            const r = await withLocalSlot('h3-image', () => runH3ImageLocal({
-              workflow: wf,
-              job: j,
-              prompt: planItem.prompt,
-              // 参考图必须真的传进去：模特/服装的一致性全靠它。
-              // 旧实现硬编码 images: [] → 每套图都是纯文生图，形象库完全没用上。
-              shot: {
-                refs: { images: body.refImages ?? job.refImages ?? [] },
-                characterRefs: body.characterRefs ?? job.characterRefs ?? resolveMwFigureRefs(ctx, job),
-                imageSizeId: sizeId,
-              },
-              cfg,
-            }));
-            // 登记进素材库，否则模特套图只落在 outputs/，渲染页引用不到
-            const archived = await archiveBatchOutput(ctx, cfg, r.outputs?.[0], {
-              type: 'general',
-              name: `模特_${job.name ?? jobId}_${planItem.index}`,
-              projectId: job.projectId ?? null,
-              note: String(planItem.prompt ?? '').slice(0, 200),
-            });
-            const outs = archived
-              ? [{ ...(r.outputs?.[0] ?? {}), assetId: archived.id, archivedRel: archived.rel }]
-              : (r.outputs ?? []);
-            // 记进 jobs 表以便前端查询（upsert 会合并同 id）
-            await jobsStore().upsert({
-              ...j,
-              status: 'completed',
-              outputs: outs,
-              finishedAt: Date.now(),
-            });
-            return outs[0] ?? r;
+            try {
+              const r = await withLocalSlot('h3-image', () => runH3ImageLocal({
+                workflow: wf,
+                job: j,
+                prompt: planItem.prompt,
+                // 参考图必须真的传进去：模特/服装的一致性全靠它。
+                // 旧实现硬编码 images: [] → 每套图都是纯文生图，形象库完全没用上。
+                shot: {
+                  refs: { images: body.refImages ?? job.refImages ?? [] },
+                  characterRefs: body.characterRefs ?? job.characterRefs ?? resolveMwFigureRefs(ctx, job),
+                  imageSizeId: sizeId,
+                },
+                cfg,
+              }));
+              // 登记进素材库，否则模特套图只落在 outputs/，渲染页引用不到
+              const archived = await archiveBatchOutput(ctx, cfg, r.outputs?.[0], {
+                type: 'general',
+                name: `模特_${job.name ?? jobId}_${planItem.index}`,
+                projectId: job.projectId ?? null,
+                note: String(planItem.prompt ?? '').slice(0, 200),
+              });
+              const outs = archived
+                ? [{ ...(r.outputs?.[0] ?? {}), assetId: archived.id, archivedRel: archived.rel }]
+                : (r.outputs ?? []);
+              // 记进 jobs 表以便前端查询（upsert 会合并同 id）
+              await jobsStore().upsert({
+                ...j,
+                status: 'completed',
+                outputs: outs,
+                finishedAt: Date.now(),
+              });
+              return outs[0] ?? r;
+            } catch (e) {
+              /**
+               * ⚠️ 单镜失败必须把这条 job 记录标成 failed。
+               *    以前只在 runGeneration 内部记了 shot.status，而 jobs 表里
+               *    这条记录永远停在 queued —— 任务列表出现"永远排队中"的幽灵，
+               *    monitor 的 queued 计数也归不了零。
+               */
+              try {
+                await jobsStore().upsert({
+                  ...j, status: 'failed', error: String(e?.message ?? e), finishedAt: Date.now(),
+                });
+              } catch { /* ignore */ }
+              throw e;      // 交给 runGeneration 记 shot.status 并做重试判断
+            }
           });
         } catch { /* runGeneration 内部已记录失败 */ }
       })();

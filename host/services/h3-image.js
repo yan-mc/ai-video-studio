@@ -305,16 +305,30 @@ export async function runH3Image({
     );
   }
 
-  // 显存闸：只在拿得到空闲量时判断，拿不到就放过（不能让探测失败阻断生成）
+  // 显存闸：只在**明显不够**时拦，不做精确预算。
+  //
+  // ⚠️ 这里的原则是"宁可放过，也不要误伤"。
+  //
+  //    实测教训：ComfyUI 的 `vram_free` 在 --lowvram 模式下**远低于可用余量** ——
+  //    模型是分块按需换入换出的，常驻只占 2–3 GB，此时 vram_free 只有 2.5 GB，
+  //    但实际能跑 2048²（需要 staged 30 GB，靠动态换页）。
+  //    早期版本拿"该尺寸建议 12 GB"去比 vram_free，于是每次跑完一单之后
+  //    下一单必被拒（`IMAGE_VRAM_LOW: 空闲显存约 2.5 GB`），
+  //    连续出图完全不可用 —— 而且用户看到的是一个"看起来很有道理"的错误。
+  //
+  //    正确做法：只拦**真的没救**的情况（空闲低于 ComfyUI 自己都起不来的量）。
+  //    真正的 OOM 由 ComfyUI 报错，那条错误是准确的；我们不该抢在它前面猜。
   if (!allowOversize) {
     const vram = await comfy.vramStatus(cfg).catch(() => null);
     const freeGb = Number(vram?.freeBytes) / (1024 ** 3);
-    // 面积每 1 MP 大约吃 2.6 GB（2048² 实测 11.4 GB 含模型常驻，这里只算增量）
-    const needGb = size.vramGb ?? Math.ceil(wantMP * 2.6);
-    if (Number.isFinite(freeGb) && freeGb > 0 && freeGb + 2 < needGb) {
+    const totalGb = Number(vram?.totalBytes) / (1024 ** 3);
+    // 阈值取显存总量的 12%，但至少留 1.2 GB：
+    //   12 GB 卡 → 1.44 GB；24 GB 卡 → 2.88 GB
+    const floorGb = Math.max(1.2, Number.isFinite(totalGb) ? totalGb * 0.12 : 1.2);
+    if (Number.isFinite(freeGb) && freeGb >= 0 && freeGb < floorGb) {
       throw new Error(
-        `IMAGE_VRAM_LOW: 空闲显存约 ${freeGb.toFixed(1)} GB，`
-        + `该尺寸估计需要 ${needGb} GB。请先关掉其它生成任务，或换小尺寸。`,
+        `IMAGE_VRAM_LOW: 空闲显存仅 ${freeGb.toFixed(2)} GB（阈值 ${floorGb.toFixed(2)} GB）。`
+        + '请先关掉其它占用显卡的程序，或重启 ComfyUI，或换更小的尺寸。',
       );
     }
   }
