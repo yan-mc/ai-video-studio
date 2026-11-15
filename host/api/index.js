@@ -846,18 +846,18 @@ export async function handleApi(req, res) {
       if (body.styleEn) pkg.styleEn = String(body.styleEn);
       if (body.shots) pkg.shots = body.shots;
 
+      // 视频/音频的用途说明交给编译器——它们属于 subject_definitions 段。
+      //
+      // ⚠️ 历史缺陷：这里曾把 `reference_notes:\n…` 拼在提示词**最前面**。
+      //    `reference_notes` 不是官方字段，而且官方明确"模型对开头权重最高"，
+      //    说明句堆在开头会与风格定调争权重。现在通过 pkg.mediaNotes 喂给
+      //    subject_definitions（见 h3-prompt 的 compileRef2VA）。
+      pkg.mediaNotes = buildMediaNotes(plan);
+
       const compiled = compileH3Prompt(pkg);
-      // 视频/音频的用途说明：H3 靠 <Video k> / <Audio j> 标签引用它们，
-      // 但模型不知道"这段是参考什么"。补一句自然语言说明，效果明显更好。
-      const mediaNotes = buildMediaNotes(plan);
-      const finalPrompt = mediaNotes.length
-        ? `reference_notes:\n${mediaNotes.join('\n')}\n\n${compiled.prompt}`
-        : compiled.prompt;
 
       return sendJson(res, 200, {
         ...compiled,
-        prompt: finalPrompt,
-        chars: finalPrompt.length,
         plan,
         package: pkg,
       });
@@ -1856,15 +1856,31 @@ export function compilePrompt(shot) {
       // 结构化编译失败 → 退回简单拼接，不让生成中断
     }
   }
-  const parts = [];
-  if (shot.style) parts.push(`风格：${shot.style}`);
-  if (shot.description) parts.push(shot.description);
-  if (shot.camera) parts.push(`运镜：${shot.camera}`);
-  if (shot.dialogue) parts.push(`台词：${shot.dialogue}`);
-  if (shot.sound) parts.push(`环境声：${shot.sound}`);
-  if (shot.music) parts.push(`配乐：${shot.music}`);
-  if (shot.prompt) parts.push(shot.prompt);
-  return parts.join('\n').slice(0, 7000);
+  // ==========================================================================
+  // 兜底：结构化编译抛错时的极简组装
+  // ==========================================================================
+  //
+  // ⚠️ 历史缺陷：这里曾拼出「风格：X\n运镜：Y\n台词：Z」这种中文标签串。
+  //    那是**没有任何官方格式依据**的自由文本，模型拿到的是一堆冒号标签，
+  //    既不是基础格式也不是六段格式 —— 属于最差的一种输出。
+  //
+  //    现在兜底也遵守官方基础格式：至少产出三字段，让模型能解析。
+  //    宁可少写内容，也不能产出没有结构的东西。
+  const fallbackDesc = [
+    shot.description,
+    shot.camera ? `The camera ${shot.camera}.` : '',
+    shot.dialogue ? `The subject is visible on screen and says: <d>[Chinese] ${shot.dialogue}</d>` : '',
+  ].filter(Boolean).join(' ').trim();
+
+  const fb = [
+    `integrated_multimodal_description: [Shot 1] ${fallbackDesc || 'A short scene.'}`,
+    '',
+    `overall_soundscape: ${shot.sound || 'Quiet environmental room tone with soft air movement.'}`,
+    '',
+    `non_diegetic_music: ${shot.music || 'N/A'}`,
+  ].join('\n');
+
+  return fb.slice(0, 7000);
 }
 
 /**

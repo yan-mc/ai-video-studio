@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>九章工作室 · 面板 harness</title>
+<style>
+  /* 复刻 DSH 侧栏的令牌（当前主题是深色 inknight） */
+  :root{
+    --dsw-alias-bg-base:#111316;
+    --dsw-alias-bg-layer-1:#181b1f;
+    --dsw-alias-bg-layer-2:#191c20;
+    --dsw-alias-bg-layer-3:#20242a;
+    --dsw-alias-bg-overlay:#1c2025;
+    --dsw-alias-border:#2a2e34;
+    --dsw-alias-border-l1:#2a2e34;
+    --dsw-alias-border-l2:#3a3f47;
+    --dsw-alias-accent:#C8564A;
+    --dsw-alias-brand-primary:#C8564A;
+    --dsw-alias-label-primary:#e8e4dc;
+    --dsw-alias-text-primary:#e8e4dc;
+    --dsw-alias-label-secondary:#9aa2ad;
+    --dsw-alias-state-error-primary:#d64545;
+    --dsw-alias-state-success-primary:#4A6B52;
+    --dsw-alias-state-warn-primary:#B8912F;
+    --dsw-specific-sidebar-fill:#111316;
+  }
+  html,body{margin:0;height:100%;background:#0b0d10;color:#e8e4dc;
+    font-family:system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif}
+  #frame{display:flex;height:100%}
+  #rail{width:56px;flex:none;background:#0e1013;border-right:1px solid #22262c;
+    display:flex;flex-direction:column;align-items:center;padding-top:10px;gap:8px}
+  #rail .dot{width:30px;height:30px;border-radius:8px;background:#1b1f24;border:1px solid #2a2e34;
+    display:flex;align-items:center;justify-content:center;color:#7c8794;font-size:12px}
+  #rail .dot.on{background:#24191a;border-color:#C8564A;color:#e8e4dc}
+  #panelseat{flex:1;min-width:0;display:flex;flex-direction:column}
+  #paneltitle{height:34px;flex:none;display:flex;align-items:center;gap:8px;
+    padding:0 12px;border-bottom:1px solid #22262c;font-size:12px;color:#8d96a2;background:#101316}
+  #panelbody{flex:1;min-height:0;overflow:auto}
+  #panelbody > div{height:100%}
+</style>
+<script src="./react.js"></script>
+<script src="./react-dom.js"></script>
+</head>
+<body>
+<div id="frame">
+  <div id="rail">
+    <div class="dot">对</div>
+    <div class="dot on" title="九章工作室">九</div>
+    <div class="dot">设</div>
+  </div>
+  <div id="panelseat">
+    <div id="paneltitle">九章工作室 <span style="opacity:.5">· 面板（模拟 DSH 侧栏宽度 326px）</span></div>
+    <div id="panelbody"></div>
+  </div>
+</div>
+<script>
+// DSH 客户端运行时打桩：__ModuleLoader__ / require('react')
+window.__ModuleLoader__ = {
+  load(def) {
+    const modules = { react: window.React };
+    const requireFn = (name) => {
+      if (!modules[name]) throw new Error('module not available: ' + name);
+      return modules[name];
+    };
+    window.__PANEL_API__ = def.factory(requireFn);
+  },
+};
+window.__ERRORS__ = [];
+window.addEventListener('error', (e) => window.__ERRORS__.push('error: ' + (e.message || e.type)));
+window.addEventListener('unhandledrejection', (e) => window.__ERRORS__.push('rejection: ' + String(e.reason && (e.reason.message || e.reason))));
+const origErr = console.error;
+console.error = function () { window.__ERRORS__.push('console.error: ' + Array.prototype.map.call(arguments, String).join(' ')); return origErr.apply(console, arguments); };
+const origWarn = console.warn;
+console.warn = function () { window.__ERRORS__.push('console.warn: ' + Array.prototype.map.call(arguments, String).join(' ')); return origWarn.apply(console, arguments); };
+</script>
+<script src="./client.js"></script>
+<script>
+(function boot() {
+  const api = window.__PANEL_API__;
+  if (!api || typeof api.apply !== 'function') {
+    document.getElementById('panelbody').textContent = 'FACTORY_FAILED';
+    window.__BOOT__ = 'factory-failed';
+    return;
+  }
+  const registered = {};
+  const effects = [];
+  const ctx = {
+    slots: {
+      inject(name, fn) { registered[name] = fn; },
+      register(options, component) { return { options: options, component: component }; },
+    },
+    effect(fn) { try { const d = fn(); effects.push(d); return d; } catch (e) { window.__ERRORS__.push('effect: ' + e.message); } },
+    on() {}, emit() {},
+    logger: { warn: (...a) => console.warn(...a), info: () => {} },
+  };
+  try { api.apply(ctx); } catch (e) {
+    document.getElementById('panelbody').textContent = 'APPLY_FAILED: ' + e.message;
+    window.__BOOT__ = 'apply-failed';
+    return;
+  }
+  window.__REGISTERED__ = Object.keys(registered);
+  const reg = registered['main'];
+  if (typeof reg !== 'function') {
+    document.getElementById('panelbody').textContent = 'NO_MAIN_SLOT';
+    window.__BOOT__ = 'no-main';
+    return;
+  }
+  const entry = reg();
+  const App = entry && entry.component;
+  if (typeof App !== 'function') {
+    document.getElementById('panelbody').textContent = 'NO_APP_COMPONENT';
+    window.__BOOT__ = 'no-component';
+    return;
+  }
+  // 复刻 DSH 给 main 槽位组件的标准 props（本插件只用了 slots/effect）
+  const noop = () => false;
+  const props = {
+    useRemoteAccess: noop, useResource: () => ({}), useContextMenu: () => ({}),
+    useWorkspaces: () => ({}), usePanelInfo: () => ({}), useSessions: () => ({}),
+    useSessionStatus: () => ({}), useSessionRetainInfo: () => ({}),
+    useSessionAccess: noop, useWorkspaceAccess: noop,
+  };
+  ReactDOM.createRoot(document.getElementById('panelbody')).render(
+    React.createElement(App, props)
+  );
+  window.__BOOT__ = 'ok';
+})();
+</script>
+</body>
+</html>

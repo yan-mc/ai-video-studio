@@ -450,22 +450,31 @@ export function buildRenderPlan({
 }
 
 /**
- * 把渲染计划里的视频/音频转成提示词里的说明段。
+ * 视频/音频的用途说明 —— **英文，进 subject_definitions**。
  *
- * 为什么需要：H3 用 `<Video k>` / `<Audio j>` 标签引用它们，
- * 但模型不知道"这段视频是参考什么的"。用一句自然语言指明用途，
- * 比只给标签有效得多。
+ * 为什么需要：H3 用 `<Video k>` / `<Audio j>` 标签引用参考素材，
+ * 但模型不知道"这段是参考什么的"。用一句自然语言指明用途，比只给标签有效得多。
+ *
+ * ⚠️ 历史缺陷：这个函数以前返回中文句子，调用方还把它们拼成
+ *    `reference_notes:\n…` 塞在提示词**最前面**。两个问题：
+ *      ① `reference_notes` 不是官方字段，模型不认识，纯噪声；
+ *      ② 官方明确"模型对开头权重最高"，把说明堆在开头会与风格定调打架。
+ *    现在返回英文 <Video N>/<Audio N> 定义句，由 h3-prompt 的
+ *    subject_definitions 段统一承载（那里本来就是放这些的地方）。
+ *
+ * @param {object} plan buildRenderPlan 的返回值
+ * @returns {string[]} 每行一句英文定义
  */
 export function buildMediaNotes(plan) {
   const notes = [];
   for (const v of (plan?.videos ?? [])) {
     const audioNote = v.hasAudio && v.audioIndex
-      ? `（其音轨为 <Audio ${v.audioIndex}>）`
-      : '（无声）';
-    notes.push(`<Video ${v.index}> 是动作与节奏参考${audioNote}。`);
+      ? ` Its soundtrack is <Audio ${v.audioIndex}>.`
+      : ' It carries no audio.';
+    notes.push(`<Video ${v.index}> supplies camera movement and motion timing only.${audioNote}`);
   }
   for (const a of (plan?.audios ?? [])) {
-    notes.push(`<Audio ${a.audioIndex}> 是音色与氛围参考。`);
+    notes.push(`<Audio ${a.audioIndex}> supplies voice timbre and ambience only.`);
   }
   return notes;
 }

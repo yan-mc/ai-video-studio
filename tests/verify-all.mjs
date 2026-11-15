@@ -1134,7 +1134,7 @@ const comfy = await import('../host/services/comfy-client.js');
       sceneLayout: '天台',
     });
     add('B-回归', 'R6 无图角色不写 <Picture null>', !out.prompt.includes('<Picture null>'));
-    add('B-回归', 'R6 无图角色走文字描述', out.prompt.includes('没有参考图') || out.prompt.includes('text_only'));
+    add('B-回归', 'R6 无图角色走文字描述', out.prompt.includes('text_only') || out.prompt.includes('no reference picture'));
   }
 
   // ---- R7 存储句柄跟随 dataDir ----
@@ -1233,7 +1233,12 @@ const comfy = await import('../host/services/comfy-client.js');
 
     const { compileH3Prompt } = await import('../host/services/h3-prompt.js');
     const r = compileH3Prompt({ mode: 'i2v', durationSec: 5, subjects: [], sceneLayout: 'x' });
-    add('B-回归', 'R13 i2v 走关键帧分支（含对齐指令）', r.prompt.includes('aligns with the'), r.mode);
+    // I2VA 的对齐指令是官方 I2VA 句式（"is fully referenced"），
+    // FL2VA/L2VA 才是 "aligns with the ...-second mark"。两种都算"有关键帧指令"。
+    add('B-回归', 'R13 i2v 走关键帧分支（含对齐指令）',
+      r.prompt.includes('is fully referenced') || r.prompt.includes('aligns with the'), r.mode);
+    add('B-回归', 'R13 i2v 对齐指令在第一行',
+      r.prompt.split('\n')[0].includes('For the target video'), r.prompt.split('\n')[0]?.slice(0, 60));
   }
 
   // ---- R14 probe 桩函数已修好 ----
@@ -1494,12 +1499,39 @@ const comfy = await import('../host/services/comfy-client.js');
       !out.includes('（未指定场景）') && !out.includes('环境底噪'));
 
     // 短备注仍走自动编译（不能把所有 prompt 都当成品）
-    const short = compilePrompt({ prompt: '简短备注', mode: 'ref2va', durationSec: 5, description: '两人在海边' });
-    add('B-回归', 'R24 短备注仍走自动编译', short.includes('CRITICAL STYLE RULE') && short.length > 300, `len=${short.length}`);
+    //
+    // ⚠️ 这条断言在 2026-11 提示词重构后改了语义：
+    //    以前要求产出本地自造骨架 `CRITICAL STYLE RULE`；重构后编译器只产出
+    //    官方两套格式之一。这个用例**没有参考素材**（无图无卡无视频），
+    //    所以正确行为是走**基础格式**（integrated_multimodal_description）。
+    //    断言改为「产出的是官方格式」，而不是「某个已删除的魔法串还在」。
+    const OFFICIAL_FIELDS = [
+      'integrated_multimodal_description:',
+      'overall_soundscape:',
+      'non_diegetic_music:',
+    ];
+    const isOfficialFormat = (s) => OFFICIAL_FIELDS.every((f) => s.includes(f))
+      || (s.includes('subject_definitions:') && s.includes('retention_analysis:')
+        && s.includes('detailed_description:') && s.includes('overall_soundscape:')
+        && s.includes('non_diegetic_music:'));
 
-    // 无 prompt 正常编译
+    const short = compilePrompt({ prompt: '简短备注', mode: 'ref2va', durationSec: 5, description: '两人在海边' });
+    add('B-回归', 'R24 短备注仍走自动编译（产出官方格式）',
+      isOfficialFormat(short) && short.length > 300, `len=${short.length}`);
+
+    // 无 prompt 正常编译：同样只有 description，走基础格式
     const none = compilePrompt({ mode: 'ref2va', durationSec: 5, description: '测试' });
-    add('B-回归', 'R24 无 prompt 正常编译', none.includes('CRITICAL STYLE RULE'));
+    add('B-回归', 'R24 无 prompt 正常编译（产出官方格式）', isOfficialFormat(none));
+
+    // 已废弃的本地自造骨架不能再出现（官方格式里没有这几个标签）
+    add('B-回归', 'R24 不再产出 CRITICAL STYLE RULE',
+      !short.includes('CRITICAL STYLE RULE') && !none.includes('CRITICAL STYLE RULE'));
+    add('B-回归', 'R24 不再产出 MOTION DESCRIPTION',
+      !short.includes('MOTION DESCRIPTION') && !none.includes('MOTION DESCRIPTION'));
+    add('B-回归', 'R24 不再产出 CHARACTER DEFINITION 重复段',
+      !short.includes('CHARACTER DEFINITION') && !none.includes('CHARACTER DEFINITION'));
+    add('B-回归', 'R24 不再产出时间区间 [0.0s-3.5s]',
+      !/\[\d+(\.\d+)?s\s*[-–]\s*\d+(\.\d+)?s\]/.test(short) && !/\[\d+(\.\d+)?s\s*[-–]\s*\d+(\.\d+)?s\]/.test(none));
 
     // 超长要截断到 7000
     const huge = compilePrompt({ prompt: 'X'.repeat(9000), mode: 'ref2va' });
@@ -1509,6 +1541,161 @@ const comfy = await import('../host/services/comfy-client.js');
     const pageSrc = fs.readFileSync(path.join(ROOT, 'app-src/src/pages/RenderPage.tsx'), 'utf8');
     add('B-回归', 'R24 前端 saveShot 传了 prompt',
       /useManualPrompt \? manualPrompt\.trim\(\)/.test(pageSrc) && /\.\.\.\(manual \? \{ prompt: manual \}/.test(pageSrc));
+  }
+
+  /* ==================================================================
+   * R25–R31：官方 H3 提示词格式（2026-11 重构）
+   *
+   * 背景：此前插件里有 4 份互相冲突的提示词方案（六段式/三段式/自造
+   * schema/中文技能书），谁也说不清哪个对。调研取证（
+   * docs/probes/h3-prompt-research/REPORT.md）得到的结论是：
+   *
+   *   官方只有**两套**格式，按任务模式二选一，缺的是一层模式路由器。
+   *     ① 基础格式（T2VA/I2VA/FL2VA/L2VA）：对齐指令 + 三字段
+   *     ② Ref2VA 六段：subject_definitions → summary → retention_analysis
+   *                    → detailed_description → overall_soundscape
+   *                    → non_diegetic_music
+   *
+   * 这一组断言锁的就是"路由器存在、格式正确、官方硬约束被执行"。
+   * ================================================================== */
+  {
+    const H3 = await import('../host/services/h3-prompt.js');
+
+    // ---- R25 模式路由器 ----
+    add('B-回归', 'R25 无素材 → 基础格式', H3.routeFormat({ mode: 't2va' }).format === 'base');
+    add('B-回归', 'R25 有参考图 → Ref2VA',
+      H3.routeFormat({ mode: 'ref2va', references: { images: ['a.webp'] } }).format === 'ref');
+    add('B-回归', 'R25 有参考视频 → 强制 Ref2VA',
+      H3.routeFormat({ mode: 't2va', references: { videos: [{ rel: 'v.mp4' }] } }).format === 'ref');
+    add('B-回归', 'R25 有参考音频 → 强制 Ref2VA',
+      H3.routeFormat({ mode: 't2va', references: { audios: [{ rel: 'a.wav' }] } }).format === 'ref');
+    add('B-回归', 'R25 关键帧模式走基础格式',
+      H3.routeFormat({ mode: 'i2va', references: { images: ['a.webp'], firstFrame: 'a.webp' } }).format === 'base');
+    add('B-回归', 'R25 只有 subjects 带编号也算有素材',
+      H3.routeFormat({
+        mode: 'ref2va',
+        subjects: [{ id: 'S1', name: 'A', pictureIndex: 1 }],
+      }).format === 'ref');
+
+    // ---- R26 基础格式三字段 + 对齐指令 ----
+    const base = H3.compileH3Prompt({
+      mode: 't2va', durationSec: 5, description: 'A girl walks', overall_soundscape: 'Wind',
+    });
+    add('B-回归', 'R26 基础格式含三字段',
+      base.prompt.includes('integrated_multimodal_description:')
+      && base.prompt.includes('overall_soundscape:')
+      && base.prompt.includes('non_diegetic_music:'));
+    add('B-回归', 'R26 基础格式无 Ref2VA 字段',
+      !base.prompt.includes('subject_definitions:') && !base.prompt.includes('retention_analysis:'));
+    add('B-回归', 'R26 T2VA 无对齐指令', !base.prompt.includes('is fully referenced'));
+
+    const i2va = H3.compileH3Prompt({
+      mode: 'i2va', durationSec: 5, description: 'She turns',
+      references: { images: ['f.webp'], firstFrame: 'f.webp' }, overall_soundscape: 'Wind',
+    });
+    add('B-回归', 'R26 I2VA 对齐指令在第一行',
+      i2va.prompt.split('\n')[0].startsWith('For the target video, at 0.00 seconds'));
+    add('B-回归', 'R26 I2VA 对齐指令后恰好一个空行',
+      i2va.prompt.split('\n')[1] === '' && i2va.prompt.split('\n')[2].startsWith('integrated_multimodal_description:'));
+    add('B-回归', 'R26 对齐指令用 <Picture 序号> 不是路径',
+      /<Picture \d+>/.test(i2va.prompt) && !i2va.prompt.includes('f.webp'));
+
+    const fl2va = H3.compileH3Prompt({
+      mode: 'fl2va', durationSec: 8, description: 'walks',
+      references: { images: ['a.webp', 'b.webp'], firstFrame: 'a.webp', lastFrame: 'b.webp' },
+      overall_soundscape: 'Wind',
+    });
+    add('B-回归', 'R26 FL2VA 两端时间点正确',
+      fl2va.prompt.includes('0.00-second mark') && fl2va.prompt.includes('8.00-second mark'),
+      fl2va.prompt.split('\n')[0]?.slice(0, 120));
+
+    // ---- R27 Ref2VA 六段顺序 ----
+    const ref = H3.compileH3Prompt({
+      mode: 'ref2va', durationSec: 5,
+      subjects: [{ id: 'S1', name: 'Aya', pictureIndex: 1, traits: 'silver hair' }],
+      references: { images: ['a.webp'], videos: [{ rel: 'v.mp4' }], videoUses: ['motion'] },
+      description: 'Aya runs', overall_soundscape: 'Footsteps',
+    });
+    const ORDER = ['subject_definitions:', 'summary:', 'retention_analysis:',
+      'detailed_description:', 'overall_soundscape:', 'non_diegetic_music:'];
+    const positions = ORDER.map((k) => ref.prompt.indexOf(k));
+    add('B-回归', 'R27 六段字段齐全', positions.every((p) => p >= 0),
+      ORDER.filter((_, i) => positions[i] < 0).join(','));
+    add('B-回归', 'R27 六段顺序正确',
+      positions.every((p, i) => i === 0 || p > positions[i - 1]), JSON.stringify(positions));
+    add('B-回归', 'R27 summary 带方括号任务前缀', /^summary:\n\[[a-z ]+\]/m.test(ref.prompt));
+
+    // ---- R28 两套保留标记不可混用 ----
+    add('B-回归', 'R28 视觉标记有 4 个', H3.RETENTION_VISUAL.length === 4);
+    add('B-回归', 'R28 音频标记有 4 个', H3.RETENTION_AUDIO.length === 4);
+    add('B-回归', 'R28 两套只有 weak_reference 共有',
+      H3.RETENTION_VISUAL.filter((m) => H3.RETENTION_AUDIO.includes(m)).join(',') === 'weak_reference');
+    const withAudio = H3.compileH3Prompt({
+      mode: 'ref2va', durationSec: 5,
+      subjects: [{ id: 'S1', name: 'Aya', pictureIndex: 1 }],
+      references: {
+        images: ['a.webp'], audios: [{ rel: 'a.wav' }], audioModes: ['fully_copy'],
+      },
+      description: 'Aya speaks', overall_soundscape: 'Room',
+    });
+    add('B-回归', 'R28 音频用音频那套标记（fully_copy）',
+      /<Audio 1>: fully_copy/.test(withAudio.prompt), withAudio.prompt.slice(0, 0));
+    add('B-回归', 'R28 音频不套视觉标记 fully_preserved',
+      !/<Audio \d+>: fully_preserved/.test(withAudio.prompt));
+
+    // ---- R29 负面表述被拦（cfg=1 无 negative 分支）----
+    const neg = H3.compileH3Prompt({
+      mode: 't2va', durationSec: 5,
+      description: 'A scene. 不要雨伞', overall_soundscape: 'Wind',
+    });
+    add('B-回归', 'R29 中文否定被警告', neg.warnings.some((w) => w.includes('否定表述')));
+
+    // 模板自己产出的关系说明不能被误报
+    add('B-回归', 'R29 模板自带的关系句不误报',
+      !ref.warnings.some((w) => w.includes('否定表述')), JSON.stringify(ref.warnings));
+
+    // ---- R30 时间戳格式（区间非法，单点合法）----
+    const bad = H3.compileH3Prompt({
+      mode: 't2va', durationSec: 5,
+      scenes: [{ startSec: 0, endSec: 3, shotSize: '', action: 'A walks', camera: '', sound: '' }],
+      overall_soundscape: 'Wind',
+    });
+    add('B-回归', 'R30 不产出时间区间', !/\[\d+(\.\d+)?s\s*[-–]\s*\d+(\.\d+)?s\]/.test(bad.prompt));
+    add('B-回归', 'R30 首镜不带时间戳', bad.prompt.includes('[Shot 1]') && !bad.prompt.includes('[Shot 1] At'));
+    add('B-回归', 'R30 时间码是 MM:SS.mmm 三位',
+      H3.timecode(3.5) === '00:03.500' && H3.timecode(65.25) === '01:05.250', H3.timecode(3.5));
+
+    // ---- R31 硬约束 ----
+    add('B-回归', 'R31 帧网格 17k+5', (H3.h3Frames(5) - 5) % 17 === 0);
+    add('B-回归', 'R31 最短 124 帧（不是 4 秒）', H3.h3Frames(4) === 124 && H3.h3Frames(5) === 124);
+    add('B-回归', 'R31 15 秒 = 362 帧', H3.h3Frames(15) === 362);
+    add('B-回归', 'R31 时长下限是 5 秒', H3.H3_LIMITS.durationSec.min === 5);
+    add('B-回归', 'R31 官方口径单独记录',
+      H3.H3_LIMITS.officialDurationSec.min === 4 && H3.H3_LIMITS.officialDurationSec.max === 15);
+    const over = H3.compileH3Prompt({ mode: 't2va', durationSec: 99, description: 'x', overall_soundscape: 'y' });
+    add('B-回归', 'R31 超长时长被截断并警告',
+      over.durationSec === 15.08 && over.warnings.some((w) => w.includes('上限')));
+    const lone = H3.compileH3Prompt({
+      mode: 'ref2va', durationSec: 5,
+      references: { audios: [{ rel: 'a.wav' }], images: [] },
+      description: 'x', overall_soundscape: 'y',
+    });
+    add('B-回归', 'R31 纯音频参考被拦（官方要求配图/视频）',
+      lone.warnings.some((w) => w.includes('参考音频必须配')), JSON.stringify(lone.warnings));
+
+    // ---- R32 输出自检能识别自造历史字段 ----
+    const lintW = [];
+    H3.lintCompiledPrompt('CRITICAL STYLE RULE:\nno rain\n[Pan left]', 'base', lintW);
+    add('B-回归', 'R32 自检能识别负面词', lintW.some((w) => w.includes('否定表述')));
+    add('B-回归', 'R32 自检能识别方括号运镜', lintW.some((w) => w.includes('video-01-director')));
+    add('B-回归', 'R32 自检能识别缺字段', lintW.some((w) => w.includes('缺少官方字段')));
+
+    // ---- R33 运镜词不能产出病句 ----
+    add('B-回归', 'R33 英文 fixed 变成完整谓语句',
+      H3.cameraPhrase('fixed') === 'stays locked off on a tripod', H3.cameraPhrase('fixed'));
+    add('B-回归', 'R33 中文推近 → 英文自然句',
+      H3.cameraPhrase('推近').includes('pushes in'), H3.cameraPhrase('推近'));
+    add('B-回归', 'R33 空运镜 → 固定机位', H3.cameraPhrase('') === 'stays locked off on a tripod');
   }
 }
 
