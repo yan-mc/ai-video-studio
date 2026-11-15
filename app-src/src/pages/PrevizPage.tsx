@@ -128,6 +128,32 @@ export function PrevizPage() {
       if (mode === 'preview') setPreview(r);
       else setResults((prev) => ({ ...prev, [mode]: r }));
       setMsg(`${mode}：${r.frames} 帧 / ${r.seconds}s`);
+      /**
+       * ⚠️ 占位人偶必须显式警告。
+       *
+       * 镜头卡没配 actors 时 Blender 会渲"两人对峙"占位人偶 —— 而 H3 会把
+       * 参考视频里的这两个人当成**真实主体**，输出里真的出现两个人形剪影。
+       * 实测截图见 docs/probes/。用户以为只要求了一个角色，结果多出两个人。
+       *
+       * 这是**渲染成功但结果不可用**的一类失败，不能只写在 msg 里。
+       */
+      if (Array.isArray(r.warnings) && r.warnings.length) {
+        setErr(r.warnings.join('；'));
+        if (mode !== 'preview') {
+          const ok = window.confirm(
+            `${r.warnings[0]}\n\n仍要把这段产物当参考/控制视频用吗？\n`
+            + '（点「取消」可先去渲染页配好走位再回来渲）',
+          );
+          if (!ok) {
+            setResults((prev) => {
+              const next = { ...prev };
+              delete next[mode];
+              return next;
+            });
+            setErr('已放弃使用这份占位人偶产物。请先在「渲染页 → 3D 走位」配好角色。');
+          }
+        }
+      }
     } catch (e) {
       setErr(describeError(e));
     } finally {

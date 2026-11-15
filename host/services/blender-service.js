@@ -437,7 +437,6 @@ export function buildSceneSpec(shot, opts = {}) {
       { name: 'B', heightM: 1.70, color: '#ffffff', position: [0.6, 0, 0], action: 'stand' },
     ]
     : shot.actors;
-
   const actors = actorSrc.map((a, i) => ({
     name: String(a.name || `Actor${i + 1}`),
     heightM: Number(a.heightM) || 1.72,
@@ -511,7 +510,22 @@ export function buildSceneSpec(shot, opts = {}) {
     camera,
     actors,
     props,
+    /**
+     * `derived: true` = 镜头卡里**没有配 actors**，这些是"两人对峙"占位人偶。
+     *
+     * ⚠️ 这个标记必须一路传到界面和生成链路。
+     *    实测后果：拿一份没配走位的镜头卡渲 blockout，Blender 会按占位人偶
+     *    渲出**两个静止的白色人形**；H3 把这两人当参考视频里的主体，
+     *    于是输出里真的出现两个棕色人形剪影，而用户以为自己只要求了一个角色。
+     *    （详见 docs/probes/ 里那次端到端截图。）
+     *
+     *    所以：占位人偶渲出来的参考视频**不能直接当参考视频用**。
+     */
     derived,
+    /** 给人看的警告，空数组表示走位已配置 */
+    warnings: derived
+      ? ['镜头卡没有配置 3D 走位，已用"两人对峙"占位人偶。这样渲出的参考视频会被模型当成真实主体，请先在「渲染页 → 3D 走位」里配好角色再渲。']
+      : [],
   };
 }
 
@@ -641,6 +655,9 @@ export async function renderControl({ mode, spec, cfg = loadConfig(), jobId = ''
     blender: st.exe,
     exitCode: r.code,
     missingAssets: prepared.missing,
+    // 占位人偶警告一路带到 REST 响应，前端才能提示
+    derived: Boolean(spec?.derived),
+    warnings: Array.isArray(spec?.warnings) ? spec.warnings : [],
     // 直接告诉调用方"这个产物该填到哪"
     hint: modeUsage(mode) === 'control'
       ? '填进镜头的「控制视频」字段（shot.control.videoRel），走 Fun ControlNet'

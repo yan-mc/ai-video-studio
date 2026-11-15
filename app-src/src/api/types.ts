@@ -490,6 +490,15 @@ export interface BlenderRenderResult {
   usage?: 'control' | 'reference' | 'preview' | 'unknown';
   /** 后端给的一句话说明「该填到哪」 */
   hint?: string;
+  /**
+   * true = 镜头卡没配 actors，渲染用的是"两人对峙"占位人偶。
+   *
+   * 占位人偶会被 H3 当成参考视频里的真实主体，输出里真的多出两个人。
+   * 前端必须警告并阻止直接使用。
+   */
+  derived?: boolean;
+  /** 渲染警告（当前只有占位人偶一种） */
+  warnings?: string[];
 }
 
 /* ------------------------------ 分辨率 ------------------------------ */

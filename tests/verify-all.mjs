@@ -1619,6 +1619,75 @@ const comfy = await import('../host/services/comfy-client.js');
     fs.rmSync(extrasTmp, { recursive: true, force: true });
   }
 
+  /* ==================================================================
+   * R36–R37：真机跑通后补的回归
+   *
+   * 下面两条都是**静态断言看不出来**的问题 —— 只有真的跑一次、
+   * 真的看一眼产物才发现。详见 docs/probes/e2e-2026-11-15/REPORT.md。
+   * ================================================================== */
+  {
+    const { buildSceneSpec } = await import('../host/services/blender-service.js');
+
+    // ---- R36 帧数必须落在 17k+5 网格 ----
+    //
+    // 修之前是 `round(dur*24)`：5 秒 → 120 帧，比目标视频短 4 帧，
+    // 尾部走位没人跟（社区也记录过 120 帧 blockout 被裁成 107 帧）。
+    const grid = (n) => (n - 5) % 17 === 0;
+    for (const d of [5, 6, 8, 10, 15]) {
+      const s = buildSceneSpec({ durationSec: d });
+      add('B-回归', `R36 ${d}s 的帧数在 17k+5 网格`, grid(s.frames), String(s.frames));
+    }
+    add('B-回归', 'R36 5 秒 = 124 帧（不是 120）', buildSceneSpec({ durationSec: 5 }).frames === 124,
+      String(buildSceneSpec({ durationSec: 5 }).frames));
+    add('B-回归', 'R36 15 秒 = 362 帧', buildSceneSpec({ durationSec: 15 }).frames === 362);
+
+    // ---- R37 占位人偶必须显式告警 ----
+    //
+    // 实测：没配 actors 时渲出的两个占位人偶会被 H3 当成参考视频里的**真实主体**，
+    // 成片里真的多出两个人形剪影。修之前 derived 标了但没有任何上层读它。
+    const noActors = buildSceneSpec({ durationSec: 5 });
+    add('B-回归', 'R37 无 actors 时 derived=true', noActors.derived === true);
+    add('B-回归', 'R37 无 actors 时给出 warnings', Array.isArray(noActors.warnings) && noActors.warnings.length > 0);
+    add('B-回归', 'R37 警告文案提到占位人偶',
+      (noActors.warnings[0] ?? '').includes('占位'));
+
+    const withActors = buildSceneSpec({
+      durationSec: 5,
+      actors: [{ name: 'X', heightM: 1.7, position: [0, 0, 0], action: 'walk' }],
+    });
+    add('B-回归', 'R37 配了 actors 时 derived=false', withActors.derived === false);
+    add('B-回归', 'R37 配了 actors 时无 warnings', withActors.warnings.length === 0);
+
+    // 相机默认值必须与"显式写等价 camera3d"得到同一结果
+    // （历史 bug：默认值绕过坐标换算，渲出整片纯灰）
+    const defCam = buildSceneSpec({ durationSec: 5 }).camera;
+    const expCam = buildSceneSpec({
+      durationSec: 5,
+      camera3d: { position: [0, 1.6, -4.2], target: [0, 0.95, 0] },
+    }).camera;
+    add('B-回归', 'R37 默认机位与显式机位一致',
+      JSON.stringify(defCam) === JSON.stringify(expCam), JSON.stringify(defCam));
+    add('B-回归', 'R37 默认机位已换算到 Blender 坐标',
+      defCam.position[1] === 4.2 && defCam.position[2] === 1.6, JSON.stringify(defCam.position));
+  }
+
+  {
+    // ---- R38 提示词句子不能粘连 ----
+    //
+    // 实测编译产物里出现过 `16:9 aspect ratio [Shot 1] A young woman…` ——
+    // 风格引导句没有结尾句号，与 [Shot 1] 粘成一句，模型会把
+    // "ratio [Shot 1]" 当同一个短语读。
+    const { compileH3Prompt } = await import('../host/services/h3-prompt.js');
+    const r = compileH3Prompt({
+      mode: 't2va', durationSec: 5, ratio: '16:9',
+      description: 'A girl walks', overall_soundscape: 'Wind',
+    });
+    add('B-回归', 'R38 风格引导句与 [Shot 1] 之间有句号',
+      /aspect ratio\.\s*\[Shot 1\]/.test(r.prompt),
+      r.prompt.split('\n')[0].slice(0, 120));
+    add('B-回归', 'R38 不出现两个连续句号', !/\.\.[^.]/.test(r.prompt.replace(/\.\.\./g, '')));
+  }
+
 
   // ---- R23 参考视频+音频合计时长 ≤14.8s ----
   {

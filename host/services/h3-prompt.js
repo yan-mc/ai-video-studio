@@ -1059,10 +1059,15 @@ function resolveStyle(input) {
 function styleLeadSentence(style, input) {
   const parts = [];
   const text = String(style?.en ?? '').trim();
-  if (text) parts.push(text);
+  if (text) parts.push(text.replace(/[.\s]+$/, ''));
   const ratio = input?.ratio ? String(input.ratio) : '';
   if (ratio) parts.push(`${ratio} aspect ratio`);
-  return parts.filter(Boolean).join('. ').replace(/\.\.+/g, '.');
+  const joined = parts.filter(Boolean).join('. ').replace(/\.\.+/g, '.');
+  // ⚠️ 必须留一个结尾句号。
+  //    调用方把这一段和 `[Shot 1] …` 直接拼接，没有句号时会出现
+  //    `16:9 aspect ratio [Shot 1] A young woman…` —— 两句话粘成一句，
+  //    模型会把 "ratio [Shot 1]" 当成同一个短语读。
+  return joined ? `${joined}.` : '';
 }
 
 function normalizeSubjects(list) {
