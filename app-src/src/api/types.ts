@@ -448,6 +448,22 @@ export interface BlenderHealth {
   available: boolean;
   exe: string;
   modes: string[];
+  /** 控制塔通道（depth/pose/canny/gray）—— 喂 Fun ControlNet，需额外模型 */
+  controlModes?: string[];
+  /** 参考视频通道（blockout）—— 喂 Ref2VA 的 ref_videos，无需额外模型 */
+  referenceModes?: string[];
+  /** 人眼预览（preview）—— 不参与生成 */
+  previewModes?: string[];
+  /** 推荐路线 id（当前是 'blockout'） */
+  recommended?: string;
+  /** 两条路线的说明，供 UI 直接渲染 */
+  routes?: Array<{
+    id: string;
+    name: string;
+    mode: string;
+    needsExtraModel: boolean;
+    description: string;
+  }>;
   script: string | null;
   detail: string;
 }
@@ -470,6 +486,10 @@ export interface BlenderRenderResult {
   spec: string;
   blender: string;
   exitCode: number;
+  /** 产物用途 —— 决定它该填到镜头卡的哪个字段 */
+  usage?: 'control' | 'reference' | 'preview' | 'unknown';
+  /** 后端给的一句话说明「该填到哪」 */
+  hint?: string;
 }
 
 /* ------------------------------ 分辨率 ------------------------------ */

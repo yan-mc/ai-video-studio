@@ -114,7 +114,7 @@ POST /jiuzhang/api/resolution         {profile, ratio}
 POST /jiuzhang/api/h3/length          {durationSec, fps}
 ```
 
-**backend 取值**：`h3-local`（本地）/ `seedance-cloud`（云端）/ `mock`（占位）
+**backend 取值**：`h3-local`（本地视频）/ `h3-image`（本地图像）/ `mock`（**测试占位**，只出纯色卡）
 
 ### 2.4 图像生成
 

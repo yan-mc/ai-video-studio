@@ -1,7 +1,7 @@
 /**
  * ffmpeg / ffprobe 工具解析与进程运行。
  *
- * 从 seedance-client.js 拆出：工具解析是被 h3-workshop / media-probe / post /
+ * 工具解析是被 h3-workshop / media-probe / post /
  * api 共用的基础设施，不该寄生在某个云客户端模块里。
  *
  * 解析顺序（与运行时一致）：

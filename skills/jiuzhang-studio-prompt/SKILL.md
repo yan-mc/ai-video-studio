@@ -1,440 +1,350 @@
 ---
 name: jiuzhang-studio-prompt
-description: H3 与 Seedance 的提示词书写规范，含 9 种画风库、5 种生成模式的完整模板、三字段音效、镜头/运镜/预演控制写法。当需要为视频生成、图像生成、立绘拆解、漫画分格、模特套件编写提示词时使用。
+description: H3 视频 / H3-Image 图像 / 立绘拆解 的提示词书写规范。这是**唯一权威**的提示词文档：给出一套模式路由器 + 两套官方格式（基础格式三字段 / Ref2VA 六段），9 种本地画风，四类参考输入的编号规则，以及官方反模式清单。当需要为视频生成、图像生成、立绘拆解、漫画分格、模特套件编写或审查提示词时使用。
 ---
 
-# 提示词书写规范（H3 / Seedance / H3-Image）
+# 提示词书写规范（H3 / H3-Image）
 
-> 本 skill 是写提示词的唯一依据。插件 `studio_prompt` 工具与 `/prompt/*` 路由都按此规范实现。
-> 核心原则：**画风用英文，其余全中文**。
+> 本 skill 是写提示词的**唯一依据**。插件里的 `host/services/h3-prompt.js` 就是按它实现的，
+> `studio_prompt` 工具与 `/prompt/*` 路由都走那一份代码。
+>
+> **改动本文件时必须同步改 `h3-prompt.js`** —— 两边不一致就会出现"文档说一套、代码产另一套"，
+> 这正是这个项目此前混乱的根源。
 
 ---
 
-## 0. 五条铁律
+## 0. 先读完这四条，能避开 80% 的坑
 
-| # | 规则 | 原因 |
+| # | 铁律 | 为什么 |
 |---|---|---|
-| 1 | **画风描述必须用英文** | 视觉模型对英文风格关键词响应更精准 |
-| 2 | 其余全部中文（角色/规则/分镜/对白） | 中文描述更精确，且模型原生支持 |
-| 3 | **音色只绑定一次**（CHARACTER DEFINITION 里） | 分镜里重复写会干扰 |
-| 4 | **三字段音效不能空** | overall_soundscape / non_diegetic_music / 每段音效 |
-| 5 | **无负面提示词** | H3-Image 不支持；H3 用正向约束表达 |
+| 1 | **正文必须英文** | 官方提示词规范是 English-only。中文只允许出现在 `<d>[Chinese] 台词</d>` 内与画面文字双引号里。中文正文效果不稳，本地还有 tokenizer 坑 |
+| 2 | **不写负面提示词** | 本地 CFG 固定 1.0，采样器（`BasicGuider`）**没有 negative 分支**。写"不要 XX"反而把 XX 拉进画面。要排除就写"画面里只有…" |
+| 3 | **标签必须 `<Picture 1>` 这种形式** | 尖括号 + 半角空格 + 序号。Picture / Video / Audio 三类**各自**从 1 开始编号 |
+| 4 | **先算帧数再写时间戳** | 帧数在 `17k+5` 网格上（124 / 141 / … / 362）。所有时间戳必须 < `frames / 24` |
 
 ---
 
-## 1. 五种生成模式
+## 1. 核心设计：一个模式路由器 + 两套官方格式
 
-| 模式 | 输入 | 说明 |
-|---|---|---|
-| **T2VA** | 纯文本 | 文生视频 |
-| **I2VA** | 1 张图（首帧） | 从首帧向前发展 |
-| **FL2VA** | 0-2 张图 | 0=文生，1=首帧/尾帧，2=首尾帧控制 |
-| **L2VA** | 1 张图（尾帧） | 推断开头，收敛到给定尾帧 |
-| **Ref2VA** | 图≤9 + 视频≤3 + 音频≤3 | 全参考，**结构最完整** |
-
-**选择建议**：
-- 有角色立绘/角色卡 → **Ref2VA**（角色一致性最好）
-- 只有首帧构图 → I2VA
-- 需要精确起止画面 → FL2VA
-- 纯创意 → T2VA
-
----
-
-## 2. 画风库（9 种，英文原文）
-
-### 2.1 地狱把妹王（外观版）
-```
-Helltaker game visual aesthetic. High contrast black/white/deep red color palette. Flat cartoon character design — slightly larger head, slender limbs, flat torso, simplified geometric shapes. Thick jagged black outlines. Flat cel-shaded coloring with block shadows, no gradients. Render characters as 2D cartoons, NOT realistic. NO photorealistic textures, NO realistic skin shading, NO 3D proportions, NO PBR materials. NO subtitles, NO on-screen text.
-```
-禁止词：`写实质感、写实皮肤阴影、3D比例、PBR材质、渐变、柔光、模糊、照片级渲染`
-**会改变人物比例** · 适用：暗黑戏剧、暴力动作、冲击力亮相
-
-### 2.2 地狱把妹王（画风版）
-```
-Helltaker rendering style. High contrast black/white/deep red color palette. Flat cel-shaded coloring with block shadows, no gradients. Thick jagged black outlines. Render characters as 2D cartoons, NOT realistic. CRITICAL: Keep original character proportions unchanged. DO NOT exaggerate head size or limb length.
-```
-禁止词：`写实质感、写实皮肤阴影、PBR材质、渐变、柔光、比例改变、头部放大、四肢拉长`
-**保持原比例** · 适用：需要 Helltaker 光影但角色比例不变
-
-### 2.3 90年代OVA风
-```
-90s OVA animation style. Cel animation look. High saturation colors. Hard shadows (not block shadows). Film grain texture. Natural human proportions. Soft gradient blush. Thick but not jagged outlines. 4K.
-```
-禁止词：`写实质感、实拍质感、3D比例、粗黑锯齿轮廓、块状阴影`
-适用：怀旧日常、喜剧、情感戏
-
-### 2.4 新海诚风
-```
-Makoto Shinkai animation style. Soft atmospheric lighting. Shallow depth of field with bokeh background. Pale blue sky with translucent clouds. Lens flare. Water reflections. Natural human proportions. 4K.
-```
-禁止词：`硬阴影、粗黑轮廓、高对比、块状阴影、赛璐珞质感、胶片颗粒`
-适用：治愈系、都市夜景、梦幻场景
-
-### 2.5 吉卜力风
-```
-Studio Ghibli animation style. Warm atmospheric lighting. Hand-painted watercolor texture. Soft organic lines on buildings and trees. Natural light without overexposure. Warm color palette, moderate saturation. Natural proportions. 4K.
-```
-禁止词：`硬阴影、高对比、冷色过蓝、过曝、写实质感、数码感`
-适用：田园、异世界、奇幻冒险
-
-### 2.6 经典美式卡通
-```
-Classic American cartoon style. Even outlines (no jagged lines). Squash-and-stretch deformation. Flat fill colors. Minimal shadows. Bright saturated color palette. 2D flat animation.
-```
-禁止词：`锯齿状轮廓、日式腮红、胶片颗粒、赛璐珞质感、高对比阴影`
-**会改变人物比例** · 适用：喜剧、合家欢、夸张搞笑
-
-### 2.7 飞碟社风
-```
-Ufotable animation style. Digital painting with high contrast cinematography. Photorealistic detailed backgrounds. 2D cel-shaded characters with large hard shadows. Dramatic lighting. Particle effects. Deep color palette with lower saturation. 4K.
-```
-禁止词：`粗黑轮廓线、平涂无阴影、低对比、浅景深虚化、柔光、水彩质感`
-适用：热血战斗、奇幻史诗、特效炫酷
-
-### 2.8 三渲二 + PBR 混合
-```
-3D cel-shaded animation with PBR rendering. Thin dark outlines (not thick hand-drawn lines). Subsurface scattering on skin — soft, translucent, delicate. Soft studio lighting. Smooth shadow transitions, soft diffused shadows. Realistic fabric textures with wrinkles and bump. 3D physical hair strands with clear groups. Clean render, smooth surfaces.
-```
-禁止词：`粗黑手绘轮廓线、纯平涂赛璐珞、硬块状阴影、写实人类皮肤质感`
-适用：3D VTuber、偶像演出、现代都市
-
-### 2.9 GoHands 风
-```
-GoHands-inspired aesthetic, high-saturation color palette, strong urban contrast, sharp highlights on hair and glass, vibrant sky gradients, modern sleek anime lines.
-```
-禁止词：`低饱和、柔光、胶片颗粒、粗黑轮廓`
-适用：现代都市、街头、强光影
-
-### 画风选择决策树
+**这不是"哪个模板对"的选择题 —— 官方本来就是两套格式，按任务模式二选一。**
 
 ```
-参考图是什么类型？
-├─ 已经是 2D 动画/卡通
-│  ├─ 想保留原外观 → 用「画风版」（只改光影/色调）
-│  └─ 想改成另一种卡通 → 用「外观版」（改比例/轮廓）
-└─ 是 3D 模型/真人照片/写实图
-   └─ 需要强制转 2D → 用「外观版」+ Render as 2D cartoon, NOT realistic
+输入里有什么？
+├─ 参考视频 或 参考音频                    → 【Ref2VA 六段格式】（必须）
+├─ 参考图（≥1 张，且不是首/尾帧）          → 【Ref2VA 六段格式】
+├─ 首/尾帧（I2VA / FL2VA / L2VA）          → 【基础格式】+ 对齐指令
+└─ 什么都没有                               → 【基础格式】+ 三字段
 ```
+
+代码里对应 `h3-prompt.js` 的 `routeFormat()`。**不要在别处再判断一遍模式。**
+
+### 两条硬性互斥
+
+| 互斥 | 说明 |
+|---|---|
+| 首尾帧 ⊥ 全参考 | 官方明确 `first_frame/last_frame` 与 `ref_images/ref_videos/ref_audios` **不可同请求**。要锁关键帧请改用 Ref2VA + `MiniMaxH3AddGuide` |
+| `fl2va` 权重 ⊥ `ref2va` 权重 | 两个 checkpoint 不通用。有参考素材就必须用 `ref2va` |
 
 ---
 
-## 3. Ref2VA 六段式（完整模板）
+## 2. 基础格式（T2VA / I2VA / FL2VA / L2VA）
+
+### 2.1 结构
 
 ```text
-CRITICAL STYLE RULE:
-[英文画风描述]
-禁止：[中文禁止词]。
-NO subtitles, NO on-screen text.
+{对齐指令 —— 仅关键帧模式需要，必须是第一行，后接恰好一个空行}
 
-CRITICAL REFERENCE RULE:
-- <Picture 1> 是 [角色名] 的外观参考 — 面部、发型、服装全部保持一致。
-- <Picture 2> 是 [角色名] 的外观参考。
-- <Video 1> 是动作与运镜参考 ONLY — 仅用于动作路径和镜头运动，不复制角色外观或场景。
-- <Audio 1> 是 [角色名] 的声音参考 — [音色描述]，仅用于音色。
+integrated_multimodal_description: [Shot 1] {风格}, {景别}, {主体外观与位置}, {场景与关键道具}, {动作}. The camera {运镜}. {说话人} (S1) is visible on screen and says: <d>[Chinese] {台词}</d>
 
+overall_soundscape: {1–4 句环境声与物理声}
+
+non_diegetic_music: {1–3 句配乐} 或 N/A
+```
+
+### 2.2 三种对齐指令（**逐字照抄，不要"顺手统一"**）
+
+官方原文三种句式并不一致 —— I2VA 带尖括号、FL2VA 不带。这是原文如此，照抄。
+
+| 模式 | 第一行 |
+|---|---|
+| **I2VA** | `For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.` |
+| **FL2VA** | `How the reference pictures align with the target video — Picture 1 (from [Shot 1]) aligns with the 0.00-second mark of the target video; Picture 2 (from [Shot 1]) aligns with the {S.SS}-second mark of the target video.` |
+| **L2VA** | `How the reference pictures align with the target video — <Picture 1> (from [Shot 1]) aligns with the {S.SS}-second mark of the target video.` |
+| **T2VA** | 无对齐指令 |
+
+`S.SS` = **实际有效时长**（`frames / 24`，两位小数），不是用户填的秒数。
+例如填 5 秒 → 124 帧 → 5.17 秒 → 写 `5.17`。
+
+### 2.3 分镜时间戳
+
+```text
+[Shot 1] ...                        ← 首镜不带时间戳
+[Shot 2] At 00:03.500, ...          ← 单点时间戳，毫秒三位
+```
+
+| 写法 | 判定 |
+|---|---|
+| `At 00:03.500,` | ✅ 官方格式 |
+| `[3.5s-6.0s]` | ❌ **非法**，区间会被忽略 |
+| `At 00:03` | ❌ 缺毫秒，不是官方句式 |
+
+### 2.4 运镜写法
+
+用**自然语言句**，不要方括号标签：
+
+| 写法 | 判定 |
+|---|---|
+| `The camera pushes in with small amplitude at slow speed.` | ✅ |
+| `[Pan left]` / `[Zoom in]` | ❌ 那是上一代 `video-01-director` 的语法，H3 不认 |
+
+常用运镜（中文词 → 英文句，编译器内置同一张表）：
+
+| 中文 | 英文 |
+|---|---|
+| 推近 / 推镜 | `pushes in with small amplitude at slow speed` |
+| 拉远 / 拉镜 | `pulls back with moderate amplitude at slow speed` |
+| 横摇 / 摇镜 | `pans horizontally at steady speed` |
+| 俯仰 | `tilts vertically at steady speed` |
+| 跟拍 | `tracks the subject from a fixed distance` |
+| 环绕 | `orbits around the subject at constant radius` |
+| 升降 / 摇臂 | `cranes vertically with a smooth arc` |
+| 手持 | `moves with a subtle handheld sway` |
+| 固定 / 静止 | `stays locked off on a tripod` |
+
+### 2.5 台词
+
+```text
+{说话人} (S1) is visible on screen and says: <d>[Chinese] {台词逐字}</d>
+```
+
+- `(S1)` / `(S2)` 按**发声顺序**编号，全篇不变。合声写 `(S1,S2)`。
+- 台词**逐字不改写**，不要加引号包起来。
+- 画外音：`says in an off-screen voiceover` + 紧跟一句声明 `lips remain completely closed`。
+- 跨切台词：两侧都写 `<scenetrans>` + 声明音频延续。
+- 被截断台词：写 `<cutoff>`。
+- **台词时长超过镜时长是最常见的口型崩坏原因**。按约 4–5 字/秒反推。
+
+---
+
+## 3. Ref2VA 六段格式（有参考素材时）
+
+### 3.1 结构（字段顺序固定，不可调整）
+
+```text
 subject_definitions:
-[角色名] = 外观来自 <Picture 1> — [发色、发型、瞳色、服装、配饰、身高]。此角色为说话人 (S1)。
-[角色名] = 外观来自 <Picture 2> — [...]. 此角色为说话人 (S2)。
-
-CHARACTER DEFINITION — [角色名] (S1):
-- 性别：FEMALE
-- 身高：[数字]cm
-- 关键特征：[发色、瞳色、配饰]
-- 性格：[性格]
-- 声音：锁定 <Audio 1>，[音色描述]
-
-CHARACTER DEFINITION — [角色名] (S2):
-[...]
+<Subject 1> is the character shown in <Picture 1>, with {可识别特征}. This subject is the on-screen speaker (S1).
+<Video 1> is the source for camera movement, blocking and motion timing. It does not define character appearance.
+<Audio 1> is the voice-timbre reference for <Subject 1>.
 
 summary:
-[一句话概括视频内容]
+[reference generation + audio reference] {一句话核心事件}
 
 retention_analysis:
-[角色A]（出现在 <Picture 1>）：fully_preserved — 保持 [特征] 一致。
-[角色B]（出现在 <Picture 2>）：fully_preserved — 保持 [特征] 一致。
-<Video 1>：attribute_transfer — 仅迁移动作与运镜。
-<Audio 1>：reference — 仅跟随音色与语气。
+<Subject 1> (appears in [Shot 1]): fully_preserved - keep {具体要保住的点}.
+<Video 1>: attribute_transfer - transfer motion and camera movement only; do not copy characters or set.
+<Audio 1>: reference - follow timbre and delivery only; do not copy the waveform.
 
-non_diegetic_music: N/A 或 [时间段] [音乐描述]
+detailed_description:
+{1–2 句风格与影调定调}
 
-SCENE LAYOUT:
-[地点、空间布局、光线色调、角色站位]
-[如首尾帧：起始画面 → 结束画面]
+[Shot 1] {景别}, {主体位置与动作}. The camera {运镜}. <Subject 1> (S1) says: <d>[Chinese] {台词}</d>
+[Shot 2] At 00:05.000, the shot cuts to {景别}, {内容}.
 
-overall_soundscape: [1-4 句环境声/动作声/非语言人声，不能空]
+overall_soundscape: {1–4 句}
 
-MOTION DESCRIPTION:
-[0.0s-2.5s] [景别]。[动作描述] 运镜：[运镜]。
-音效：[环境音]（叙事内）。
-音效：(S1) —— <d>[中文] 台词内容</d>（情绪）。
-[2.5s-5.0s] [...]
+non_diegetic_music: {N/A 或 1–3 句}
 ```
 
-### 结构铁律
+### 3.2 四类引用标签
 
-| 字段 | 必须写 | 不要写 |
-|---|---|---|
-| `subject_definitions` | 外观一次性绑定 + 显式特征 | 分镜里反复提 `<Picture X>` |
-| `CHARACTER DEFINITION` | 性别/身高/特征/性格/音色 | 重复外观描述 |
-| 分镜 | 直接写人名 | `<Picture X>` + 外观特征 |
-| `SCENE LAYOUT` | 集中写空间布局 | 分散在各时间段 |
-| 参考视频 | 明确用途声明 | 不声明（模型会照抄视频角色） |
-| 首尾帧 | 明确 START/END 标注 | 不标注 |
-
----
-
-## 4. T2VA 三段式
-
-```text
-CRITICAL STYLE RULE:
-[英文画风]
-
-integrated_multimodal_description:
-[Shot 1] [风格/介质/光线/色调]，[景别] frames [主体]，[主体外观与动作]。The camera [运镜类型+幅度+速度] toward [目标]。At 00:0X.XXX, [切镜/事件]。[角色] (S1) says: <d>[中文] [台词]</d>。
-
-overall_soundscape: [1-4 句环境声/动作声]
-
-non_diegetic_music: [1-3 句配乐；无则 N/A]
-```
-
----
-
-## 5. 关键帧模式（I2VA / FL2VA / L2VA）
-
-```text
-# FL2VA
-How the reference pictures align with the target video — Picture 1 (from [Shot 1]) aligns with the 0.00-second mark of the target video; Picture 2 (from [Shot 1]) aligns with the [S.SS]-second mark of the target video.
-
-integrated_multimodal_description:
-[Shot 1] [首帧状态] → [可观察的中间变化] → [逐步缩小差异] → [尾帧状态]。The camera [运镜]。[角色] (S1) says: <d>[中文] [台词]</d>。
-
-overall_soundscape: [...]
-
-non_diegetic_music: N/A
-```
-
-- I2VA 只写 Picture 1 对齐 0.00 秒
-- L2VA 只写 Picture 1 对齐结尾实际时长
-- `S.SS` 必须是后端实际有效时长（按 17k+5 帧网格换算，保留两位小数）
-
-### 首尾帧注意事项
-
-| 要点 | 说明 |
+| 标签 | 含义 |
 |---|---|
-| 首尾帧图不要含字幕/文字 | 会干扰生成 |
-| 首尾帧宽高比必须一致 | 确保画面平滑过渡 |
-| 分镜聚焦"演变" | 描述从首帧→中段→尾帧的动态变化 |
-| 首尾帧仅提供构图 | 角色外观仍由 `subject_definitions` 锁定 |
+| `<Subject N>` | 从参考素材抽象出的、可在目标视频中复用/修改的**可见内容**（人/物/场景/服装/风格/动作/表情） |
+| `<Picture N>` | 作为**具体帧锚点**的参考图（首帧/关键帧/尾帧/构图锚点/故事板） |
+| `<Video N>` | 提供**整段视频级关系**：剪辑源、续接起点、运镜/节奏/时间结构 |
+| `<Audio N>` | 被复制或被参考的音频信号 |
 
----
+> **`<Subject N>` 不是上传槽** —— 它由 `subject_definitions` 创建。素材上传槽是 `<Picture N>` / `<Video N>` / `<Audio N>`。
 
-## 6. 音效三字段
+### 3.3 两套保留标记（**不可混用**）
 
-| 字段 | 内容 | 位置 |
-|---|---|---|
-| `overall_soundscape` | 画内音：环境音、脚步声、引擎声 | 顶层字段 |
-| `non_diegetic_music` | 画外音/配乐：N/A 或描述 | 顶层字段 |
-| `音效：` | 每段分镜的同步音效和台词 | MOTION DESCRIPTION 内 |
-
-**标准写法**
-```text
-non_diegetic_music: N/A
-non_diegetic_music: [0s-5s] soft piano melody, melancholic mood
-音效：distant applause echoes faintly, a drum cymbal vibrates softly. (Diegetic)
-```
-
-### 台词规范
-
-| 要素 | 规范 |
+| 视觉类（`<Subject>` / `<Picture>` / `<Video>`） | 音频类（`<Audio>`） |
 |---|---|
-| 说话人标识 | `(S1)` `(S2)`，按出场顺序分配 |
-| 对话标签 | `<d>` 包裹 |
-| 语言标注 | `<d>[中文]` `<d>[日语]` `<d>[English]` |
-| 位置 | 写在 `音效：` 字段中 |
+| `fully_preserved` | `fully_copy` |
+| `partially_preserved` | `partially_copy` |
+| `attribute_transfer` | `reference` |
+| `weak_reference` | `weak_reference` |
+
+`weak_reference` 是两套唯一共有的。**拿 `fully_preserved` 描述音频是社区最常犯的错。**
+
+### 3.4 `summary` 的任务类型前缀
+
+固定 6 个枚举，用 ` + ` 连接，不可重复：
 
 ```text
-音效：(S1) —— <d>[中文] 我明白了。</d>（语气从慌乱中恢复平静）
+keyframe completion / reference generation / video editing /
+video continuation / audio reuse / audio reference
 ```
 
-**音色不在分镜重复**——已在 CHARACTER DEFINITION 绑定。
+例：`[reference generation + audio reference] {核心事件}`
+
+### 3.5 `detailed_description` 的长度
+
+官方建议生成任务 **350–500 英文词**。对白密集时优先保证台词时间轴完整，不要机械凑字数。
+
+**内容太少会退化成随机抽卡** —— 起码要有：主体 + 场景 + 动作 + 镜头 + 收束。
 
 ---
 
-## 7. 视频参考的四种用途
+## 4. 音效两字段（不能空）
 
-```text
-# 续篇（最常用）
-- <Video 1> 是**上一段视频**——本次生成 <Video 1> 的续篇
-
-# 仅动作/运镜参考
-- <Video 1> 是动作和运镜参考 ONLY — 仅用于动作路径和镜头运动，不复制角色外观或场景
-
-# 仅节奏参考
-- <Video 1> 是剪辑节奏参考 ONLY — 仅用于切镜时机和叙事节奏，不复制内容
-
-# 仅氛围参考
-- <Video 1> 是氛围与光线参考 ONLY — 仅用于气氛，不用于角色设计
-```
-
-**输入限制**：≤3 段，每段 2-15 秒，单段 ≤50MB，H.264/H.265
-
-**⚠️ 合计时长硬限制**：参考视频 + 参考音频的**总时长 ≤ 14.8 秒**。超限时后端会自动裁剪（先砍音频、再砍视频）并写入 warnings。这是 H3 的参考输入共用时间预算，15 秒是理论边界，14.8 是留了测量误差余量的实用值。
-
----
-
-## 7.5 四类参考的编号规则（最容易错的地方）
-
-H3 的 Ref2VA 有**四类**参考输入，编号规则各不相同：
-
-| 输入 | 类型 | 前缀 | 上限 | 提示词标签 |
-|---|---|---|---|---|
-| `ref_images` | IMAGE | `ref_image_` | 9 | `<Picture i>` |
-| `ref_videos` | IMAGE（**帧序列**） | `ref_video_` | 3 | `<Video k>` |
-| `ref_video_audios` | AUDIO | `ref_video_audio_` | 3 | `<Audio j>` |
-| `ref_audios` | AUDIO | `ref_audio_` | 3 | `<Audio j>` |
-
-### `<Picture>` / `<Video>` 按各自类型独立累加
-
-```
-第 1 张图 → <Picture 1>
-第 2 张图 → <Picture 2>
-第 1 段视频 → <Video 1>       ← 视频从 1 开始，不与图片混号
-```
-
-### `<Audio>` 是全局累加，视频音轨会先占号 ★
-
-这是最容易算错的一点。**视频自带的音轨也算一个 `<Audio>`。**
-
-实例：1 段带音轨的参考视频 + 1 段独立音频
-
-```
-<Picture 1>   ← 第 1 张图
-<Audio 1>     ← 视频的音轨        ← 注意！它占了 Audio 1
-<Video 1>     ← 第 1 段视频
-<Audio 2>     ← 独立音频           ← 不是 Audio 1！
-```
-
-**如果按「独立音频 = Audio 1」去写提示词，模型指向的音源就全错了。**
-
-### 编号不要自己推
-
-调 `/render/plan` 或 `POST /render/compile`，后端会返回真实编号
-（`images[].index`、`videos[].index`、`videos[].audioIndex`、`audios[].audioIndex`），
-直接拿来写提示词。
-
-前端渲染页左栏显示的 `P1/P2/V1` 就是这个编号。
-
-### 视频与其音轨必须同号
-
-`ref_video_3` 的音轨必须是 `ref_video_audio_3`（源码按编号配对，不按数组顺序）。
-**没有音轨的视频不要接 `ref_video_audios`** —— 会收到"有音轨但内容是空"，效果比不接更差，
-而且不报错。这一条要靠 ffprobe 探测，不能默认 `true`。
-
----
-
-## 7.6 控制视频（Blender 白模）的提示词写法 ★
-
-控制视频改变了提示词的作用方式：**结构由控制视频决定，提示词只负责"这是什么"**。
-
-### 铁律：提示词必须描述画面里**真实存在**的东西
-
-| 控制视频里有 | 提示词该写 | 提示词**不该**写 |
+| 字段 | 写什么 | 数量 |
 |---|---|---|
-| 两个人 | 「两位少女」 | 「一个少女」（会硬塞一个人进画面） |
-| 一张长椅 | 「木制长椅」 | 「沙发」「石台」 |
-| 相机在人物前方 | 「正面视角」 | 「俯拍」 |
-| 人物在走 | 「并肩漫步」 | 「静止站立」 |
+| `overall_soundscape` | 环境声、物理动作声、非语言人声（脚步/布料/碰撞/呼吸/笑）。**不含台词与配乐** | 1–4 句 |
+| `non_diegetic_music` | 只有观众能听到的配乐：乐器 + 速度 + 节奏 + 动态 | 1–3 句，无则 `N/A` |
 
-**实测事故**：控制视频里是两人站立，提示词写了「一个金发少女」，
-结果前 2 秒画面被提示词抢走，后半段才回到控制视频的构图。
-
-### 推荐结构（控制视频模式）
-
-```
-[英文画风] + [场景/时间/光线] + [人数与角色身份] + [正在做什么] + [主要道具] + [机位方向]
-```
-
-示例（三段白模 → 成片）：
-
-```
-# 镜1（控制里有：两人从两侧走向长椅）
-90s OVA animation style, cel animation look, high saturation. 
-黄昏海滩，两位少女（金发礼帽、紫发羊角）从画面两侧并肩走向中间的一张木制长椅，
-海浪在背景，暖色逆光，电影感构图。
-
-# 镜2（控制里有：两人坐在长椅上）
-...两位少女并肩坐在木制长椅上，面朝大海，肩膀自然靠在一起...
-
-# 镜3（控制里有：两人相向倾身）
-...两位少女坐在长椅上，相向倾身，脸贴近，闭上眼，就要亲吻，暖色逆光，特写。
-```
-
-### 控制强度与提示词自由度的权衡
-
-| strength | 效果 | 提示词空间 |
-|---|---|---|
-| 0.6—1.0 | 柔和引导，模型仍有较大自由 | 大（但可能不跟构图） |
-| **1.0—1.5** | **推荐区间**，结构与生成自由度平衡 | 中 |
-| 1.5—2.5 | 强约束，画面容易发僵 | 小 |
-
-`start_percent` / `end_percent` 控制生效区间：
-默认 `0.0 → 0.85`，即前 85% 去噪步受控，尾部留给模型补细节。
-画面发僵就缩短区间（如 `0.0 → 0.7`）。
-
-### 控制视频 vs 参考视频（别混）
-
-| | 参考视频 `ref_videos` | **控制视频 `control`** |
-|---|---|---|
-| 机制 | 语义参考（模型"看"过） | **逐帧结构约束**（ControlNet） |
-| 会不会跟着走 | **不保证** | **会** |
-| 输入 | IMAGE 帧序列 | IMAGE 帧序列（`GetVideoComponents` 拆出来） |
-| 提示词影响 | 大 | 小（结构已定） |
-| 耗时 | 基准 | **+80%** |
-
-> 要"锁定构图/走位/时间点"用控制视频；要"给个风格/运镜参考"用参考视频。
+**不要写"不要 BGM"** —— 用 `non_diegetic_music: N/A`，并且**不要在别处提音乐氛围**（提了会漏，实测约 20% 仍加音乐）。
 
 ---
 
-## 8. 分镜设计规则
+## 5. 四类参考输入的编号规则（最容易错）
 
-### 时长分配
+### 5.1 各自独立累加
 
-| 总时长 | 推荐段数 | 每段时长 | 风险 |
+| 类型 | 编号 | 上限 | 时长约束 |
 |---|---|---|---|
-| 4-5 秒 | 2 段 | 2-2.5 秒 | 低 |
-| 6-7 秒 | 2-3 段 | 2-3 秒 | 低 |
-| 8-10 秒 | 3-4 段 | 2.5-3 秒 | 中 |
-| 11-13 秒 | 4 段 | 2.5-3.5 秒 | 高 |
-| 14-15 秒 | 5 段 | 2.8-3 秒 | **极高，易崩溃** |
+| 参考图 | `<Picture 1..9>` | ≤ 9 张 | — |
+| 参考视频 | `<Video 1..3>` | ≤ 3 段 | 每段 2–15 s，合计 ≤ 15 s |
+| 参考音频 | `<Audio 1..3>` | ≤ 3 段 | 每段 2–15 s，合计 ≤ 15 s |
 
-### 景别交替
-```
-全景 → 中景 → 特写 → 中景 → 远景
+**合计参考文件 ≤ 12 个。**
+
+### 5.2 `<Audio>` 是全局累加，视频音轨先占号 ★
+
+```text
+1 个带音轨的参考视频 + 1 个独立音频
+  → <Audio 1> 是视频的音轨
+  → <Audio 2> 才是那个独立音频
 ```
 
-### 动作密度
-| 复杂度 | 安全时长 |
-|---|---|
-| 单一动作 | 2-3 秒 |
-| 2 个连续动作 | 2.5-3.5 秒 |
-| 3 个以上连续动作 | 3.5-4 秒（高风险，需分割） |
+按"独立音频 = Audio 1"去写，提示词就全错。**编号由后端算，不要自己推。**
+
+### 5.3 视频与其音轨必须同号
+
+ComfyUI 按编号配对，不按数组顺序。没有音轨的视频**不要**接 `ref_video_audios`，否则编号错位。
+
+### 5.4 参考音频必须伴随图像或视频
+
+官方模型卡要求音频不能作为唯一输入。**本地 ComfyUI 节点不拦这个**（能跑通），但违反官方语义，音色会漂。插件按官方约束拦。
+
+### 5.5 参考视频必须声明用途，否则模型会照抄
+
+| 用途 | `subject_definitions` 里怎么写 | `retention_analysis` 标记 |
+|---|---|---|
+| 动作/运镜 | `is the source for camera movement, blocking and motion timing` | `attribute_transfer` |
+| 节奏 | `is the source for editing rhythm and shot timing` | `weak_reference` |
+| 氛围 | `is the source for atmosphere and lighting only` | `weak_reference` |
+| 续篇 | `is the immediately preceding clip; the target video continues it directly` | `fully_preserved` |
 
 ---
 
-## 9. 稳定性对策
+## 6. 灰模参考视频（blockout）的提示词写法 ★
 
-| 问题 | 对策 |
+这是本项目**推荐的 3D 预演路线** —— Blender 只负责运动与空间，渲一段灰模视频当参考视频。
+
+### 6.1 三条必写
+
+```text
+<Video 1> is the source for camera movement, blocking and motion timing.
+It does not define character appearance.
+```
+
+```text
+Deliver a fully rendered frame in the target style; the reference video supplies motion and staging only.
+```
+
+```text
+<Subject 1> path comes from the RED TALL CAPSULE in <Video 1>
+```
+
+### 6.2 铁律：提示词必须描述参考视频里**真实存在**的东西
+
+人数、主要道具、机位方向这三样**必须一致**。实测：控制/参考约束的是**结构**，提示词约束的是**内容与语义**。两者冲突时前段（高 sigma）偏提示词，后段偏参考。
+
+所以参考视频里有两个人，提示词写"一个少女在走" → 前几秒会被提示词抢走。
+
+### 6.3 多角色必须上身份色
+
+全灰 playblast 会丢失身份区分，实测多人同框时左右会互换。给每个角色饱和色（红/蓝/绿/黄/紫/青）并在提示词里引用色号。
+
+---
+
+## 7. 画风库（9 种，本地风格集）
+
+> ⚠️ 这 9 个是**本地命名**，不是官方风格库。`OVA90s` / `Helltaker-look` / `toon3d-pbr` 检索无公开出处。
+>
+> ⚠️ **风格词会与参考素材竞争。** 有参考图/参考视频时，风格块要短（编译器在 Ref2VA 分支下截到 180 字符），风格 LoRA 强度建议压到 ~0.5。
+
+| id | 名称 | 类别 | 改外观？ |
+|---|---|---|---|
+| `helltaker-look` | 地狱把妹王（外观版） | 2D扁平卡通 | ✅ 会改 |
+| `helltaker-style` | 地狱把妹王（画风版） | 2D扁平卡通 | ❌ |
+| `ova90s` | 90年代OVA风 | 2D手绘赛璐珞 | ❌ |
+| `shinkai` | 新海诚风 | 2D手绘柔光 | ❌ |
+| `ghibli` | 吉卜力风 | 2D手绘柔光 | ❌ |
+| `american-toon` | 经典美式卡通 | 2D扁平弹性 | ✅ 会改 |
+| `ufotable` | 飞碟社风 | 3D背景+2D角色 | ❌ |
+| `toon3d-pbr` | 三渲二+PBR混合 | 3D半写实 | ❌ |
+| `gohands` | GoHands 风 | 现代锐利 | ❌ |
+
+英文原文以 `h3-prompt.js` 的 `STYLE_PRESETS` 为准（那份是唯一真源，前端下拉也读它）。
+
+### 选择建议
+
+- 要**换角色长相** → `helltaker-look` / `american-toon`（标了"会改"的）
+- 要**保留原角色设计、只换渲染风格** → 其余 7 种
+- **有角色卡/参考图时优先选 `changesAppearance: false` 的** —— 否则风格会覆盖参考图里的设计
+
+---
+
+## 8. 硬约束速查
+
+| 项 | 值 |
 |---|---|
-| 人物崩坏 | `subject_definitions` 一次绑定 + 显式写明发色瞳色 + 分镜只提人名 |
-| 手部畸形 | 特写不超过 3 秒，指定具体动作 |
-| 跳切后服装突变 | `subject_definitions` 锁定服装参考图 |
-| 性别漂移 | `CHARACTER DEFINITION` 中声明 `性别：FEMALE/MALE` |
-| 面部不一致 | 锁定面部参考图 + 显式写明关键面部特征 |
-| BGM/字幕残留 | `non_diegetic_music: N/A` + `NO subtitles` |
-| 写实质感残留 | `CRITICAL STYLE RULE` 明确 `Render as 2D cartoon, NOT realistic` |
-| 多角色串脸 | 每个角色绑定独立图片 + 双重锁定 |
-| 参考视频抢特征 | 声明 `video ONLY for motion/camera, NOT for appearance` |
-| 首尾帧构图错位 | 保持宽高比一致，明确动态路径 |
+| 帧网格 | **`17k+5`** → 5, 22, …, 124, …, 362 |
+| 最短 | **124 帧 ≈ 5.17 s**（不是 4 秒！官方口径 4–15s，但节点网格上 36 帧以下不可达） |
+| 最长 | 362 帧 ≈ 15.08 s |
+| 分辨率 | 短边 768；面积上限 768×1344；宽高 **32 倍数** |
+| 16:9 原生 | 1344×768 |
+| 2K | 仅 API，本地不可得 |
+| CFG | **1.0**，无 negative 分支 |
+| 步数 | 官方基线 20；Turbo FL2VA 4/8、Ref2VA 4 |
+| 提示词长度 | ≤ 7000 字符 |
+| 音频 VAE | **必须 fp32**（fp16 会静音） |
+| 输出音频 | 32 kHz 立体声 |
+
+---
+
+## 9. 官方反模式清单
+
+| # | 反模式 | 后果 | 正确做法 |
+|---|---|---|---|
+| 1 | 写负面提示词 / ban list | `cfg=1` 无 negative 分支，**被点名的概念反而更容易出现** | 正向陈述；或用 Ref2VA 的 `retention_analysis` |
+| 2 | 只写一段话不分段 | 模型无法分配时间轴 | 按模式拆字段 |
+| 3 | 素材上传了但没写用途 | 参考被静默忽略 | 每个素材写"参考什么 + 保留到什么程度" |
+| 4 | 开头就写光线/形容词 | **模型对开头权重最高**，会拍成"关于光的镜头" | 顺序：主体 → 动作 → 镜头 → 光线 → 声音 |
+| 5 | 堆叠风格词 | 与参考素材**互相竞争** | 有参考时风格词写少 |
+| 6 | 一镜到底却写很多分镜 | 结构自相矛盾 | 删掉 `[Shot N]` 结构 |
+| 7 | 台词时长超过镜时长 | **口型崩坏（最高频）** | 约 4–5 字/秒反推 |
+| 8 | 时间戳写区间 `[5s-8s]` | 格式非法 | 单点 `At 00:05.000,` |
+| 9 | 把参考图都当关键帧 | 身份照当首帧，构图错位 | 身份参考写 `<Subject N>`；真要当帧才写 `<Picture N>` |
+| 10 | 只写"用视频1做参考" | 模型连演员/背景/声音一起抄 | 外观/动作/节奏/运镜/音频分别指派 |
+| 11 | 同一声明的说话人重编号 | 路由错乱、角色说错台词 | `(S1)` 全篇不变 |
+| 12 | 音频标记用错 | 只想借音色却整轨照搬 | 复制用 `fully_copy`，借音色用 `reference` |
+| 13 | 提示词过短（纯文生） | 官方明确列为失败模式 | 至少写全：主体外观 + 场景 + 动作 + 风格 |
+| 14 | 中文提示词 | 非官方路径，效果不稳 | 正文英文；中文只在 `<d>` 与画面文字内 |
+| 15 | 负面框写"不要 BGM" | 与"想要音乐"矛盾，且约 20% 仍泄漏 | `non_diegetic_music: N/A` |
+| 16 | 塞分镜标签 `[char:]`/`[shot:]` | 官方明确要求剥离 | 渲染前删干净 |
 
 ---
 
@@ -444,173 +354,99 @@ H3 的 Ref2VA 有**四类**参考输入，编号规则各不相同：
 
 | 项 | H3 视频 | H3-Image |
 |---|---|---|
-| 步数 | Turbo 4/8，非 Turbo 20 | **固定 6** |
-| guidance | 1.0 | **固定 1.0** |
-| 负面提示 | 用正向约束 | **不支持** |
-| 提示词长度 | ≤7000 字符 | ≤4096 token |
-| 参考图 | Ref2VA ≤9 | **≤16** |
-| 尺寸 | 32 倍数 + 官方档位 | 32 倍数，0=自动 2048² |
+| 步数 | 4（Turbo）/ 20（基线） | **固定 6** |
+| guidance | 1.0 | 1.0 |
+| 负面提示词 | 不支持（cfg=1） | **不支持**（无 negative 输入通道） |
+| 参考图上限 | 9 | 16 |
+| 原生尺寸 | 1344×768 | 2048×2048（约 4.2 MP） |
+| 最大面积 | — | **受 `imageMaxMP` 限制，默认 4.3 MP** |
 
 ### 提示词写法
 
-H3-Image **吃长提示词**，越详细越准。结构建议：
+- **参考图会直接进模型，不要用文字复述图片** —— 模型"看得见"，文字复述反而会与图冲突。
+- 只写**任务**：拆什么、怎么排、什么风格。
+- 不用 Markdown（`**粗体**`、`## 标题` 是噪声）。
+- **不用编号小标题**（一、二、三 / 1. 2. 3.）—— 实测图上会出现编号与乱码。
+- 数量必须与参数一致（选 3 个视角就写 3 个）。
+- 反向约束直接写"不要/禁止" —— H3-Image 的 prompt 是自由文本，编码器正常理解否定词。
 
-```text
-[主体描述]：谁、什么样子、什么动作、什么表情
-[服装/道具]：具体到颜色、材质、纹样
-[场景/环境]：地点、时间、天气、周边元素
-[光线]：光源方向、强度、色温
-[构图/镜头]：景别、角度、透视、景深
-[风格]：英文画风关键词
-[质量]：高质量，细节清晰
-```
+### 4K 档会 OOM
 
-**把否定句改成正向描述**：
-- ❌ "不要写实质感" → ✅ "扁平赛璐珞渲染，色块平整"
-- ❌ "禁止字幕" → ✅ 省略（模型不会主动加字幕）
+`4096²` / `5472×3072` 是 16.8 MP，面积是 2048² 的 4 倍。12 GB 卡实测 2048² 已用 11.4 GB。
+插件默认拦掉超过 `imageMaxMP`（4.3）的请求。要跑 4K 需 48 GB+ 并显式调大配置。
 
 ---
 
 ## 11. 立绘拆解（角色设定图）规范
 
-> 术语：这个**工具**叫「立绘拆解」，产出的**图**叫设定卡（sheet）。
-> 把设定卡 + 文字设定登记进「角色卡」仓库，渲染时才能引用。
+### 三档
 
-### 三档结构
+| id | 名称 | 内容 |
+|---|---|---|
+| `standard` | 角色设定卡 | 三视图（正/侧/背）+ 服装部件 + 附属部件 |
+| `parts` | 纯部件拆解 | 只拆服装与配件，平铺网格，无人物 |
+| `full` | ~~完整设定卡~~ | **与 `standard` 逐字相同**（表情差分已移除），UI 已隐藏 |
 
-| 档位 | 产出 |
-|---|---|
-| **角色设定卡** | 三视图（正/侧/背）+ 服装部件 + 附属部件 |
-| **完整设定卡** | 与 standard 同内容（表情差分自 1.0.2 起已移除，保留档位名仅为兼容） |
-| **纯部件拆解** | 只拆服装与配件，平铺，无人物 |
+### 四条原则（违反会出乱码/误导）
 
-### 拆解时的四条原则（违反会出乱码/误导）
+1. **不要用文字复述图片** —— 参考图以视觉块进编码器，文字复述会与图冲突
+2. **纯文本**：不产 Markdown（`**`、`##` 是噪声）
+3. **不要编号小标题** —— 模型会把编号当成"要画在图上"的标签
+4. **数量与参数一致** —— 选几个视角就写几个
 
-1. **不复述图片内容** —— 参考图是**直接进模型**的（`<Picture 1>` + vision block）。
-   用文字再描述一遍外观会和图像冲突，造成误导。
-2. **纯文本，不产 Markdown** —— `**加粗**`、`# 标题` 会原样进模型。
-3. **不用编号小标题** —— `一、二、三` 会诱导模型**在图上画标签**，
-   这是实测出过"图上乱码"的直接原因。用自然段落。
-4. **数量随参数** —— 选 2 个视角就写"两个"，不能硬编码"三个"。
+### 细节锁
 
-### 三视图要求
+拆解图最容易"简化"：多层裙摆合并、小配饰省掉、纹样画成色块。所以提示词里有五条硬约束：
 
-```text
-三视图
-- 同一角色，发型/服装/配饰/体型完全一致
-- 统一站立姿势，自然站姿，双臂自然下垂
-- 统一光照、统一背景、等高等比例并排
-- 全身入画，不切头不切脚
-
-服装部件拆解
-- 每件单独平铺，保持原配色/纹样/剪裁/材质
-- 正面朝上、完整展开、互不遮挡
-- 与三视图中的对应部位能明确对应
-
-附属部件拆解
-- 发饰/首饰/挂件/武器/披风等逐一拆出
-
-画面整体
-- 干净设定稿风格，线条清晰，色块平整
-- 纯色或浅灰背景，无场景、无投影
-- 不留文字、标注、水印
-- 严格还原参考图，不自行改动设计
-```
-
-### 明确不包含
-
-设定卡**只做角色形象**，不包含：
-- 内衣
-- 化妆品
-- 随身私人物品
-- 生活用品
-
-这些与角色设定无关，会稀释提示词并干扰模型。
-
-### 设定卡的用途
-
-设定卡是角色的**权威形象**，在做视频时作为角色卡的 `sheet` 槽位传入，
-保证多镜之间角色外观一致。**一张设定卡 = 一张合成图**（三视图 + 部件在同一张），
-这样只占 1 个参考图名额（H3 Ref2VA 上限 9 张）。
-
-### 与角色卡的配合
-
-```
-立绘 → 立绘拆解 → 设定卡图（sheet）
-                     ↓
-        角色卡 { images: {sheet, origin}, traits, refPolicy }
-                     ↓
-        渲染时按 refPolicy 决定传几张：
-          sheet-first（默认，每卡 1 张，最稳）
-          sheet-only
-          origin-first
-          both（每卡 2 张，多角色时容易超 9 张）
-```
-
-**多角色时 `maxImages: 1` 最稳** —— 两张卡就占 2 个名额，
-再叠参考视频/场景图很容易撞上限。
+1. 逐件单列（禁止合并/拆分）
+2. 保持原比例与朝向（长裙不要画短、斜挎不要画成正挂）
+3. 材质/纹样/五金/镶嵌逐项复刻（不要概括成"金色装饰"）
+4. 不丢小件（耳饰、戒指、胸针、链扣、铆钉）
+5. 不做增删（只画参考图里存在的）
 
 ---
 
-## 12. 可扩展模板格式
+## 12. 修改分镜时的注意事项
 
-所有提示词模板遵循以下结构，便于扩展：
+改分镜脚本时：
 
-```yaml
-id: template-id                    # 唯一标识
-name: 模板中文名
-category: H3 | Image | Sheet | Comic | Ecom | Film
-mode: t2va | i2va | fl2va | l2va | ref2va | image | sheet
-fields:                            # 需要填的字段
-  - key: styleId
-    label: 画风
-    type: enum
-    options: [ghilla, ova90s, ...]
-  - key: subjects
-    label: 角色
-    type: list
-    item:
-      - name
-      - pictureIndex
-      - traits
-sections:                          # 提示词由哪些段组成
-  - CRITICAL STYLE RULE
-  - CRITICAL REFERENCE RULE
-  - subject_definitions
-  - CHARACTER DEFINITION
-  - summary
-  - retention_analysis
-  - non_diegetic_music
-  - SCENE LAYOUT
-  - overall_soundscape
-  - MOTION DESCRIPTION
-output: string                     # 拼接方式
-```
-
-**扩展新模板时**：
-1. 复制上面的骨架
-2. 按 `mode` 决定 `sections`
-3. 实现时对应 `host/services/h3-prompt.js` 的 `compileXxx()` 函数
+| 要点 | 说明 |
+|---|---|
+| 一镜一件事 | 一个镜头只做一件事，动作多了会糊 |
+| 景别交替 | 别连着三镜都是中景 |
+| 时长 ≥ 5 秒 | 124 帧是物理下限，写 4 秒会被抬到 5 秒 |
+| 台词字数 | 按 4–5 字/秒，5 秒镜头最多约 22 字 |
+| 参考视频里的东西必须写进描述 | 人数/道具/机位方向三样对齐 |
+| 分段串联时上一镜末帧=下一镜首帧 | 用 Ref2VA + AddGuide，不要用 FL2VA |
 
 ---
 
 ## 13. 检查清单
 
-生成前逐条核对：
+生成前逐条过：
 
-- [ ] 画风是英文？
-- [ ] `subject_definitions` 写全了发色/瞳色/配饰？
-- [ ] 每个角色有独立的 `<Picture N>`？
-- [ ] `CHARACTER DEFINITION` 里绑定了音色（如果有音频参考）？
-- [ ] 分镜里只写人名，没重复 `<Picture N>`？
-- [ ] 参考视频声明了用途？
-- [ ] 首尾帧标了 START / END？
-- [ ] `overall_soundscape` 不为空？
-- [ ] `non_diegetic_music` 写了 N/A 或具体描述？
-- [ ] 每段分镜都有音效？
-- [ ] 台词用 `<d>[中文] ...</d>`？
-- [ ] 全文 ≤7000 字符？
-- [ ] 没有负面提示词（或已改成正向表达）？
-- [ ] 时长在 4-15 秒？
-- [ ] 参考图 ≤9（视频）/ ≤16（图像）？
-- [ ] 参考文件总数 ≤12？
+- [ ] 模式选对了吗？（有参考素材 → Ref2VA；只有首尾帧 → 基础格式 + 对齐指令）
+- [ ] 正文是英文吗？中文只在 `<d>` 与画面文字里？
+- [ ] 有没有写"不要 XX"？（改成正向陈述）
+- [ ] `overall_soundscape` 填了吗？（不能空）
+- [ ] `non_diegetic_music` 填了吗？（无则 `N/A`，不是留空）
+- [ ] 每个参考素材都在 `subject_definitions` 里有定义？`retention_analysis` 里有标记？
+- [ ] 音频用的是**音频那套**标记（`fully_copy` / `reference`），不是视觉标记？
+- [ ] 时间戳是单点 `At 00:MM.SSS,`，不是区间？
+- [ ] 台词字数 ÷ 4.5 ≤ 镜头秒数？
+- [ ] 参考视频/控制视频里的人数、道具、机位，提示词里写对了吗？
+- [ ] 有参考素材时风格词是不是太多了？
+- [ ] 帧数是 `17k+5` 网格上的值吗？
+
+---
+
+## 14. 出处
+
+本规范的证据链见 `docs/probes/h3-prompt-research/REPORT.md`（638 行，110 个来源链接）。核心一手来源：
+
+- 官方 skill `h3-prompt-writing`：`references/base-en.txt`（基础格式）、`references/ref-en.txt`（六段格式）
+- ComfyUI 官方提示词指南 `docs.comfy.org/tutorials/video/minimax/`
+- 官方模型卡 `huggingface.co/MiniMaxAI/MiniMax-H3`
+- 节点源码 `comfy_extras/nodes_minimax_h3.py`（帧网格、`BasicGuider` 无 negative）
+
+**明确检索无结果、属本地自造的**：`H3镜头输入包` schema、`动画制作 Skill 2.3`、`OVA90s` / `Helltaker-look` / `toon3d-pbr` 风格命名。这些不作为官方内容宣称。

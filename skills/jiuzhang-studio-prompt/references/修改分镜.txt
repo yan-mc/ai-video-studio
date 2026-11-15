@@ -1,57 +1,76 @@
-CRITICAL STYLE RULE:
-Helltaker game visual aesthetic. High contrast black/white/deep red color palette.
-Flat cartoon character design with exaggerated proportions — slightly larger head, slender limbs, flat chest and torso, simplified geometric shapes.
-Thick, bold, jagged black outlines defining every character edge. Flat cel-shaded coloring with heavy block shadows, no gradients.
-Render the character as a 2D cartoon, NOT as realistic.
-NO photorealistic textures, NO realistic skin shading, NO 3D proportions, NO PBR materials.
-NO subtitles, NO on-screen text. NO background music.
-Entire video takes place in one single hotel room — background remains completely consistent throughout, no scene changes. NO outfit changes.
+# 修改分镜：一个可对照的官方格式示例
+#
+# 这份文件演示**改完的分镜该长什么样**（Ref2VA 六段格式）。
+# 格式规范见 ../SKILL.md §3；这里只给一份完整的、可直接对照的实物。
+#
+# ⚠️ 与旧版的差别（旧版是本地自造骨架，已废弃）：
+#    · 删掉了 `CRITICAL STYLE RULE:` / `CRITICAL REFERENCE RULE:` /
+#      `CHARACTER DEFINITION:` / `SCENE LAYOUT:` / `MOTION DESCRIPTION:`
+#      —— 这些都不是官方字段。
+#    · 时间戳从 `[0.0s-3.5s]` 区间改成单点 `At 00:03.500,`。
+#    · 音频保留标记从 `fully_preserved` 改成音频那套的 `reference`。
+#    · 不再写 "NO subtitles, NO background music" 这类否定句
+#      （cfg=1 无 negative 分支，写"不要"反而会出现）。用
+#      `non_diegetic_music: N/A` 表达"不要配乐"。
+#    · 风格词压短了（有参考素材时风格词会与参考素材竞争）。
 
-CRITICAL REFERENCE RULE:
-- <Picture 1> is Wei Oula appearance reference — includes face, hair, and clothing. All must be copied exactly.
-- <Picture 2> is Fuji Tōko appearance reference — includes face, hair, and clothing. All must be copied exactly.
-- <Audio 1> is the VOICE TIMBRE REFERENCE for (S1) — Wei Oula. Use this audio ONLY for Wei Oula's voice.
-- <Audio 2> is the VOICE TIMBRE REFERENCE for (S2) — Fuji Tōko. Use this audio ONLY for Fuji Tōko's voice.
+# ============================================================================
+# Ref2VA 六段格式（有参考图时）
+# ============================================================================
 
 subject_definitions:
-Wei Oula = appearance from <Picture 1> converted to Helltaker flat cartoon — long dark green hair with straight bangs covering forehead, ash-grey eyes, slender build, fair skin, wearing exactly the same outfit as shown in <Picture 1>, with exaggerated cartoon proportions. This character is the speaker (S1).
-Fuji Tōko = appearance from <Picture 2> converted to Helltaker flat cartoon — purple hair with side-swept bangs, violet eyes, slightly taller than Wei, wearing exactly the same outfit as shown in <Picture 2>, with exaggerated cartoon proportions. This character is the speaker (S2).
+<Subject 1> is the character shown in <Picture 1>, with long dark green hair and straight bangs, ash-grey eyes, slender build and fair skin. This subject is the on-screen speaker (S1).
+<Subject 2> is the character shown in <Picture 2>, with purple side-swept hair and violet eyes, slightly taller than <Subject 1>. This subject is the on-screen speaker (S2).
+<Audio 1> is the voice-timbre reference for <Subject 1>.
+<Audio 2> is the voice-timbre reference for <Subject 2>.
 
-CHARACTER DEFINITION — Wei Oula (S1):
-- Gender: FEMALE
-- Height: 158 cm (exaggerated in cartoon style)
-- Key traits: dark green hair, straight bangs, ash-grey eyes, outfit identical to reference
-- Personality: Admiring, earnest, slightly bold in confession.
-- Voice quality: **LIGHT, SOFT, HIGH-PITCHED, BREATHY** — like a gentle whisper, delicate and airy, with a tender, slightly trembling quality when emotional. This is the voice of (S1). Use this vocal quality for ALL dialogue spoken by Wei Oula.
-- Audio lock: <Audio 1> provides timbre reference for this character.
+summary:
+[reference generation + audio reference] <Subject 1> confesses to <Subject 2> in a single hotel room, the camera pushing in as the confession lands.
 
-CHARACTER DEFINITION — Fuji Tōko (S2):
-- Gender: FEMALE
-- Height: 155 cm (exaggerated in cartoon style)
-- Key traits: purple hair, side-swept bangs, violet eyes, outfit identical to reference
-- Personality: Shy, flustered, easily embarrassed but soft-hearted.
-- Voice quality: **LOWER, WARMER, SLIGHTLY DEEPER** — more grounded and mature than Wei's voice, with a gentle, hesitant, slightly trembling quality when nervous. Not as high-pitched as Wei. This is the voice of (S2). Use this vocal quality for ALL dialogue spoken by Fuji Tōko.
-- Audio lock: <Audio 2> provides timbre reference for this character.
+retention_analysis:
+<Subject 1> (appears in [Shot 1]): fully_preserved - keep face, dark green hair with straight bangs, ash-grey eyes and the exact outfit from <Picture 1>.
+<Subject 2> (appears in [Shot 1]): fully_preserved - keep face, purple side-swept hair, violet eyes and the exact outfit from <Picture 2>.
+<Audio 1>: reference - follow timbre and delivery only; do not copy the waveform.
+<Audio 2>: reference - follow timbre and delivery only; do not copy the waveform.
+
+detailed_description:
+Helltaker game visual aesthetic: high contrast black, white and deep red, flat cel-shaded cartoon with block shadows and thick smooth black outlines. The whole video stays in one hotel room.
+
+[Shot 1] Medium two-shot, <Subject 1> on the left facing <Subject 2> on the right, warm lamp light from screen left. The camera pushes in with small amplitude at slow speed. <Subject 1> (S1) is visible on screen and says: <d>[Chinese] 我一直想告诉你一件事。</d>
+
+[Shot 2] At 00:03.500, the camera cuts to a close-up on <Subject 1>; <Subject 1> (S1) is visible on screen and says: <d>[Chinese] 我喜欢你，很久了。</d>
+
+[Shot 3] At 00:06.000, the camera cuts back to the two-shot as <Subject 2> reacts, eyes widening slightly; the camera stays locked off on a tripod. <Subject 2> (S2) is visible on screen and says: <d>[Chinese] ……你说什么？</d>
+
+overall_soundscape: Quiet hotel room tone, a low hum from the ceiling light, soft fabric rustle as <Subject 2> shifts, faint distant traffic through a closed window.
 
 non_diegetic_music: N/A
 
-SCENE LAYOUT:
-A hotel room in Helltaker minimalist style — stark black walls with a single deep red spotlight from above creating dramatic high-contrast shadows. A double bed with crisp white sheets against the back wall, a small nightstand on the left with a dim amber lamp (rendered as a stark graphic shape), heavy dark curtains on the right. Wei Oula sits on the edge of the bed facing Fuji Tōko, who stands in front of her. This single room is the only setting — no background changes.
+
+# ============================================================================
+# 对照：如果这一镜没有参考素材（纯文生 T2VA），用基础格式
+# ============================================================================
+#
+# integrated_multimodal_description: Helltaker game visual aesthetic: high contrast black, white and deep red, flat cel-shaded cartoon with thick smooth outlines. [Shot 1] Medium two-shot in a single hotel room, warm lamp light from screen left, two young women standing face to face. The camera pushes in with small amplitude at slow speed. The left one (S1) is visible on screen and says: <d>[Chinese] 我一直想告诉你一件事。</d> At 00:03.500, the shot cuts to a close-up on her. At 00:06.000, the shot cuts back to the two-shot as the other one reacts, eyes widening slightly.
+#
+# overall_soundscape: Quiet hotel room tone, a low hum from the ceiling light, soft fabric rustle, faint distant traffic through a closed window.
+#
+# non_diegetic_music: N/A
 
 
-
-MOTION DESCRIPTION:
-[0s-3s] Extreme close-up on Wei Oula's face. She sits on the edge of the bed, tilting her head up to look at Fuji Tōko with a longing, amorous gaze — eyes half-lidded, lips slightly parted, a faint blush as a flat red shadow block on her cheeks.
-Sound: (S1 — Wei Oula, LIGHT AND BREATHY VOICE) — <d>[Japanese] ミヤコさん、私の中に入れてください！</d>
-
-[3s-5.5s] Medium shot showing both characters. Fuji Tōko's eyes widen in shock, her cheeks flushing bright red (flat red shadow blocks). She stammers, shocked and shy.
-Sound: (S2 — Fuji Tōko, LOWER AND WARMER VOICE) — <d>[Japanese] 本当にいいですの？</d>
-
-[5.5s-8s] Extreme close-up on Wei Oula. She looks up with an admiring, earnest expression, her voice warm and tender.
-Sound: (S1 — Wei Oula, SOFT AND TENDER VOICE, slightly trembling) — <d>[Japanese] 私、ずっとミヤコさんのこと憧れてたから…だから、私の初めて、受け取ってほしいの。</d>
-
-[8s-11s] Extreme close-up on Fuji Tōko. She becomes even more flustered, looking down, unable to meet Wei's eyes, her voice trembling and stammering.
-Sound: (S2 — Fuji Tōko, HESITANT AND SHAKY VOICE, nervous) — <d>[Japanese] でも……私たち、カップルすらじゃないし、こんなに親しくなるのは、やっぱりちょっと……</d>
-
-[11s-13s] Medium shot, both characters in frame. They look at each other in silence — a tense, intimate pause. Only the soft sound of breathing and the faint hum of the lamp.
-Sound: soft breathing, gentle ambient silence (Diegetic).
+# ============================================================================
+# 改分镜时的自检（对应 SKILL.md §12）
+# ============================================================================
+#
+# 1. 一镜一件事 —— 上面每一镜只做一个动作（开口 / 告白 / 反应）。
+# 2. 台词字数 ÷ 4.5 ≤ 镜头秒数：
+#      "我一直想告诉你一件事" 10 字 ≈ 2.2 秒，镜头 0→3.5 秒 ✅
+#      "我喜欢你，很久了"     8 字  ≈ 1.8 秒，镜头 3.5→6.0 秒 = 2.5 秒 ✅
+#      "……你说什么？"        6 字  ≈ 1.3 秒，镜头 6.0→9.0 秒 = 3.0 秒 ✅
+# 3. 时间戳全部是单点 + 毫秒三位，且 < frames/24。
+# 4. 总时长 9 秒 → 帧网格向上取整到 226 帧 = 9.42 秒（h3Frames(9) = 226）。
+#    **所以对齐指令里要写 9.42，不是 9.00** —— 写用户填的秒数是错的。
+#    镜头 3 的收束点 6.0→9.0 秒只是设计意图，实际可用的尾部到 9.42 秒。
+# 5. 同一说话人全篇 (S1) / (S2) 不重编号。
+# 6. 音频用 `reference`（借音色），不是 `fully_preserved`（那是视觉标记）。
+# 7. 没有写任何"不要 XX"；"不要配乐"用 non_diegetic_music: N/A 表达。

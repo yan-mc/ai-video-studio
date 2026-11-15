@@ -1,6 +1,6 @@
 # 九章工作室 · DSH 视频/图像创作插件
 
-> 本地 AI 视频与图像工作室。渲染页 / 角色卡 / 节点画布 / 素材库 / 剧本 / 漫画 / 模特 / 3D 预演 / 立绘拆解 / **H3 + H3-Image + Seedance 三后端**。
+> 本地 AI 视频与图像工作室。渲染页 / 角色卡 / 节点画布 / 素材库 / 剧本 / 漫画 / 模特 / 3D 预演 / 立绘拆解 / **H3 视频 + H3-Image 图像双后端**。
 >
 > 完全本地运行，数据不出机器。
 
@@ -125,7 +125,7 @@ DSH Host (Electron, 127.0.0.1:随机端口)
 | `studio_config` | 配置读写（白名单） |
 | `studio_project` | 项目 CRUD |
 | `studio_shot` | 镜头卡 CRUD |
-| `studio_generate` | 触发生成（h3-local / h3-image / seedance / mock） |
+| `studio_generate` | 触发生成（h3-local / h3-image / mock） |
 | `studio_jobs` | 任务查询 / 取消（真终止远端） |
 | `studio_post` | 8 个后处理/图像工具 |
 | `studio_h3_workshop` | 剧本 → 分段 + 资产（**只产文本，不出图**） |

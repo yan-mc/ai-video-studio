@@ -19,12 +19,31 @@ import { fileUrl } from '../api/url';
 import { useProjectStore } from '../store/project';
 import type { BlenderHealth, BlenderRenderResult } from '../api/types';
 
-/** 喂给 H3 的控制通道 —— 名称与后端 BLENDER_MODES 对齐 */
+/**
+ * 三条产出路线 —— 名称与后端 BLENDER_MODES 对齐。
+ *
+ * ⚠️ 这里刻意把「灰模参考视频」放在最前并标成推荐。
+ *    以前页面只列四个控制通道，用户看到的就是"必须渲 depth/pose/canny/gray"，
+ *    而那条路要多下 4.22 GB 的 control patch、单镜耗时 +83%、通道之间还会
+ *    互相打架（skip 相加 → 过饱和）。
+ *
+ *    社区主流其实简单得多：**渲一段灰模视频，当参考视频喂给 Ref2VA**。
+ *    零额外模型、实测 180° 环绕 6/6 成功（纯文字 0/6 稳定）。
+ *    控制塔只在"必须硬锁结构"时才用。
+ */
+const REFERENCE_MODES: Array<{ id: string; label: string; desc: string }> = [
+  {
+    id: 'blockout',
+    label: 'blockout',
+    desc: '灰模参考视频 · 推荐。填进「参考视频」走 Ref2VA，不需要额外模型；平光无阴影，只表达运动与空间',
+  },
+];
+
 const CONTROL_MODES: Array<{ id: string; label: string; desc: string }> = [
-  { id: 'depth', label: 'depth', desc: '逆深度 · 最通用，锁走位/遮挡/景深（近白远黑）' },
-  { id: 'pose', label: 'pose', desc: 'OpenPose 骨架 · 锁动作与站位（黑底彩线）' },
-  { id: 'canny', label: 'canny', desc: '硬边缘 · 锁建筑/道具结构（黑底白线）' },
-  { id: 'gray', label: 'gray', desc: '灰模整体 · 锁光影布局' },
+  { id: 'depth', label: 'depth', desc: '逆深度 · 控制塔用，锁走位/遮挡/景深（近白远黑）' },
+  { id: 'pose', label: 'pose', desc: 'OpenPose 骨架 · 控制塔用，锁动作与站位（黑底彩线）' },
+  { id: 'canny', label: 'canny', desc: '硬边缘 · 控制塔用，锁建筑/道具结构（黑底白线）' },
+  { id: 'gray', label: 'gray', desc: '灰模整体 · 控制塔用，锁光影布局' },
 ];
 
 type ShotLite = {
@@ -261,11 +280,44 @@ export function PrevizPage() {
           ) : null}
         </Panel>
 
-        {/* ---------------- 控制通道 ---------------- */}
-        <Panel title="控制通道（喂给 H3）">
+        {/* ---------------- 参考视频（常规路线）---------------- */}
+        <Panel title="灰模参考视频（推荐路线）">
           <div className="jz-xs jz-muted" style={{ marginBottom: 10 }}>
-            与预览同一场景，只是渲染成 ControlNet 需要的条件图。
-            渲完在「渲染页 → 控制视频」里选它。
+            Blender 只负责<b>运动与空间</b>，出一段灰模视频当参考视频。
+            不需要任何额外模型；渲完在「渲染页 → 参考视频」里选它，
+            提示词用 <code>&lt;Video 1&gt;</code> 声明「只取运镜/走位/节奏」。
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
+            {REFERENCE_MODES.map((m) => {
+              const r = results[m.id];
+              return (
+                <div key={m.id} className="jz-card" style={{ padding: 10, borderColor: 'var(--jz-accent)' }}>
+                  <div className="jz-row" style={{ justifyContent: 'space-between', gap: 6 }}>
+                    <b className="jz-sm">{m.label}</b>
+                    <Button variant="primary" disabled={!canRender} onClick={() => void render(m.id)}>
+                      {busy === m.id ? '渲染中…' : '渲染'}
+                    </Button>
+                  </div>
+                  <div className="jz-xs jz-muted" style={{ marginTop: 4 }}>{m.desc}</div>
+                  {r ? (
+                    <div className="jz-xs jz-mono" style={{ marginTop: 6, wordBreak: 'break-all' }}>
+                      {r.frames} 帧 / {r.seconds}s
+                      <div className="jz-muted">{r.rel}</div>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </Panel>
+
+        {/* ---------------- 控制通道 ---------------- */}
+        <Panel title="控制通道（ControlNet · 需要额外模型）">
+          <div className="jz-xs jz-muted" style={{ marginBottom: 10 }}>
+            与预览同一场景，渲成 Fun ControlNet 需要的条件图。
+            <b> 需要额外 4.22 GB 控制模型</b>，单镜耗时 +83%；通道叠加会互相打架
+            （建议 depth 0.3 + pose 0.7）。<br />
+            渲完在「渲染页 → 控制视频」里选它 —— <b>不是</b>参考视频那一栏。
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
             {CONTROL_MODES.map((m) => {
@@ -294,10 +346,15 @@ export function PrevizPage() {
         <div className="jz-card" style={{ padding: '10px 12px' }}>
           <b className="jz-sm">工作流</b>
           <div className="jz-xs jz-muted" style={{ marginTop: 6, lineHeight: 1.8 }}>
-            ① 渲染页「3D 走位」配好角色/道具/机位 → ② 这里渲预览确认动画没问题 →
-            ③ 渲 depth（或 pose/gray）当控制通道 → ④ 渲染页选该控制视频 → ⑤ 生成。
+            <b>常规路线（推荐）</b>：① 渲染页「3D 走位」配好角色/道具/机位 →
+            ② 这里渲预览确认动画 →
+            ③ 渲 <code>blockout</code> 灰模视频 → ④ 渲染页「参考视频」里选它 →
+            ⑤ 生成。提示词用 <code>&lt;Video 1&gt;</code> 声明只取运镜/走位/节奏。
             <br />
-            提示词要描述画面里**真实存在**的东西（人数、主要道具、机位方向），
+            <b>控制塔路线</b>（只在必须硬锁结构时）：③′ 渲 depth/pose →
+            ④′ 渲染页「控制视频」里选它 → ⑤′ 生成，并按 depth 0.3 + pose 0.7 配比。
+            <br />
+            两条路都要：提示词描述画面里<b>真实存在</b>的东西（人数、主要道具、机位方向），
             否则前几秒会被提示词抢走 —— 实测见
             <code> docs/probes/h3-controlnet-2026-11-14/REPORT.md</code>。
           </div>
