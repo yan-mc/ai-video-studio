@@ -14,6 +14,7 @@ import * as mockBackend from '../services/mock-backend.js';
 import { runJob, cancelJob, runtimeStats, markCancelled, withLocalSlot, CancelledError } from '../services/job-runner.js';
 import { newJob, jobs as jobsStore, isLocalBackendOf } from '../services/job-store.js';
 import { runH3Local, runH3ImageLocal, jobKind } from '../services/generator.js';
+import { ACCEL_PLANS, ACCEL_PLAN_IDS, DEFAULT_ACCEL_PLAN } from '../services/accel-plan.js';
 import { packGraph, unpackGraph, IMG_REF_PREFIX } from '../store/image-pool.js';
 import { SCRIPT_GENRES, SCRIPT_STAGES, checkConsistency } from '../services/script-service.js';
 import { COMIC_TEMPLATES, COMIC_STATIONS } from '../services/comic-service.js';
@@ -67,6 +68,32 @@ async function readJsonBody(req, limit = 4 * 1024 * 1024) {
 function sendJson(res, code, value) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(value));
+}
+
+/**
+ * 加速方案的对外投影（供前端下拉与排障展示）。
+ *
+ * 只暴露"用户需要知道的"：id / 标签 / 步数 / 采样器 / shift / 提示语。
+ * 内部字段（loraKind、strictSteps）不外泄，避免前端依赖实现细节。
+ */
+function accelPlanList() {
+  return ACCEL_PLAN_IDS.map((id) => {
+    const p = ACCEL_PLANS[id];
+    return {
+      id: p.id,
+      label: p.label,
+      family: p.family,
+      steps: p.steps,
+      sampler: p.sampler,
+      scheduler: p.scheduler,
+      // lightx2v 的 shift 分 ref/fl2v 两套，这里给出两套便于用户理解
+      shift: p.loraKind === 'split'
+        ? { ref: `${p.shiftVideoRef}/${p.shiftAudioRef}`, fl2v: `${p.shiftVideoFl2v}/${p.shiftAudioFl2v}` }
+        : (p.shiftVideo != null ? { ref: `${p.shiftVideo}/${p.shiftAudio}`, fl2v: `${p.shiftVideo}/${p.shiftAudio}` } : null),
+      hint: p.hint,
+      isDefault: id === DEFAULT_ACCEL_PLAN,
+    };
+  });
 }
 
 /* ------------------------------------------------- 二进制/流 辅助 */
@@ -249,11 +276,24 @@ export async function handleApi(req, res) {
         ok: true,
         h3,
         blender: blenderStatus(),
+        // 当前生效的加速方案 + 全部可选方案（前端下拉直接用，不用硬编码）
+        accel: {
+          current: cfg.accelPlan,
+          plans: accelPlanList(),
+        },
         workflows: {
           h3: { exists: wfH3.exists, dir: wfH3.dir },
           image: { exists: wfImg.exists, dir: wfImg.dir },
           ok: wfH3.exists && wfImg.exists,
         },
+      });
+    }
+    // 加速方案列表（含每个方案的实际参数，便于前端展示与排障）
+    if (req.method === 'GET' && route === '/accel/plans') {
+      return sendJson(res, 200, {
+        ok: true,
+        current: cfg.accelPlan,
+        plans: accelPlanList(),
       });
     }
     // 工作流诊断：缺文件时告诉用户找过哪里、该怎么配
@@ -364,6 +404,11 @@ export async function handleApi(req, res) {
           ratio: shot.ratio,
           profile: shot.profile,
           seed: Number.isFinite(Number(body.seed)) ? Number(body.seed) : 1101,
+          // 加速方案：请求体可覆盖（单次尝试），否则由 shot/cfg 决定
+          ...(typeof body.accelPlan === 'string' && body.accelPlan
+            ? { accelPlan: body.accelPlan }
+            : {}),
+          ...(Number.isFinite(Number(body.steps)) ? { steps: Number(body.steps) } : {}),
         },
         mode: shot.mode,
       });

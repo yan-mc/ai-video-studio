@@ -8,7 +8,7 @@ import { useEffect, useState } from 'react';
 
 import { describeError, ensureToken } from '../api/client';
 import { ToolboxPanel } from './ToolboxPage';
-import type { BackendId } from '../api/types';
+import type { AccelPlan, BackendId } from '../api/types';
 import { useProjectStore, useUiStore } from '../store';
 import {
   Alert,
@@ -74,8 +74,20 @@ export function SettingsPage() {
       defaultBackend: config.defaultBackend ?? 'h3-local',
       defaultProfile: config.defaultProfile ?? 'P12-draft',
       maxConcurrentLocal: config.maxConcurrentLocal ?? 1,
+      accelPlan: config.accelPlan ?? 'dmad8',
     });
   }, [config]);
+
+  /* 加速方案：选项来自后端 /health（单一真源），前端不硬编码 */
+  const accelPlans: AccelPlan[] = health?.accel?.plans ?? [];
+  const accelCurrent = health?.accel?.current;
+  const accelHint = (() => {
+    const activeId = String(draft['accelPlan'] ?? accelCurrent ?? 'dmad8');
+    const p = accelPlans.find((x) => x.id === activeId);
+    if (!p) return '';
+    const shiftText = p.shift ? ` · shift ${p.shift.ref}` : '';
+    return `${p.hint}（${p.steps} 步 · ${p.sampler} + ${p.scheduler}${shiftText}）`;
+  })();
 
   async function handleSave() {
     setBusy(true);
@@ -86,6 +98,7 @@ export function SettingsPage() {
         defaultBackend: String(draft['defaultBackend'] ?? 'h3-local') as BackendId,
         defaultProfile: String(draft['defaultProfile'] ?? 'P12-draft'),
         maxConcurrentLocal: Number(draft['maxConcurrentLocal']) || 1,
+        accelPlan: String(draft['accelPlan'] ?? 'dmad8'),
         theme,
         accent,
       };
@@ -198,6 +211,40 @@ export function SettingsPage() {
                     onChange={(e) => set('maxConcurrentLocal', Number(e.target.value) || 1)}
                   />
                 </Field>
+              </div>
+
+              {/*
+                加速方案（蒸馏 LoRA）。
+                选项由后端 /health 的 accel.plans 给出，前端不硬编码 ——
+                以后加新方案不用改这里。
+              */}
+              <div style={{ marginTop: 'var(--jz-sp-3)' }}>
+                <Field
+                  label="加速方案"
+                  hint={accelHint}
+                >
+                  <Select<string>
+                    value={String(draft['accelPlan'] ?? accelCurrent ?? 'dmad8')}
+                    onChange={(v) => set('accelPlan', v)}
+                    options={
+                      accelPlans.length
+                        ? accelPlans.map((p) => ({ value: p.id, label: p.label }))
+                        : [{ value: 'dmad8', label: 'DMAD 8步（推荐）' }]
+                    }
+                  />
+                </Field>
+                {accelPlans.length > 0 ? (
+                  <div className="jz-row" style={{ gap: 'var(--jz-sp-2)', flexWrap: 'wrap', marginTop: 8 }}>
+                    {accelPlans.map((p) => (
+                      <Badge
+                        key={p.id}
+                        tone={p.id === String(draft['accelPlan'] ?? accelCurrent) ? 'ok' : 'default'}
+                      >
+                        {`${p.label}：${p.steps} 步 · ${p.sampler}${p.shift ? ` · shift ${p.shift.ref}` : ''}`}
+                      </Badge>
+                    ))}
+                  </div>
+                ) : null}
               </div>
 
             </Panel>

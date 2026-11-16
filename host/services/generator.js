@@ -13,6 +13,7 @@ import { safeJoin } from '../security.js';
 import * as comfy from './comfy-client.js';
 import { decideRefImageSize } from './render-plan.js';
 import { NodeGraph } from './h3-graph.js';
+import { planForShot, accelPlanOf, checkSteps, DEFAULT_ACCEL_PLAN } from './accel-plan.js';
 
 /** 内联图片落盘用短哈希，同图复用同一文件 */
 function hashShort(text) {
@@ -421,6 +422,47 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
     CONTROL_PATCH: available.model_patches,
   });
 
+  /* ============================================================ 加速方案
+   *
+   * 详见 services/accel-plan.js 的头注释（为什么必须显式设 shift、
+   * 两个方案族的技术差异、以及"DMAD 不改变任何输入约束"的实测结论）。
+   *
+   * 优先级：job 显式指定 > 镜头卡 > 配置默认 > 内置默认。
+   * 这样单镜可以覆盖（比如某镜要最锐就用 lightx2v），
+   * 同时全局默认由 config.accelPlan 决定。
+   */
+  const accelId = job.params?.accelPlan
+    ?? shot.accelPlan
+    ?? cfg.accelPlan
+    ?? DEFAULT_ACCEL_PLAN;
+  const accel = planForShot(accelId, useRef);
+
+  // 步数：job 传了就以 job 为准（但要校验并记录警告），否则用方案的训练步数
+  const wantSteps = job.params?.steps;
+  const stepCheck = wantSteps ? checkSteps(accelId, wantSteps) : { ok: true, warning: '' };
+  const steps = stepCheck.ok && Number.isFinite(Number(wantSteps))
+    ? Number(wantSteps)
+    : accel.steps;
+
+  if (accel.warnings.length) {
+    job.warnings = [...(job.warnings ?? []), ...accel.warnings];
+  }
+  if (stepCheck.warning) {
+    job.warnings = [...(job.warnings ?? []), stepCheck.warning];
+  }
+
+  job.params = {
+    ...(job.params ?? {}),
+    accelPlan: accel.plan.id,
+    accelLabel: accel.plan.label,
+    accelFamily: accel.plan.family,
+    sampler: accel.sampler,
+    scheduler: accel.scheduler,
+    steps,
+    shiftVideo: accel.shiftVideo,
+    shiftAudio: accel.shiftAudio,
+  };
+
   // 控制模型可用性判定。
   //
   // ⚠️ 三态而不是二态（历史缺陷）：
@@ -455,7 +497,7 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
     '{{WIDTH}}': res.width,
     '{{HEIGHT}}': res.height,
     '{{LENGTH}}': h3Length(shot.durationSec),
-    '{{STEPS}}': prof.steps,
+    '{{STEPS}}': steps,
     '{{FPS}}': 24,
     '{{SEED}}': Number.isFinite(Number(job.params?.seed)) ? Number(job.params.seed) : 1101,
     // 参考图缩放策略：
@@ -470,8 +512,21 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
     '{{CLIP_NAME}}': NAMES.CLIP,
     '{{VAE_NAME}}': NAMES.VAE,
     '{{AUDIO_VAE_NAME}}': NAMES.AUDIO_VAE,
-    '{{LORA_NAME}}': useRef ? NAMES.LORA_REF : NAMES.LORA_FL2V,
-    '{{LORA_STRENGTH}}': Number(prof.steps) <= 8 ? 1.0 : 0.0,
+    /**
+     * LoRA：由加速方案决定，不再按 ref/fl2v 硬编码。
+     *
+     * · dmad 家族 — 一个通用 LoRA，ref 和 fl2v 都用它
+     * · lightx2v — ref / fl2v 各一个专用 LoRA（planForShot 已按 useRef 选好）
+     * · none     — 空字符串，下面的装配会把 LoRA 节点整个优化掉
+     */
+    '{{LORA_NAME}}': accel.lora,
+    // 蒸馏学生在 strength=1.0 是满血；降到 0.5 会让低步数去噪不足。
+    '{{LORA_STRENGTH}}': accel.lora ? 1.0 : 0.0,
+    // 采样器 / 调度器 / shift：全部由方案给出，不写死
+    '{{SAMPLER}}': accel.sampler,
+    '{{SCHEDULER}}': accel.scheduler,
+    '{{SHIFT_VIDEO}}': accel.shiftVideo ?? 12,
+    '{{SHIFT_AUDIO}}': accel.shiftAudio ?? 3,
     // 控制视频通道（Fun ControlNet Union）。未启用时这些占位符不会被引用，
     // 对应节点在下面被整体删除。
     '{{CONTROL_VIDEO}}': useControl ? staged['{{CONTROL_VIDEO}}'] : '',
@@ -618,18 +673,55 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
   // ---- 控制视频通道 ----
   //
   // 模板里带 60/61/62/63（LoadVideo / GetVideoComponents / ModelPatchLoader /
-  // FunControlNetApply）。启用时要把 BasicScheduler(7) 和 BasicGuider(8) 的
-  // model 从 4 改指向 63 —— 控制分支必须包在采样链路**上游**才生效，
-  // 只挂一个孤立节点是没有用的（官方模板同样是这两个消费者）。
+  // ======================================================== 模型链路重接
+  //
+  // 采样链路现在是四段：
+  //
+  //     1 UNETLoader → 4 LoRA → 103 SigmaShift → 63 FunControlNet → 7/8 采样
+  //
+  // 为什么 SigmaShift 必须在 LoRA **之后**：
+  //   LoRA 改的是权重，SigmaShift 改的是 `model_sampling`（sigma 网格）与
+  //   transformer_options 里的 shift 值。两者作用对象不同，但顺序上官方
+  //   DMAD 工作流与 LightX2V 工作流都是 LoRA → shift，照抄即可。
+  //
+  // 为什么 ControlNet 必须在 SigmaShift **之后**：
+  //   FunControlNetApply 输出的是新的 model patcher，它要包住最终用于采样的
+  //   model。反过来接会让 shift 补丁被控制分支覆盖掉。
+  const shiftNodeOk = accel.needShiftNode;
+  const baseModelRef = shiftNodeOk ? ['103', 0] : (accel.lora ? ['4', 0] : ['1', 0]);
+
+  // `none` 方案不挂 LoRA：节点 4 没有下游消费者会被 prune 掉，
+  // 但它的 lora_name 是空字符串 —— 先把节点 4 本身删掉，避免
+  // ComfyUI 拿到空文件名报错。采样链路直接接 UNET(1)。
+  if (!accel.lora) {
+    graph.remove('4');
+  }
+
+  // 模板里 7 / 8 都写死 ["4", 0]，这里统一改到 shift 之后的出口
+  for (const id of ['7', '8']) {
+    const n = graph.get(id);
+    if (n) graph.set(id, { ...n, inputs: { ...n.inputs, model: baseModelRef } });
+  }
+
+  // 控制视频通道（FunControlNetApply）。启用时要把 BasicScheduler(7) 和
+  // BasicGuider(8) 的 model 从 103 改指向 63 —— 控制分支必须包在采样链路
+  // **上游**才生效，只挂一个孤立节点是没有用的。
   const controlReady = useControl && controlPatchOk;
   if (controlReady) {
     for (const id of ['7', '8']) {
       const n = graph.get(id);
       if (n) graph.set(id, { ...n, inputs: { ...n.inputs, model: ['63', 0] } });
     }
+    // ControlNet 的 model 输入也要接到 shift 的出口，否则它会绕过 shift
+    const cn = graph.get('63');
+    if (cn) graph.set('63', { ...cn, inputs: { ...cn.inputs, model: baseModelRef } });
   }
   // 未启用时不需要手工删 60..63：它们没有下游消费者，
   // 交给下面的 pruneUnreachable 统一处理（与模板占位符走同一条规则）。
+
+  // shift 节点在 `none` 方案下不需要（shiftVideo == null）：此时 7/8 直接
+  // 指向 LoRA(4)，103 没有下游消费者，pruneUnreachable 会把它删掉。
+  // 不需要额外操作。
 
   // ======================================================== 收尾：剪枝 + 校验
   //

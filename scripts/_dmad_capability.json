@@ -1,0 +1,22 @@
+[
+  {
+    "id": "Q1a-1img",
+    "accepted": true
+  },
+  {
+    "id": "Q1b-2img",
+    "accepted": true
+  },
+  {
+    "id": "Q4-firstlast",
+    "accepted": true
+  },
+  {
+    "id": "Q5-badlen",
+    "accepted": true
+  },
+  {
+    "id": "Q6-badres",
+    "accepted": true
+  }
+]

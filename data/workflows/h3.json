@@ -19,19 +19,27 @@
       "strength_model": "{{LORA_STRENGTH}}"
     }
   },
+  "103": {
+    "class_type": "MiniMaxH3SigmaShift",
+    "inputs": {
+      "model": ["4", 0],
+      "shift_video": "{{SHIFT_VIDEO}}",
+      "shift_audio": "{{SHIFT_AUDIO}}"
+    }
+  },
   "5": {
     "class_type": "RandomNoise",
     "inputs": { "noise_seed": "{{SEED}}" }
   },
   "6": {
     "class_type": "KSamplerSelect",
-    "inputs": { "sampler_name": "euler" }
+    "inputs": { "sampler_name": "{{SAMPLER}}" }
   },
   "7": {
     "class_type": "BasicScheduler",
     "inputs": {
       "model": ["4", 0],
-      "scheduler": "simple",
+      "scheduler": "{{SCHEDULER}}",
       "steps": "{{STEPS}}",
       "denoise": 1.0
     }

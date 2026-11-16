@@ -35,6 +35,8 @@ export interface AppConfig {
   defaultBackend?: BackendId;
   defaultProfile?: string;
   maxConcurrentLocal?: number;
+  /** H3 加速方案 id（dmad8 / dmad4 / lightx2v / none） */
+  accelPlan?: string;
   previzPort?: number;
   previzAutoStart?: boolean;
   theme?: string;
@@ -261,6 +263,13 @@ export interface GenerateInput {
   shotId: string;
   backend?: BackendId;
   seed?: number;
+  /**
+   * 加速方案（可选）。留空 = 用镜头卡 / 全局默认。
+   * 取值见 AccelPlan.id（dmad8 / dmad4 / lightx2v / none）。
+   */
+  accelPlan?: string;
+  /** 覆盖步数（一般不传；偏离训练步数后端会告警） */
+  steps?: number;
 }
 
 export interface CancelResult {
@@ -318,6 +327,31 @@ export interface HealthPayload {
   h3: HealthState;
   /** Blender 预演引擎状态（旧 three.js 引擎已下线） */
   blender: HealthState;
+  /** 加速方案（蒸馏 LoRA）。见 host/services/accel-plan.js */
+  accel?: {
+    current: string;
+    plans: AccelPlan[];
+  };
+}
+
+/**
+ * 加速方案选项。
+ *
+ * 每个方案对应一组 (LoRA, 采样器, 调度器, 步数, shift)，
+ * 由后端 accel-plan.js 单一真源给出，前端只负责展示与选择。
+ */
+export interface AccelPlan {
+  id: string;
+  label: string;
+  /** dmad / lightx2v / none */
+  family: string;
+  steps: number;
+  sampler: string;
+  scheduler: string;
+  /** 例：{ ref: '12/2', fl2v: '12/2' }；none 方案为 null */
+  shift: { ref: string; fl2v: string } | null;
+  hint: string;
+  isDefault: boolean;
 }
 
 /* ------------------------------- H3 工坊 ------------------------------ */

@@ -35,6 +35,19 @@ const DEFAULTS = Object.freeze({
   comfyInputDir: '',
   defaultBackend: 'h3-local',
   defaultProfile: 'P12-draft',
+  /**
+   * H3 加速方案（蒸馏 LoRA）。
+   *
+   * 可选值见 services/accel-plan.js 的 ACCEL_PLANS：
+   *   dmad8     DMAD 8 步学生（默认，音画质量优先）
+   *   dmad4     DMAD 4 步学生（最快）
+   *   lightx2v  LightX2V Turbo（边缘更锐，视频理解弱）
+   *   none      不加速，50 步原模型
+   *
+   * 为什么默认 dmad8：实测（docs/probes/dmad-2026-11-16/）在复杂提示词下
+   * DMAD 对角色形态、动作连续性、音频起伏明显更准。LightX2V 保留为回退。
+   */
+  accelPlan: 'dmad8',
   maxConcurrentLocal: 1,
   ffmpegDir: path.resolve(import.meta.dirname, '..', '..', 'tools', 'ffmpeg'),
   theme: 'inknight',            // 墨夜
@@ -78,7 +91,7 @@ export const DEPRECATED_CONFIG_KEYS = Object.freeze([
 /** 允许通过 API 修改的字段（白名单）。可执行路径类字段刻意不在其中。 */
 export const WRITABLE_CONFIG_KEYS = Object.freeze([
   'dataDir', 'workflowDir', 'comfyUrl', 'comfyInputDir',
-  'defaultBackend', 'defaultProfile', 'maxConcurrentLocal',
+  'defaultBackend', 'defaultProfile', 'maxConcurrentLocal', 'accelPlan',
   'theme', 'accent', 'locale',
   // 图像生成（H3-Image）
   'imageModelRoot', 'imageSizeId', 'imageSteps', 'imageMaxMP', 'modelNames',

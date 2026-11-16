@@ -1813,6 +1813,122 @@ const comfy = await import('../host/services/comfy-client.js');
       subjNoPic.prompt.includes('text_only'), subjNoPic.prompt.slice(0, 0));
   }
 
+  /* ==================================================================
+   * R42：加速方案（DMAD / LightX2V）参数正确性
+   *
+   * 这一组锁的是"模型训练分布"。每个蒸馏 LoRA 都是在**特定 shift 与步数**
+   * 上训出来的，用错了不会报错，只会静默变糊 —— 所以必须用断言钉住。
+   *
+   * 官方来源：
+   *   · LightX2V README（ModelTC/MiniMax-H3-Turbo）的 spec 表
+   *   · DMAD README（Yzmblog/DMAD）与 HuggingFace 模型卡元数据
+   * ================================================================== */
+  {
+    const {
+      ACCEL_PLANS, ACCEL_PLAN_IDS, DEFAULT_ACCEL_PLAN,
+      accelPlanOf, planForShot, checkSteps,
+    } = await import('../host/services/accel-plan.js');
+
+    add('B-回归', 'R42 默认方案是 dmad8', DEFAULT_ACCEL_PLAN === 'dmad8', DEFAULT_ACCEL_PLAN);
+    add('B-回归', 'R42 方案列表含 dmad8/dmad4/lightx2v/none',
+      ['dmad8', 'dmad4', 'lightx2v', 'none'].every((k) => ACCEL_PLAN_IDS.includes(k)),
+      ACCEL_PLAN_IDS.join(','));
+
+    // --- DMAD：lcm + simple + 12:2 + 步数严格 ---
+    const d8 = planForShot('dmad8', true);
+    add('B-回归', 'R42 dmad8 用 lcm', d8.sampler === 'lcm', d8.sampler);
+    add('B-回归', 'R42 dmad8 用 simple 调度', d8.scheduler === 'simple', d8.scheduler);
+    add('B-回归', 'R42 dmad8 是 8 步', d8.steps === 8, String(d8.steps));
+    // ⚠️ 音频 shift 是 2 不是 3 —— 这是 DMAD 与 LightX2V 最容易混淆的点
+    add('B-回归', 'R42 dmad8 shift 是 12:2（不是 12:3）',
+      d8.shiftVideo === 12 && d8.shiftAudio === 2, `${d8.shiftVideo}/${d8.shiftAudio}`);
+    add('B-回归', 'R42 dmad8 需要 SigmaShift 节点', d8.needShiftNode === true);
+
+    const d4 = planForShot('dmad4', true);
+    add('B-回归', 'R42 dmad4 是 4 步', d4.steps === 4, String(d4.steps));
+    add('B-回归', 'R42 dmad4 同样 12:2', d4.shiftVideo === 12 && d4.shiftAudio === 2);
+
+    // --- DMAD 的一个 LoRA 通吃 ref / fl2v（这是它与 LightX2V 的本质差别）---
+    const dRef = planForShot('dmad8', true).lora;
+    const dFl = planForShot('dmad8', false).lora;
+    add('B-回归', 'R42 dmad 的 ref 与 fl2v 用同一个 LoRA', dRef === dFl, `${dRef} vs ${dFl}`);
+
+    // --- LightX2V：两个专用 LoRA + 各自 shift + euler ---
+    const lRef = planForShot('lightx2v', true);
+    const lFl = planForShot('lightx2v', false);
+    add('B-回归', 'R42 lightx2v 用 euler', lRef.sampler === 'euler', lRef.sampler);
+    add('B-回归', 'R42 lightx2v 是 4 步', lRef.steps === 4, String(lRef.steps));
+    add('B-回归', 'R42 lightx2v ref/fl2v 是两个不同 LoRA', lRef.lora !== lFl.lora,
+      `${lRef.lora} vs ${lFl.lora}`);
+    // ⚠️ 这是本轮修掉的真实缺陷：FL2VA **768p** LoRA 训练在 shift 6:3，
+    //    旧代码不插 shift 节点 → 用模型默认 12:3 → 分布外。
+    add('B-回归', 'R42 lightx2v FL2VA shift 是 6:3（768p 训练值）',
+      lFl.shiftVideo === 6 && lFl.shiftAudio === 3, `${lFl.shiftVideo}/${lFl.shiftAudio}`);
+    add('B-回归', 'R42 lightx2v Ref2VA shift 是 12:3',
+      lRef.shiftVideo === 12 && lRef.shiftAudio === 3, `${lRef.shiftVideo}/${lRef.shiftAudio}`);
+
+    // --- none：不挂 LoRA，用模型默认 shift ---
+    const n = planForShot('none', true);
+    add('B-回归', 'R42 none 没有 LoRA', !n.lora, `"${n.lora}"`);
+    add('B-回归', 'R42 none 不插 shift 节点', n.needShiftNode === false);
+    add('B-回归', 'R42 none 是 50 步原模型', n.steps === 50, String(n.steps));
+
+    // --- 未知方案必须回退并告警，不能静默出错 ---
+    const unk = planForShot('does-not-exist', true);
+    add('B-回归', 'R42 未知方案回退到默认', unk.plan.id === DEFAULT_ACCEL_PLAN, unk.plan.id);
+    add('B-回归', 'R42 未知方案给出警告', unk.warnings.length > 0, unk.warnings.join('|'));
+
+    // --- 步数校验：偏离训练步数要警告 ---
+    add('B-回归', 'R42 方案默认步数无警告', checkSteps('dmad8', 8).warning === '');
+    add('B-回归', 'R42 偏离训练步数会警告', checkSteps('dmad8', 16).warning.length > 0,
+      checkSteps('dmad8', 16).warning);
+    add('B-回归', 'R42 非法步数被拒', checkSteps('dmad8', 0).ok === false);
+
+    // --- 每个方案都必须声明 hint，前端要展示 ---
+    const noHint = ACCEL_PLAN_IDS.filter((k) => !ACCEL_PLANS[k].hint);
+    add('B-回归', 'R42 每个方案都有说明', noHint.length === 0, noHint.join(','));
+  }
+
+  /* ==================================================================
+   * R43：工作流模板与加速方案的一致性
+   *
+   * 模板里必须有 shift / sampler / scheduler 三个占位符，
+   * 否则改了方案也不会生效（占位符不在 → 值被丢弃）。
+   * ================================================================== */
+  {
+    const fsMod = await import('node:fs');
+    const pathMod = await import('node:path');
+    const wfPath = pathMod.resolve(import.meta.dirname, '..', 'data', 'workflows', 'h3.json');
+    const raw = fsMod.readFileSync(wfPath, 'utf8');
+    const wf = JSON.parse(raw);
+
+    for (const ph of ['{{SAMPLER}}', '{{SCHEDULER}}', '{{SHIFT_VIDEO}}', '{{SHIFT_AUDIO}}', '{{STEPS}}']) {
+      add('B-回归', `R43 模板含占位符 ${ph}`, raw.includes(ph));
+    }
+
+    // SigmaShift 节点必须在模板里，且输入口名正确
+    const shiftNode = Object.entries(wf).find(([, v]) => v.class_type === 'MiniMaxH3SigmaShift');
+    add('B-回归', 'R43 模板含 MiniMaxH3SigmaShift 节点', Boolean(shiftNode));
+    if (shiftNode) {
+      const inputs = Object.keys(shiftNode[1].inputs);
+      add('B-回归', 'R43 SigmaShift 输入口是 model/shift_video/shift_audio',
+        inputs.includes('model') && inputs.includes('shift_video') && inputs.includes('shift_audio'),
+        inputs.join(','));
+    }
+
+    // 采样器不能再写死（写死的话换方案无效）
+    const samplerNode = Object.entries(wf).find(([, v]) => v.class_type === 'KSamplerSelect');
+    add('B-回归', 'R43 采样器是占位符不是写死值',
+      samplerNode && String(samplerNode[1].inputs.sampler_name) === '{{SAMPLER}}',
+      samplerNode ? String(samplerNode[1].inputs.sampler_name) : 'missing');
+
+    // 调度器同理
+    const schedNode = Object.entries(wf).find(([, v]) => v.class_type === 'BasicScheduler');
+    add('B-回归', 'R43 调度器是占位符不是写死值',
+      schedNode && String(schedNode[1].inputs.scheduler) === '{{SCHEDULER}}',
+      schedNode ? String(schedNode[1].inputs.scheduler) : 'missing');
+  }
+
 
   // ---- R23 参考视频+音频合计时长 ≤14.8s ----
   {

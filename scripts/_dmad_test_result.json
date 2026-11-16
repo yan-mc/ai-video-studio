@@ -1,0 +1,23 @@
+[
+  {
+    "key": "C-dmad-4step",
+    "label": "DMAD 4step_full_critic",
+    "seconds": 115.3,
+    "files": [
+      {
+        "filename": "C-dmad-4step_00001_.mp4",
+        "subfolder": "dmad_test",
+        "type": "output",
+        "metadata": {
+          "kind": "video",
+          "width": 864,
+          "height": 480,
+          "duration": 5.166666666666667,
+          "fps": 24,
+          "frame_count": 124
+        }
+      }
+    ],
+    "status": "success"
+  }
+]

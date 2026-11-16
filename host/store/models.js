@@ -353,6 +353,14 @@ export function newShot({ title = '', episodeIndex = 1, shotIndex = 1, ...rest }
     durationSec: Number(rest.durationSec) || 5,
     ratio: rest.ratio || '16:9',
     profile: rest.profile || 'P12-draft',
+    /**
+     * 加速方案（可选，覆盖全局 config.accelPlan）。
+     *
+     * 留空 = 跟随全局默认。允许单镜指定，是为了"这一镜要最锐就用
+     * lightx2v、那一镜要理解准就用 dmad8"这种混合工作流。
+     * 取值合法性由 services/accel-plan.js 校验（未知值回退默认并告警）。
+     */
+    accelPlan: typeof rest.accelPlan === 'string' ? rest.accelPlan : '',
     backend: rest.backend || 'h3-local',
     style: rest.style || '',
     description: rest.description || '',
