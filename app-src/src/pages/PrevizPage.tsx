@@ -1,9 +1,9 @@
 /**
- * 3D 预演 —— Blender 渲染控制序列 + 预览。
+ * 3D 预演 —— Blender 渲染灰模参考视频 + 预览。
  *
  * 页面职责（三层）：
  *   1. **看**：渲一段彩色灰模预览（preview），用户能直接看到"我到底做了个什么动画"
- *   2. **渲**：把同一场景渲成 H3 的控制通道（depth / pose / canny / gray）
+ *   2. **渲**：把同一场景渲成灰模参考视频（blockout），填进镜头「参考视频」
  *   3. **改**：一键用桌面 Blender 打开 .blend，真·随便调
  *
  * 为什么不做内嵌 WASM Blender：
@@ -20,30 +20,19 @@ import { useProjectStore } from '../store/project';
 import type { BlenderHealth, BlenderRenderResult } from '../api/types';
 
 /**
- * 三条产出路线 —— 名称与后端 BLENDER_MODES 对齐。
+ * 产出路线 —— 名称与后端 BLENDER_MODES 对齐。
  *
- * ⚠️ 这里刻意把「灰模参考视频」放在最前并标成推荐。
- *    以前页面只列四个控制通道，用户看到的就是"必须渲 depth/pose/canny/gray"，
- *    而那条路要多下 4.22 GB 的 control patch、单镜耗时 +83%、通道之间还会
- *    互相打架（skip 相加 → 过饱和）。
- *
- *    社区主流其实简单得多：**渲一段灰模视频，当参考视频喂给 Ref2VA**。
- *    零额外模型、实测 180° 环绕 6/6 成功（纯文字 0/6 稳定）。
- *    控制塔只在"必须硬锁结构"时才用。
+ * Blender 在这个项目里**只做一件事**：渲灰模参考视频喂给 Ref2VA。
+ * 历史说明：曾经还有一条「控制塔」路线（depth / pose / canny / gray + Fun ControlNet），
+ * 要多下 4.22 GB 的 control patch、单镜耗时 +83%、通道之间还会互相打架
+ * （skip 相加 → 过饱和）。该路线经测试后放弃，已整条移除。
  */
 const REFERENCE_MODES: Array<{ id: string; label: string; desc: string }> = [
   {
     id: 'blockout',
     label: 'blockout',
-    desc: '灰模参考视频 · 推荐。填进「参考视频」走 Ref2VA，不需要额外模型；平光无阴影，只表达运动与空间',
+    desc: '灰模参考视频。填进「参考视频」走 Ref2VA，不需要额外模型；平光无阴影，只表达运动与空间',
   },
-];
-
-const CONTROL_MODES: Array<{ id: string; label: string; desc: string }> = [
-  { id: 'depth', label: 'depth', desc: '逆深度 · 控制塔用，锁走位/遮挡/景深（近白远黑）' },
-  { id: 'pose', label: 'pose', desc: 'OpenPose 骨架 · 控制塔用，锁动作与站位（黑底彩线）' },
-  { id: 'canny', label: 'canny', desc: '硬边缘 · 控制塔用，锁建筑/道具结构（黑底白线）' },
-  { id: 'gray', label: 'gray', desc: '灰模整体 · 控制塔用，锁光影布局' },
 ];
 
 type ShotLite = {
@@ -53,7 +42,14 @@ type ShotLite = {
   durationSec?: number;
   ratio?: string;
   actors?: unknown[];
+  refs?: { images?: string[]; videos?: Array<string | { rel?: string }>; audios?: string[] };
 };
+
+/** 从 refs.videos 里取出 rel 字符串（历史数据可能是 string 或 {rel}） */
+function videoRel(v: string | { rel?: string } | null | undefined): string {
+  if (!v) return '';
+  return typeof v === 'string' ? v : (v.rel ?? '');
+}
 
 
 export function PrevizPage() {
@@ -64,6 +60,8 @@ export function PrevizPage() {
 
   const [health, setHealth] = useState<BlenderHealth | null>(null);
   const [busy, setBusy] = useState('');
+  /** 「挂到参考视频」独立于渲染忙碌态：两者会并发（渲染完自动挂），共用一个 state 会互相覆盖 */
+  const [attaching, setAttaching] = useState(false);
   const [err, setErr] = useState('');
   const [msg, setMsg] = useState('');
   const [results, setResults] = useState<Record<string, BlenderRenderResult>>({});
@@ -141,7 +139,7 @@ export function PrevizPage() {
         setErr(r.warnings.join('；'));
         if (mode !== 'preview') {
           const ok = window.confirm(
-            `${r.warnings[0]}\n\n仍要把这段产物当参考/控制视频用吗？\n`
+            `${r.warnings[0]}\n\n仍要把这段产物当参考视频用吗？\n`
             + '（点「取消」可先去渲染页配好走位再回来渲）',
           );
           if (!ok) {
@@ -151,13 +149,69 @@ export function PrevizPage() {
               return next;
             });
             setErr('已放弃使用这份占位人偶产物。请先在「渲染页 → 3D 走位」配好角色。');
+            return;
           }
         }
+      }
+      /**
+       * 渲完直接挂到镜头卡，不留"用户自己去渲染页找"这一步。
+       *
+       * 没警告（也就是走位配全了）时自动挂；有警告时用户已经在上面的
+       * confirm 里明确选择"仍要用"，所以也挂。预览不挂。
+       *
+       * ⚠️ 必须把 `r` 传进去 —— 不能靠 `results` state（此刻还没提交）。
+       */
+      if (mode !== 'preview') {
+        await attachAsReference(r);
       }
     } catch (e) {
       setErr(describeError(e));
     } finally {
       setBusy('');
+    }
+  }
+
+  /**
+   * 把渲好的 blockout 视频写回镜头卡的 `refs.videos`。
+   *
+   * 为什么必须做：页面文案一直写着「渲完去渲染页『参考视频』里选它」，
+   * 但**没有任何代码把它填进去** —— 用户渲完发现参考视频列表里根本没有这段，
+   * 只能去素材库里猜哪个文件是它。这是整条「Blender → Ref2VA」管线上
+   * 唯一的断点，也是"管线不清晰"最直观的来源。
+   *
+   * ⚠️ 参数 `r` 必须是**显式传进来**的产物，不能从 `results` state 读。
+   *    渲染刚结束就调用本函数时，`setResults(...)` 还没触发 re-render，
+   *    闭包里捕获的是渲染**之前**的 `results` —— 读出来永远是 undefined，
+   *    于是每次都报"这只产物还没有可用的相对路径"，参考视频永远挂不上。
+   *    （这是把"根本没人回填"修成"回填"时引入的回归，已用参数传值修掉。）
+   *
+   * 语义：顶部插入（保证最新渲的排在 视频1，即 <Video 1>），去重，最多 3 条。
+   */
+  async function attachAsReference(r: BlenderRenderResult | null) {
+    if (!r?.rel) { setErr('这只产物还没有可用的相对路径'); return; }
+    if (!currentProjectId || !shotId) { setErr('先选项目和镜头'); return; }
+    setAttaching(true);
+    setErr('');
+    try {
+      const list = (await api.listShots(currentProjectId)) as unknown as ShotLite[];
+      const shot = list.find((s) => s.id === shotId);
+      if (!shot) throw new Error('镜头不存在（可能已被删除）');
+      const existing = (shot.refs?.videos ?? []).map(videoRel).filter(Boolean);
+      const next = [r.rel, ...existing.filter((v) => v !== r.rel)].slice(0, 3);
+      await api.saveShot(currentProjectId, {
+        id: shotId,
+        refs: {
+          images: shot.refs?.images ?? [],
+          videos: next,
+          audios: shot.refs?.audios ?? [],
+        },
+      } as never);
+      setMsg(`已挂到镜头的「参考视频」：${r.rel}（提示词里用 <Video 1> 引用）`);
+      await loadShots(currentProjectId);
+    } catch (e) {
+      setErr(describeError(e));
+    } finally {
+      setAttaching(false);
     }
   }
 
@@ -310,8 +364,9 @@ export function PrevizPage() {
         <Panel title="灰模参考视频（推荐路线）">
           <div className="jz-xs jz-muted" style={{ marginBottom: 10 }}>
             Blender 只负责<b>运动与空间</b>，出一段灰模视频当参考视频。
-            不需要任何额外模型；渲完在「渲染页 → 参考视频」里选它，
-            提示词用 <code>&lt;Video 1&gt;</code> 声明「只取运镜/走位/节奏」。
+            不需要任何额外模型。<b>渲完会自动挂进当前镜头的「参考视频」</b>，
+            到渲染页就能直接生成；提示词里用 <code>&lt;Video 1&gt;</code> 声明
+            「只取运镜/走位/节奏」。
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
             {REFERENCE_MODES.map((m) => {
@@ -329,38 +384,20 @@ export function PrevizPage() {
                     <div className="jz-xs jz-mono" style={{ marginTop: 6, wordBreak: 'break-all' }}>
                       {r.frames} 帧 / {r.seconds}s
                       <div className="jz-muted">{r.rel}</div>
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })}
-          </div>
-        </Panel>
-
-        {/* ---------------- 控制通道 ---------------- */}
-        <Panel title="控制通道（ControlNet · 需要额外模型）">
-          <div className="jz-xs jz-muted" style={{ marginBottom: 10 }}>
-            与预览同一场景，渲成 Fun ControlNet 需要的条件图。
-            <b> 需要额外 4.22 GB 控制模型</b>，单镜耗时 +83%；通道叠加会互相打架
-            （建议 depth 0.3 + pose 0.7）。<br />
-            渲完在「渲染页 → 控制视频」里选它 —— <b>不是</b>参考视频那一栏。
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
-            {CONTROL_MODES.map((m) => {
-              const r = results[m.id];
-              return (
-                <div key={m.id} className="jz-card" style={{ padding: 10 }}>
-                  <div className="jz-row" style={{ justifyContent: 'space-between', gap: 6 }}>
-                    <b className="jz-sm">{m.label}</b>
-                    <Button disabled={!canRender} onClick={() => void render(m.id)}>
-                      {busy === m.id ? '渲染中…' : '渲染'}
-                    </Button>
-                  </div>
-                  <div className="jz-xs jz-muted" style={{ marginTop: 4 }}>{m.desc}</div>
-                  {r ? (
-                    <div className="jz-xs jz-mono" style={{ marginTop: 6, wordBreak: 'break-all' }}>
-                      {r.frames} 帧 / {r.seconds}s
-                      <div className="jz-muted">{r.rel}</div>
+                      <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        <Button
+                          variant="primary"
+                          disabled={!shotId || attaching}
+                          onClick={() => void attachAsReference(r)}
+                          title="把这段灰模视频写进当前镜头的「参考视频」槽位"
+                        >
+                          {attaching ? '写入中…' : '挂到本镜头参考视频'}
+                        </Button>
+                        {(() => {
+                          const already = (currentShot?.refs?.videos ?? []).map(videoRel).includes(r.rel);
+                          return already ? <Badge tone="ok">已挂上</Badge> : null;
+                        })()}
+                      </div>
                     </div>
                   ) : null}
                 </div>
@@ -372,17 +409,13 @@ export function PrevizPage() {
         <div className="jz-card" style={{ padding: '10px 12px' }}>
           <b className="jz-sm">工作流</b>
           <div className="jz-xs jz-muted" style={{ marginTop: 6, lineHeight: 1.8 }}>
-            <b>常规路线（推荐）</b>：① 渲染页「3D 走位」配好角色/道具/机位 →
+            ① 渲染页「3D 走位」配好角色/道具/机位 →
             ② 这里渲预览确认动画 →
-            ③ 渲 <code>blockout</code> 灰模视频 → ④ 渲染页「参考视频」里选它 →
-            ⑤ 生成。提示词用 <code>&lt;Video 1&gt;</code> 声明只取运镜/走位/节奏。
+            ③ 渲 <code>blockout</code> 灰模视频（<b>自动挂进镜头参考视频</b>）→
+            ④ 回渲染页直接生成。提示词用 <code>&lt;Video 1&gt;</code> 声明只取运镜/走位/节奏。
             <br />
-            <b>控制塔路线</b>（只在必须硬锁结构时）：③′ 渲 depth/pose →
-            ④′ 渲染页「控制视频」里选它 → ⑤′ 生成，并按 depth 0.3 + pose 0.7 配比。
-            <br />
-            两条路都要：提示词描述画面里<b>真实存在</b>的东西（人数、主要道具、机位方向），
-            否则前几秒会被提示词抢走 —— 实测见
-            <code> docs/probes/h3-controlnet-2026-11-14/REPORT.md</code>。
+            提示词要描述画面里<b>真实存在</b>的东西（人数、主要道具、机位方向），
+            否则前几秒会被提示词抢走。
           </div>
         </div>
       </div>

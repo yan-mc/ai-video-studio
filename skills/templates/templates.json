@@ -1,0 +1,133 @@
+{
+  "_readme": "九章工作室 · 内置提示词模板。可直接编辑本文件添加/修改模板，无需改代码或重新构建。",
+  "_schema": {
+    "id": "唯一 id（tpl- 前缀）",
+    "name": "显示名",
+    "category": "分类（文字/角色/分镜/场景/剧本/质检/H3/电商/影视/漫画）",
+    "content": "模板正文"
+  },
+  "version": 2,
+  "templates": [
+    {
+      "id": "tpl-cinematic-shot",
+      "name": "电影感镜头描述",
+      "category": "文字",
+      "content": "描述一个电影感镜头的画面、光线、构图与情绪。要求：明确景别、主体动作、光线方向、色调倾向。"
+    },
+    {
+      "id": "tpl-char-lock",
+      "name": "角色外观固化",
+      "category": "角色",
+      "content": "把角色外观写成可复用的英文提示词：发色、发型、瞳色、服装、配饰、身高、体态。"
+    },
+    {
+      "id": "tpl-storyboard-split",
+      "name": "分镜拆分",
+      "category": "分镜",
+      "content": "把一段剧本拆成 N 个可拍摄的镜头，每镜含：景别、动作、台词、运镜。"
+    },
+    {
+      "id": "tpl-scene-consistency",
+      "name": "场景一致化",
+      "category": "场景",
+      "content": "为同一场景生成稳定的环境描述，保证多镜之间视觉连续：地点、时间、光线、道具布局。"
+    },
+    {
+      "id": "tpl-emotion-map",
+      "name": "情绪曲线",
+      "category": "剧本",
+      "content": "为每一集标注情绪值（-5 到 +5），确保全剧有起伏而非平铺。"
+    },
+    {
+      "id": "tpl-dialogue-polish",
+      "name": "台词润色",
+      "category": "剧本",
+      "content": "把台词改得更口语化、更符合角色身份，去掉书面语与解释性台词。"
+    },
+    {
+      "id": "tpl-shot-rhythm",
+      "name": "镜头节奏",
+      "category": "分镜",
+      "content": "按 2-3 秒一镜规划节奏，紧张段落缩短、抒情段落拉长。"
+    },
+    {
+      "id": "tpl-continuity",
+      "name": "连戏检查",
+      "category": "质检",
+      "content": "检查角色服装、道具位置、光线方向、时间连续性是否跨镜一致。"
+    },
+    {
+      "id": "tpl-h3-ref2va",
+      "name": "H3 Ref2VA 提示词",
+      "category": "H3",
+      "content": "按 H3 官方六段式生成（字段顺序固定）：subject_definitions / summary / retention_analysis / detailed_description / overall_soundscape / non_diegetic_music。每段用 <Picture N> / <Video N> / <Audio N> 声明参考素材用途。",
+      "note": "2026-11-17 修正：原模板用的是已废弃的 CRITICAL STYLE RULE / CHARACTER DEFINITION / SCENE LAYOUT / MOTION DESCRIPTION 旧骨架"
+    },
+    {
+      "id": "tpl-h3-i2va",
+      "name": "H3 I2VA 提示词",
+      "category": "H3",
+      "content": "首帧图对齐 0.00 秒，描述从首帧开始向前发展的动态。"
+    },
+    {
+      "id": "tpl-h3-fl2va",
+      "name": "H3 FL2VA 首尾帧",
+      "category": "H3",
+      "content": "首帧对齐 0.00 秒、尾帧对齐实际时长，重点描述中间演变过程。"
+    },
+    {
+      "id": "tpl-h3-style-en",
+      "name": "H3 画风英文",
+      "category": "H3",
+      "content": "画风描述必须用英文，其余中文；写明禁止项（NO photorealistic / NO subtitles）。"
+    },
+    {
+      "id": "tpl-h3-audio",
+      "name": "H3 音频三字段",
+      "category": "H3",
+      "content": "overall_soundscape（画内音）/ non_diegetic_music（画外配乐）/ 音效（分镜内）三个字段都必须写满。"
+    },
+    {
+      "id": "tpl-ecom-front",
+      "name": "电商主图",
+      "category": "电商",
+      "content": "正面平视中景，主品完整呈现，纯净背景，柔和顶光。"
+    },
+    {
+      "id": "tpl-ecom-detail",
+      "name": "电商细节",
+      "category": "电商",
+      "content": "微距近景，突出面料纹理、缝线、五金细节。"
+    },
+    {
+      "id": "tpl-film-base",
+      "name": "影视定妆照",
+      "category": "影视",
+      "content": "正面半身中景，最干净的一张，用于锁定身份。"
+    },
+    {
+      "id": "tpl-film-turnaround",
+      "name": "三视图",
+      "category": "影视",
+      "content": "正/侧/背/45° 四张，统一光位与白底，便于建模参考。"
+    },
+    {
+      "id": "tpl-comic-panel",
+      "name": "漫画分格描述",
+      "category": "漫画",
+      "content": "描述一格漫画：画面内容、角色站位、表情、气泡位置与台词。"
+    },
+    {
+      "id": "tpl-camera-move",
+      "name": "运镜描述",
+      "category": "分镜",
+      "content": "用一句中文描述运镜：推/拉/摇/移/跟/升降/环绕 + 幅度 + 速度。"
+    },
+    {
+      "id": "tpl-safe-frame",
+      "name": "安全构图",
+      "category": "质检",
+      "content": "检查主体是否落在安全框内，避免切头、切手、关键信息出画。"
+    }
+  ]
+}

@@ -1,6 +1,7 @@
-# 九章工作室 · DSH 视频/图像创作插件
+# 九章工作室 · DSH 视频创作插件
 
-> 本地 AI 视频与图像工作室。渲染页 / 角色卡 / 节点画布 / 素材库 / 剧本 / 漫画 / 模特 / 3D 预演 / 立绘拆解 / **H3 视频 + H3-Image 图像双后端**。
+> 本地 AI 视频工作室，跑在 DeepSeek Harness 里。
+> 从**一句话想法**到**成片**：智能分镜 → 镜头卡 → 南风 V15 生成 → 跨镜头续写。
 >
 > 完全本地运行，数据不出机器。
 
@@ -10,23 +11,55 @@
 
 | 能力 | 说明 |
 |---|---|
-| **渲染页（主入口）** | 选角色卡 + 参考图/视频/音频 → 编译提示词 → 渲染 → 页面内预览；含成片合成 |
-| **角色卡仓库** | 设定卡图 + 文字设定 + 原立绘，多角色一致性锚点，渲染时按优先级自动排布 |
-| **26 节点画布** | 节点式工作流，8 种端口类型，拖线只列可连接节点，12 步撤销，自动保存 |
-| **H3 视频生成** | MiniMax H3 本地（Ref2VA / FL2VA / T2V），**音画同步**，5 秒片约 130 秒 |
-| **四类参考输入** | 参考图 ≤9 / 参考视频 ≤3（帧序列）/ 视频音轨 / 独立音频 ≤3，编号自动推算 |
-| **控制视频（ControlNet）** | 逐帧约束结构与运动（Fun ControlNet Union 2.0，8 条件）；实测构图跟随 |
-| **分段串联** | 上一段末帧 → 下一段首帧（Ref2VA + AddGuide），长片拆段不飘 |
-| **H3-Image 图像生成** | 33B 扩散模型，6 步采样，原生 16MP，**12GB 显存可跑** |
-| **立绘拆解** | 立绘 → 全景式角色概念分解图（服装分层/表情集/材质特写/随身物品） |
-| **漫画工作台** | 分镜抽取 → 提示词计划 → 逐格出图 → 内含图片的 SVG 导出 |
-| **模特工作台** | 电商 6 风格 / 影视 10 画风，套件批量出图（13 张 / 10 张） |
-| **剧本 5 阶段** | 大纲 → 人物小传 → 章节目录 → 章节正文 → 视觉分镜，14 题材；含「剧本拆解」tab |
-| **3D 预演** | **Blender 渲染 H3 控制序列**（depth / pose / canny / gray）+ 彩色预览 + glb/fbx 模型导入 + Mixamo 动作 + 一键在桌面 Blender 编辑 |
-| **H3 提示词工程** | 官方六段式/三段式编译器，9 种画风，硬约束校验 |
-| **画布 AI 助手** | 17 个画布工具 + 4 个权限位，自然语言改画布 |
+| **渲染 V2** | 南风 V15 引擎，217 个参数分 12 组（**其中 95 个实测无效/缺依赖，界面已标注并默认折叠**），7 个预设，二次采样到 1472×832 |
+| **智能分镜** | 用 DSH 内部大模型看图 + 写分镜提示词，**零 API Key**；7 种模式，输出结构受硬约束 |
+| **跨镜头续写** | 段间 AV latent 续接（`context_length` 22 帧），动作连续不断裂；实测段间 PSNR 30.7 dB |
+| **二次采样** | 480p 一采（6 步）→ 潜空间放大到 1.2MP → 二采（4 步），5 分钟出 1472×832 |
+| **音画同步** | H3 原生音频 VAE，输出 **h264 + AAC 立体声** |
+| **角色卡仓库** | 设定卡图 + 文字设定 + 原立绘，多角色一致性锚点 |
+| **素材库** | 参考图 ≤9 / 参考视频 ≤3 / 参考音频 ≤3，槽位编号自动对齐 `<Picture N>` |
+| **3D 预演** | Blender 渲灰模参考视频（blockout）喂 Ref2VA |
+| **立绘拆解** | 立绘 → 全景式角色概念分解图 |
+| **26 节点画布** | 节点式工作流，12 步撤销，自动保存 |
+| **H3-Image** | 33B 扩散模型，6 步采样，12GB 显存可跑 |
 | **图像工具** | 裁剪 / 切割 / 标注 / 抽帧 / 抽音 / 质检 |
-| **画布生成闭环** | 节点参数 → 镜头卡 → 生成 → 轮询 → 结果回写，产物自动归档进素材库 |
+| **实时同步** | SSE 推送：DSH Agent 改了参数，网页立即可见 |
+
+---
+
+## 架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  DSH Agent（对话）          Web SPA（浏览器）                 │
+│  studio_* 工具              RenderPageV2 / StoryboardPage    │
+└──────────────┬──────────────────────────┬───────────────────┘
+               │                          │
+               │      REST + SSE          │
+               ▼                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│  host/  (Node ESM)                                          │
+│   · api/index.js      ~90 条 REST 路由                       │
+│   · api/events.js     SSE 事件总线                            │
+│   · tools.js          13 个 Agent 工具                        │
+│   · services/                                                │
+│       nanfeng/        ← 南风桥接层（1897 行）                  │
+│         schema.js     217 参数定义                            │
+│         graph.js      图组装 + 类型强制 + 环境修正             │
+│         presets.js    7 预设 + 三层合并                       │
+│         continuation.js  续写批次编排                         │
+│         storyboard.js 智能分镜（移植南风提示词资产）           │
+│         dsh-llm.js    DSH LLM 桥接（零凭据）                  │
+└──────────────┬──────────────────────────────────────────────┘
+               │ ComfyUI /prompt
+               ▼
+┌─────────────────────────────────────────────────────────────┐
+│  ComfyUI 0.45.0 + vendor/nanfeng                            │
+│   NanFengH3MultiReferenceGeneratorV15                       │
+│     → GraphBuilder 内部展开 ~40 个节点                        │
+│     → 出片                                                   │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -35,7 +68,6 @@
 ### 1. 安装插件
 
 ```powershell
-# 在 DSH profile 里 link 本目录
 cd $env:USERPROFILE\.dsh\profiles\desktop
 # package.json dependencies 里加：
 #   "@local/dsh-jiuzhang-studio": "link:<本仓库路径>"
@@ -43,226 +75,299 @@ cd $env:USERPROFILE\.dsh\profiles\desktop
 
 重启 DSH，左侧栏出现「九章工作室」图标。
 
-### 2. 准备本地模型
+### 2. 准备 ComfyUI
 
-**插件不包含模型权重。** 需要：
+**插件不包含模型权重。**
 
-- ComfyUI ≥ 0.45.0
-- MiniMax H3 视频模型（约 47 GB）
-- MiniMax H3-Image 图像模型（约 13 GB）
-
-详细步骤见 **[部署 skill](skills/jiuzhang-studio-setup/SKILL.md)**，包含：
-- 完整模型清单与下载命令
-- 显存/磁盘要求与量化档位选择
-- 常见错误排查
-- 硬件性能基线（实测数据）
-
-> **3D 预演需要 Blender 5.2+**（可选组件）：把便携版放到 `工作室/tools/blender-<版本>/`，
-> 或设环境变量 `DSH_BLENDER` 指向 blender.exe。未安装时预演页显示"未安装"，不影响其它功能。
-
-### 3. 构建前端（可选）
-
-仓库已包含构建好的 `app-dist`，clone 即用。若改了 `app-src`：
+- ComfyUI **0.45.0**（版本锁定，升级需回归测试）
+- 启动参数建议加 **`--use-ck-attention`**（ComfyUI 自带加速，实测快 15%）
 
 ```powershell
-cd app-src
-npm install
-npm run build
+python main.py --lowvram --use-ck-attention --port 8188
 ```
 
----
+### 3. 安装 vendor 里的自定义节点
 
-## 用法
+把 `vendor/nanfeng/` 复制（或软链）到 `ComfyUI/custom_nodes/nanfeng_prompt_nodes_v15/`：
 
-点侧栏图标 → 面板显示**启动器 + 监测器** → 点任意入口，浏览器新标签页全屏打开。
-
-**详细功能说明见 [使用指南](docs/使用指南.md)**，覆盖 13 个页面每一个窗口、每个输入框的作用。
-
-**3D 预演的渲染链路（四通道 / 模型导入 / 动作库）与控制视频接法见
-[Blender 预演实施报告](docs/probes/blender-previz-2026-11-14/REPORT.md) 与 [链路审查](docs/probes/blender-previz-2026-11-14/AUDIT.md)**。
-
-> 为什么不在 DSH 面板里直接画？侧栏会挤压可用宽度，画布在浏览器全屏体验才正确。面板里的监测器仍实时显示后端状态。
-
----
-
-## 架构
-
-```
-DSH Host (Electron, 127.0.0.1:随机端口)
-└─ @local/dsh-jiuzhang-studio
-   ├─ host/                Node ESM：工具 + REST + 子进程
-   │  ├─ index.js          插件入口
-   │  ├─ security.js       Origin 同源 + 写令牌 + 路径穿越防护
-   │  ├─ config.js         配置白名单（可执行路径不接受外部注入）
-   │  ├─ static.js         SPA 静态服务（Range / HEAD / ETag）
-   │  ├─ api/index.js      REST 路由
-   │  ├─ services/         19 个服务
-   │  └─ store/            原子 JSON + 图片引用池
-   ├─ client.js            DSH 面板（启动器 + 监测器）
-   ├─ app-dist/            SPA 构建产物（进仓库）
-   └─ app-src/             SPA 源码（React 18 + Vite）
+```powershell
+Copy-Item -Recurse vendor\nanfeng ComfyUI\custom_nodes\nanfeng_prompt_nodes_v15
 ```
 
-**HTTP 路由**（全部 handler 注册，绕过 DSH 准入 → 自带鉴权）：
+还需要这几个第三方节点：
 
-| 路径 | 用途 |
+| 节点包 | 用途 |
 |---|---|
-| `/jiuzhang/api/*` | REST |
-| `/jiuzhang/app/*` | SPA 静态 |
-| `/jiuzhang/assets/*` | 素材文件静态（来自 `<dataDir>/assets`，供 3D 模型等直接内联加载） |
+| `ComfyUI-KJNodes` | 采样辅助 |
+| `ComfyUI-H3-Motion-Context` | 续写 latent 读写 |
+| `ComfyUI-H3-AudioRefine` | 续写音频精修（可选） |
+| `ComfyUI-VideoHelperSuite` | 输出 mp4（**必需**） |
+| `Comfyui_Minimax_h3_latent_Upscaler` | 潜空间放大二采（**必需**） |
 
-**排查入口**：`GET /jiuzhang/api/health` 会一并返回 `workflows.ok`
-（H3 与 H3-Image 的工作流模板是否就位）与 `blender.available`（Blender 是否就绪）。
-缺模板时可打 `GET /jiuzhang/api/workflows/diagnostics` 看它找过哪些目录、该怎么配。
+> ⚠️ `Comfyui_Minimax_h3_latent_Upscaler` 的上游 HEAD 已改名并删除了
+> `H3LatentUpscalerNodeMegapixels`。本仓库的部署脚本会还原所需的历史版本文件，
+> 不要用该包的最新 HEAD。
+
+### 4. 模型清单
+
+| 类别 | 文件 | 大小 |
+|---|---|---|
+| 扩散模型 | `minimax_h3_ref2va_pruned_fp8_scaled.safetensors` | 47 GB |
+| 文本编码器 | `qwen3vl_32b_minimax_h3_int8_convrot.safetensors` | 25 GB |
+| 视频 VAE | `minimax_h3_video_vae_fp16.safetensors` | — |
+| 音频 VAE | `minimax_h3_audio_vae_fp32.safetensors` | — |
+| 二采放大 | `minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors` | 659 MB |
+| LoRA | DMAD 4step / 8step | 3.6 GB |
+
+详细步骤见 **[部署 skill](skills/setup/SKILL.md)**；
+架构与 API 全表见 **[架构 skill](skills/architecture/SKILL.md)**。
+
+---
+
+## 参数体系
+
+南风 V15 有 **217 个参数**，分 12 组。但**真正能生效的只有 122 个（56%）**：
+
+| 分类 | 含义 | 数量 |
+|---|---|---|
+| **A** | 有效，默认值也合理 | 114 |
+| **B** | **有效但默认没开**（有收益，建议开） | 8 |
+| **C** | 死参数：上游硬编码关闭 / 完全无读取 | 47 |
+| **D** | 缺依赖：本机未装节点，开了报错 | 48 |
+
+> 完整逐条审计见 **[参数审计报告](docs/PARAM-AUDIT.md)**
+> （生成命令：`npm run audit:params`，逐项对照 `h3_generator.py` 源码核实）。
+>
+> 数字以 `inertParams()` 为准，自检：
+> `node -e "import('./host/services/nanfeng/schema.js').then(m=>{const i=m.inertParams();console.log(i.length,i.filter(p=>p.flag==='dead').length,'dead')})"`
+> → 期望 `95 47 dead`
+
+### B 类：买了没用上的功能
+
+这 8 个功能**实现了、能生效、有明确收益，但默认是关的**：
+
+| 参数 | 收益 |
+|---|---|
+| `启用H3潜空间放大二采` | **唯一真正有效的画质提升路径**（已由 standard/quality 预设默认开启） |
+| `启用潜空间续写` | **长视频的唯一正确做法**：AV latent 接续（已由 continuation 预设默认开启） |
+| `启用运行时预留显存` | 12GB 卡最有效的省显存手段（已由 low-vram 预设默认开启） |
+| `启用UniBlockSwap` | 真能省显存（已核实源码有消费） |
+| `启用续写音频精修` | 消除续写接缝爆音 |
+| `启用锁音频` | 参考音频原样作为输出音轨 |
+| `开启音频驱动模式` | 用音频打点驱动画面节奏 |
+| `启用TAEH3彩色预览` | TAE 快速彩色预览，省完整 VAE 解码 |
+
+### C 类：47 个死参数
+
+| 来源 | 数量 | 依据 |
+|---|---|---|
+| 旧「高清二采」整条链路 | 10 | `h3_generator.py:1689` `hd_second_pass = False` |
+| 旧 V4 双采样 | 3 | `:1796` `elif False:` |
+| Sigma 调节面板 | 6 | `:1687` `sigma_requested = False` |
+| Sol-Attn + T8 缓存 | 15 | `:1472-1473` 无条件置 False |
+| 小脸修复 / 全局修复 / 人物定位 | 15 | `generate()` 零读取 |
+| 其它零星（固定随机种子 / 启动准备 / 低显存注意力分头数 等） | 6 | 零读取 |
+| 分支不可达（Sigma策略 / H3二采Sigma / 尺寸倍数 / 参考图尺寸 / SageAttention / 启用LoRA / H3二采LoRA 系） | 7 | 见 PARAM-AUDIT §十 |
+
+> ⚠️ **常见误区**：
+> - 「二采步数」「二采百万像素」等是**旧实现**，已废弃；
+>   真正管画质的是 `启用H3潜空间放大二采` + `H3一采步数` + `H3二采步数`
+> - `手动西格玛`（F 组）是死参数，有效的是 `H3完整Sigma序列`（D 组）
+> - **`固定随机种子` 是死参数** —— 上游 `generate()` 零读取它。
+>   真正生效的是 `随机种子` 本身（旧文档说「必须打开固定随机种子」是错的）
+> - **`Sigma策略` 是死参数** —— 三个选项只有「原生轨迹」可达，
+>   所以 DMAD 要求的 shift 12/2 设不了（模型自带 12/3）
+
+### 画风与打光（两个正交通道）
+
+南风 217 参数里**没有画风参数，也没有打光参数** —— H3 是纯提示词驱动的。
+这两项都由提示词通道实现，可任意组合：
+
+**画风**（`STYLE_PRESETS`，9 种）：`helltaker-look` / `helltaker-style` / `ova90s` /
+`shinkai` / `ghibli` / `american-toon` / `ufotable` / `toon3d-pbr` / `gohands`
+
+**打光 / 光比**（`LIGHTING_PRESETS`，6 种）：
+
+| id | 名称 | 光比 | 效果 |
+|---|---|---|---|
+| `none` | 不指定 | — | 跟随画风与参考图 |
+| `high-key-2-1` | 2:1 高调柔光 | 1 档差 | 日系写真、治愈系 |
+| `classic-3-1` | 3:1 经典人像 | 1.7 档 | 对话戏、人物特写 |
+| `dramatic-4-1` | 4:1 戏剧低调 | **2 档差** | 悬疑、情绪戏、夜戏 |
+| `noir-8-1` | 8:1 极低调 | **3 档差** | 黑色电影、母鸡卡剧场版那种强反差 |
+| `rim-backlit` | 强边缘光 | 3 档差 | 剪影、登场亮相、舞台 |
+
+> 光比 = 主光 : 补光 = 亮面 : 暗面照度。光按「档」翻倍（1 档 = 2 倍），
+> 所以 8:1 是明暗差 8 倍 ≈ 3 档。
+>
+> **打光是纯提示词通道**，不需要任何模型支持，Ref2VA 与基础格式两条路径都生效。
+
+### 内置预设
+
+| id | 用途 | 说明 |
+|---|---|---|
+| `draft` | 试提示词 | 480p / 4 步，约 1.5 分钟 |
+| `standard` | 日常主力 | 480p → 0.8MP 二采，约 3 分钟 |
+| `quality` | 成片 | 480p → 1.2MP 二采，**1472×832**，约 5.5 分钟 |
+| `quality-preview` | 调试构图 | 同 quality + 采样预览 |
+| `continuation` | 续写段 | 开启潜空间续写 |
+| `continuation-quality` | 续写 + 高画质一采 | 续写不能开潜空间二采（上游硬互斥），靠一采面积提画质 |
+| `low-vram` | 12GB 保守 | 开启运行时预留显存（这是 12GB 卡唯一真正有效的省显存手段） |
+
+预设支持三层叠加：**内置预设 → 项目预设 → 镜头覆盖**。
+
+**加速方案**（与预设正交，可单镜覆盖）：
+
+| id | 说明 | 步数 | LoRA |
+|---|---|---|---|
+| `dmad8` | DMAD 8 步学生，音画质量优先（**默认**） | 8 | `dmad_..._8step_...safetensors` |
+| `dmad4` | DMAD 4 步学生，最快 | 4 | `dmad_..._4step_...safetensors` |
+| `none` | 不挂 LoRA，原模型 50 步（仅供对照） | 50 | — |
+
+> ⚠️ DMAD 要求 `shift 12/2`，但**南风 V15 的 SigmaShift 分支被上游硬编码关闭**
+> （`h3_generator.py:1687`），实际会用模型自带的 `12/3`。LoRA 本身仍完整生效。
+> 插件会在 `job.warnings` 里明确告知这条限制，不静默。
+
+### 硬互斥约束（组装前就会拦下）
+
+这些组合进到 ComfyUI 才会报错，且错误信息极难懂。插件在提交前就拦，
+并把冲突项直接写进错误消息（见 `host/services/nanfeng/index.js` 的 `CONSTRAINT_RULES`）：
+
+| 冲突 | 依据 |
+|---|---|
+| 潜空间续写 ✕ H3潜空间放大二采 | `h3_generator.py:1322` |
+| 潜空间续写 ✕ 锁音频 / 音频驱动 / 空5分钟时间轴 | `h3_generator.py:1318` |
+| 文生 / 图生 / 首尾帧 三选一 | `h3_generator.py:1361` |
+| 图生视频必须恰好 1 张图 | `h3_generator.py:1378` |
+| 首尾帧必须恰好 2 张图 | `h3_generator.py:1380` |
+| 文生视频不接受任何参考图 | `h3_generator.py:1376` |
+| 图生 / 首尾帧不接受视频与音频 | `h3_generator.py:1372` |
+| 音频驱动必须同时锁音频 | `h3_generator.py:1351` |
+
 
 ---
 
 ## Agent 工具（13 个）
 
-| 工具 | 说明 |
+| 工具 | 用途 |
 |---|---|
-| `studio_meta` | 档位 / 19 H3 槽位 / 26 节点 / 15 资产类型 |
-| `studio_config` | 配置读写（白名单） |
+| `studio_meta` | 元信息（含南风参数分组 + 预设） |
+| `studio_config` | 读写配置 |
 | `studio_project` | 项目 CRUD |
 | `studio_shot` | 镜头卡 CRUD |
-| `studio_generate` | 触发生成（h3-local / h3-image / mock） |
-| `studio_jobs` | 任务查询 / 取消（真终止远端） |
-| `studio_post` | 8 个后处理/图像工具 |
-| `studio_h3_workshop` | 剧本 → 分段 + 资产（**只产文本，不出图**） |
-
-| `studio_script` | 剧本 5 阶段 |
-| `studio_mw` | 模特工作台（11 action） |
-| `studio_blender` | Blender 预演（渲染 depth/pose/canny/gray · 资产库 · 动作探测） |
-| `studio_prompt` | H3 提示词编译 |
-| `studio_image` | H3-Image 出图 |
-| `studio_toolbox` | 7 个域的工具箱 |
-
-> 素材没有独立工具，走 REST（`/assets*`）。生成产物会自动归档进素材库。
+| `studio_prompt` | H3 提示词编译（六段式/三段式） |
+| `studio_generate` | 提交生成（支持 preset / params / continuationTask） |
+| `studio_jobs` | 任务查询 / 取消 |
+| `studio_storyboard` | **智能分镜**（看图 + 写分镜，走 DSH 模型） |
+| `studio_h3_workshop` | 剧本 → 中性分段 + 资产提示词 |
+| `studio_blender` | 3D 预演渲染 |
+| `studio_post` | ffmpeg 后处理 |
+| `studio_image` | H3-Image 生成 / 立绘拆解 |
+| `studio_toolbox` | 提示词模板 / 服化道 / 孤儿清理 / 日志 |
 
 ---
 
-## 本地模型要求
+## 实测性能（RTX 4080 Laptop 12GB）
 
-### H3 视频
-
-| 文件 | 大小 | 目录 |
+| 场景 | 分辨率 | 耗时 |
 |---|---|---|
-| `minimax_h3_ref2va_pruned_fp8_scaled` | 19.5 GB | `diffusion_models/` |
-| `minimax_h3_fl2va_pruned_fp8_scaled` | 19.5 GB | `diffusion_models/` |
-| `qwen3vl_32b_minimax_h3_int8_convrot` | 25.3 GB | `text_encoders/` |
-| `minimax_h3_video_vae_fp16` | 4.9 GB | `vae/` |
-| `minimax_h3_audio_vae_fp32` | 0.6 GB | `vae/` |
-| Turbo LoRA ×2 | 3.6 GB | `loras/` |
+| 单镜 draft（4 步） | 864×480 | **96 秒** |
+| 二采 quality（6+4 步） | **1472×832** | **338 秒** |
+| 续写段 1 | 864×480 | 96 秒 |
+| 续写段 2（含裁剪） | 864×480 / 102 帧 | 111 秒 |
 
-### H3-Image 图像
+> `--use-ck-attention` 相比不开启：116s → 99s（**-14.7%**）；二采场景 504s → 338s（**-33%**）。
 
-| 文件 | 大小 | 目录 |
-|---|---|---|
-| `minimax_h3_image_pruned_w4a8` | 12.55 GB | `diffusion_models/` |
-| `minimax_h3_image_vae_fp16` | 1.17 GB | `vae/` |
+**续写连续性**（PSNR，越高越相似）：
 
-文本编码器**与视频共用**，不用重复下载。
-
-> **模型目录自动探测**：插件会按 `imageModelRoot` → `comfyInputDir` 兄弟目录 → `H3_MODEL_ROOT` 环境变量 → 常见路径 → 向上搜索 的顺序找 `models` 目录，无需手工配置。
-
----
-
-## 硬约束（改代码必读）
-
-违反会直接失败：
-
-| 约束 | 值 |
+| 对比 | PSNR |
 |---|---|
-| H3 视频分辨率 | 必须 32 倍数 + 官方档位（864×480 / 960×544 / 1056×608 / 1344×768） |
-| H3 视频帧数 | 17k+5 网格（124 / 243 / 362） |
-| H3 guidance | 固定 1.0（CFG 蒸馏） |
-| 视频采样步数 | Turbo LoRA 只能 4 或 8 |
-| 音频 VAE | 必须 fp32（fp16 会静音） |
-| H3-Image 步数 | 固定 6 |
-| H3-Image guidance | 固定 1.0 |
-| H3-Image 负面提示 | **不支持**，需改成正向描述 |
-| 参考图上限 | Ref2VA 9 张 / H3-Image 16 张 |
-| 参考文件总数 | ≤ 12（视频/音频各 ≤3，每段 2-15 秒） |
+| 段间（段 1 末 → 段 2 首） | **30.7 dB** |
+| 段 1 内部首末 | 18.8 dB |
+| 段 2 内部首末 | 20.0 dB |
+
+段间相似度显著高于段内动作变化幅度，证明续写生效。
 
 ---
 
-## 性能基线（RTX 4080 Laptop 12GB 实测）
+## 目录结构
 
-| 任务 | 分辨率 | 耗时 | 显存 |
-|---|---|---|---|
-| H3 视频 5 秒 | 864×480 | 130 秒 | 11.5 GB |
-| H3-Image | 2048² | 45-85 秒 | 11.4 GB |
-| 立绘拆解 | 2048² | 80-90 秒 | 11.4 GB |
-| 漫画单格 | 2048² | 75 秒 | 11.4 GB |
-| 预演白模→成片 | 2048×1344 | 75 秒 | 11.4 GB |
-
-12 GB 显存**不能并行**，插件内部串行执行。
-
----
-
-## 测试
-
-```powershell
-cd tests
-node verify-all.mjs        # 304 项全量验收（含 B-回归 106 条）
-node test-image-pool.mjs   # 图片引用池 22 项
+```
+dsh-jiuzhang-studio/
+├─ host/                    Node 后端（42 个模块）
+│   ├─ api/                 REST 路由 + SSE 事件总线
+│   ├─ services/            业务服务
+│   │   └─ nanfeng/         南风桥接层
+│   ├─ store/               数据模型
+│   ├─ blender/             3D 预演脚本
+│   └─ tools.js             13 个 Agent 工具
+├─ app-src/                 React 18 + TS 前端源码
+│   └─ src/
+│       ├─ pages/           页面
+│       ├─ components/      组件（含 NanfengParams 参数引擎）
+│       └─ api/             REST + SSE 客户端
+├─ app-dist/                构建产物（入库）
+├─ vendor/nanfeng/          南风 V15 Python 节点（见 VENDOR.md）
+├─ skills/                  ★ Skill 根目录（唯一）
+│   ├─ prompt/              提示词规范（官方/海螺/续写/群友总纲）
+│   ├─ usage/               操作手册
+│   ├─ setup/               部署手册
+│   ├─ architecture/        整体结构 + API + 安装
+│   └─ templates/           提示词模板（数据，可编辑）
+├─ tools/                   开发工具（测试/审计/预览）
+├─ client.js                DSH 客户端入口
+└─ docs/                    审查报告与方案
+└─ cordis.patch.yml         DSH 补丁
 ```
 
-装机后 / 重启后验证插件是否正常加载（自动探测 DSH 端口）：
+---
+
+## 开发
 
 ```powershell
-node tests/postinstall-check.mjs
-# 或显式指定：node tests/postinstall-check.mjs http://127.0.0.1:4583
+# 前端构建
+pnpm run build
+
+# 类型检查
+pnpm run typecheck
+
+# 后端测试
+pnpm test
 ```
 
-SPA 侧：
+前端改动需要重新构建（`app-dist/` 入库）。开发时可先构建再用：
 
 ```powershell
-cd app-src
-node --import ./tests/register.mjs tests/runAll.mjs   # 179 单测 + 2 跳过
-npx tsc --noEmit                                     # 类型检查
+pnpm run build && <重启 DSH>
 ```
 
-> `verify-all.mjs` 对**可选运行时**（ffmpeg / ai-runtime）缺失时记 `SKIP` 而不是
-> 假装通过 —— 看到 `SKIP` 说明对应检查没跑，不是成功。
+---
+
+## 已知限制
+
+| # | 限制 | 说明 |
+|---|---|---|
+| 1 | ComfyUI 版本锁定 0.45.0 | 升级可能破坏南风的 GraphBuilder |
+| 2 | `H3SLAAttention` 节点上游缺失 | SLA 稀疏注意力不可用，已强制关闭 |
+| 3 | 无 SageAttention | 用 ComfyUI 自带 `--use-ck-attention` 替代 |
+| 4 | 续写段时长会缩短 | 段 2 起裁掉 `context_length` 帧（默认 22 帧） |
+| 5 | 主 mp4 无音轨 | VHS 设计：完整版在 `-audio.mp4` |
+| 6 | SigmaShift 分支被上游关闭 | DMAD 要求 shift 12/2，实际用模型自带 12/3；LoRA 仍生效，`job.warnings` 会明说 |
+| 7 | 开二采时「采样步数」不生效 | 上游只读 `H3一采步数 + H3二采步数`。插件现在会按总步数自动拆分并写入 warnings |
+
+### 容易踩的坑（都不是 bug，但会让人以为坏了）
+
+| 现象 | 原因 |
+|---|---|
+| 提示词/分镜 skill 明明写了，模型却说不知道 | skill 的 `name` 必须是 kebab-case；两层的 `skills/prompt/<x>/SKILL.md` 需要 `host/skills.js` 才能被发现。详见 [skills/README.md](skills/README.md) |
+| 改了模型/LoRA 但出片没变化 | 先确认 `job.params.nanfengParams` 里是你要的值；本版已修「目录驱动的 COMBO 被回退成默认值」的缺陷 |
+| 点侧栏入口提示"被浏览器拦截" | 旧版误报（DSH Desktop 的 `window.open` 恒返回 null 但已交给系统浏览器）。本版已改为不误报，并始终显示可点链接 |
+| 页面白屏只剩「载入中…」 | 旧版没有 ErrorBoundary，任何渲染异常都会卸载整棵树。本版每个页面独立捕获并显示堆栈 |
 
 ---
 
-## 安全设计
+## 许可
 
-DSH 的 `webServer` handler 路由**不经过** DSH 的连接准入，因此插件自行实现：
+见 [LICENSE](LICENSE)。
 
-- **Host 校验**：只接受 loopback
-- **Origin 校验**：严格同源，跨源 403
-- **写令牌**：POST/PUT/PATCH/DELETE 需 `X-JZ-Token`
-- **路径穿越防护**：所有文件访问经 `safeJoin` 限制在数据目录内
-- **读目录白名单**：`/jiuzhang/api/file` 只允许产物/素材子目录，
-  `config.json` 等含密钥的运行时文件读不到
-- **id 白名单**：项目/镜头/资产 id 一律正则校验后才拼进路径
-- **上传类型白名单**：扩展名白名单；SVG 强制下载（`attachment` + `nosniff`），
-  避免同源存储型 XSS
-- **可执行路径**：不在配置白名单内，不接受外部注入
-- **画布 Agent 权限位**：写/删/花钱分别授权，默认不允许花钱
-
----
-
-## 许可证说明
-
-本项目代码为原创，完整说明见 [LICENSE](LICENSE)。
-
-运行时依赖的 MiniMax H3 与 H3-Image 模型有各自的许可：
-
-- **H3**：MiniMax H3 Community License
-- **H3-Image**：MiniMax-H3-Image Community License（**与 H3 不同**）
-  - 年收入 ≤ 100 万美元且不对外提供托管服务 → 可直接使用
-  - 超出 → 需向 MiniMax 申请授权
-
-本项目**不包含**任何商业软件的代码或资产。
-
----
-
-## 致谢
-
-- [ComfyUI](https://github.com/comfyanonymous/ComfyUI) — 推理框架
-- [MiniMax](https://www.minimax.io/) — H3 / H3-Image 模型
-- [React Flow](https://reactflow.dev/) — 画布
+vendored 的南风组件许可见 [vendor/nanfeng/VENDOR.md](vendor/nanfeng/VENDOR.md)。

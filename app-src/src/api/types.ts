@@ -9,7 +9,23 @@
 
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 
-export type BackendId = 'h3-local' | 'h3-image' | 'mock';
+/**
+ * 生成后端。
+ *
+ * ⚠️ 必须与 host 侧的 `VALID_BACKENDS`（host/api/index.js）逐项一致。
+ * 历史缺陷：这里漏了 `h3-nanfeng`，而它正是 config 的默认后端 ——
+ * 设置页的 <Select value="h3-nanfeng"> 找不到匹配 option，下拉直接显示空白，
+ * 用户也无法从 UI 选回默认后端。
+ */
+export type BackendId = 'h3-nanfeng' | 'h3-local' | 'h3-image' | 'mock';
+
+/** 后端的展示名。新增后端时同步这里与 VALID_BACKENDS。 */
+export const BACKEND_LABELS: ReadonlyArray<{ value: BackendId; label: string }> = [
+  { value: 'h3-nanfeng', label: '南风 V15（推荐）' },
+  { value: 'h3-local', label: 'H3 本地（旧模板路径）' },
+  { value: 'h3-image', label: 'H3 图像' },
+  { value: 'mock', label: 'Mock（占位片，仅测试）' },
+];
 
 export type ProjectCategory = 'drama' | 'comic' | 'ecommerce' | 'free' | 'uncategorized';
 
@@ -35,7 +51,7 @@ export interface AppConfig {
   defaultBackend?: BackendId;
   defaultProfile?: string;
   maxConcurrentLocal?: number;
-  /** H3 加速方案 id（dmad8 / dmad4 / lightx2v / none） */
+  /** H3 加速方案 id（dmad8 / dmad4 / none） */
   accelPlan?: string;
   previzPort?: number;
   previzAutoStart?: boolean;
@@ -152,16 +168,40 @@ export interface Shot {
   itemRefs: string[];
   materialRefs: string[];
   previz: unknown;
+  /**
+   * 画风 / 打光 id。
+   *
+   * 这两个是**正交通道**，由提示词编译器消费（不是南风参数）。
+   * host/store/models.js 一直在存它们，但这里的类型以前没写，
+   * 导致渲染页只能靠 `as never` 硬塞 —— 一旦字段名写错编译器也不报。
+   */
+  styleId?: string;
+  lightingId?: string;
+  /**
+   * 加速方案 id（dmad8 / dmad4 / none），覆盖全局 config.accelPlan。
+   *
+   * 注意与 `backend` 区分：backend 是"用哪条出片管线"，
+   * accelPlan 是"这条管线里挂哪个蒸馏 LoRA、跑几步"。
+   */
+  accelPlan?: string;
+  /** 南风预设与单镜参数覆盖 */
+  nanfeng?: ShotNanfeng;
   /** 3D 预演：演员（人偶）—— Blender 渲染的输入，无此字段只能用默认两人 */
   actors?: ShotActor[];
   /** 3D 预演：道具（灰盒或导入模型） */
   props?: ShotProp[];
   /** 3D 预演：机位（含关键帧才能渲运镜） */
   camera3d?: ShotCamera3d;
-  /** 控制视频（Fun ControlNet） */
-  control?: ShotControl | null;
   createdAt: number;
   updatedAt: number;
+}
+
+/** 镜头卡里的南风 V15 配置 */
+export interface ShotNanfeng {
+  /** 预设 id，或 { inherit, overrides } / { chain: [...] } */
+  presets?: string | { inherit?: string; chain?: string[]; overrides?: Record<string, unknown> };
+  /** 单镜参数覆盖（217 个南风参数里的任意子集，最高优先级） */
+  overrides?: Record<string, unknown>;
 }
 
 /**
@@ -207,14 +247,6 @@ export interface ShotCamera3d {
     fov?: number;
     rollDeg?: number;
   }>;
-}
-
-export interface ShotControl {
-  type?: string;
-  videoRel: string;
-  strength: number;
-  startPercent: number;
-  endPercent: number;
 }
 
 export type ShotInput = Partial<Shot>;
@@ -265,7 +297,7 @@ export interface GenerateInput {
   seed?: number;
   /**
    * 加速方案（可选）。留空 = 用镜头卡 / 全局默认。
-   * 取值见 AccelPlan.id（dmad8 / dmad4 / lightx2v / none）。
+   * 取值见 AccelPlan.id（dmad8 / dmad4 / none）。
    */
   accelPlan?: string;
   /** 覆盖步数（一般不传；偏离训练步数后端会告警） */
@@ -343,13 +375,13 @@ export interface HealthPayload {
 export interface AccelPlan {
   id: string;
   label: string;
-  /** dmad / lightx2v / none */
+  /** dmad / none */
   family: string;
   steps: number;
   sampler: string;
   scheduler: string;
-  /** 例：{ ref: '12/2', fl2v: '12/2' }；none 方案为 null */
-  shift: { ref: string; fl2v: string } | null;
+  /** 例：{ video: '12/2' }；none 方案为 null */
+  shift: { video: string } | null;
   hint: string;
   isDefault: boolean;
 }
@@ -482,8 +514,6 @@ export interface BlenderHealth {
   available: boolean;
   exe: string;
   modes: string[];
-  /** 控制塔通道（depth/pose/canny/gray）—— 喂 Fun ControlNet，需额外模型 */
-  controlModes?: string[];
   /** 参考视频通道（blockout）—— 喂 Ref2VA 的 ref_videos，无需额外模型 */
   referenceModes?: string[];
   /** 人眼预览（preview）—— 不参与生成 */

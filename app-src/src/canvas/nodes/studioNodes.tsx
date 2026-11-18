@@ -1,12 +1,10 @@
 /**
  * 3D 工作台节点：blueprintNode（导演台） / previzNode（白模预演） / poseStudioNode（姿势台）。
  *
- * 三者都是"把 3D 子应用嵌进画布"的入口节点。真跑 three.js 会让画布瞬间卡死
- * （多个 WebGL 上下文 + 60fps），所以节点内只渲染**入口卡 + 状态摘要**，
- * 点「打开」后由 CanvasArea 调用 openStudio（打开独立工作台窗口/面板）。
- *
- * 这符合报告 §4.8 的事实：导演台是懒加载 chunk（BlueprintScene），
- * 预演是独立 iframe，姿势台是 iframe 载入 freepose.html。
+ * 三者都是"3D 走位"的入口节点。渲染本身由后端 Blender 子进程完成
+ * （host/blender/render_shot.py），浏览器里不跑 WebGL —— 多个上下文 + 60fps
+ * 会让画布瞬间卡死。节点内只渲染**入口卡 + 状态摘要**，
+ * 点「打开」后由 CanvasArea 调用 openStudio 跳到预演页。
  */
 import type { NodeProps } from '@xyflow/react';
 import { Badge, Icon } from '../../ui';
@@ -22,7 +20,7 @@ import {
 } from './_shared';
 import { useNodeActions } from '../nodeActions';
 
-/* ---------------------------------------------------------------- 导演台 */
+/* ---------------------------------------------------------------- 3D 走位 */
 
 const DEF_BLUEPRINT = getDefinition('blueprintNode');
 
@@ -30,7 +28,6 @@ export function BlueprintNode(props: NodeProps) {
   const data = nodeData(props.data);
   const def = DEF_BLUEPRINT;
   const actions = useNodeActions();
-  const sceneId = paramStr(data.params, 'sceneId');
   const camera = paramStr(data.params, 'camera', 'cam-main');
   const lighting = paramStr(data.params, 'lighting', 'day');
   const showFigures = paramBool(data.params, 'showFigures', true);
@@ -63,7 +60,7 @@ export function BlueprintNode(props: NodeProps) {
             actions.openStudio(props.id);
           }}
         >
-          <Icon name="external" size={11} /> 打开导演台
+          <Icon name="external" size={11} /> 打开预演页
         </button>
       }
     >
@@ -80,9 +77,7 @@ export function BlueprintNode(props: NodeProps) {
           <Icon name="video" size={11} />
         </span>
       </div>
-      <StatRow label="场景 ID" value={<span className="jz-mono">{sceneId || '—'}</span>} />
-      {data.result?.url ? <PreviewBox data={data} kind="image" /> : null}
-      <HintLine>BlueprintScene 懒加载；画布内只保留入口</HintLine>
+      <HintLine>走位数据来自镜头卡；渲染由后端 Blender 完成</HintLine>
       <ParamPanel nodeId={props.id} fields={def?.fields ?? []} params={data.params} collapsed={Boolean(data.collapsed)} />
     </NodeShell>
   );
@@ -96,7 +91,7 @@ export function PrevizNode(props: NodeProps) {
   const data = nodeData(props.data);
   const def = DEF_PREVIZ;
   const actions = useNodeActions();
-  const mode = paramStr(data.params, 'mode', 'director');
+  const mode = paramStr(data.params, 'mode', 'blockout');
   const fps = paramNum(data.params, 'fps', 24);
   const resolution = paramStr(data.params, 'resolution', '1280x720');
   const exportVideo = paramBool(data.params, 'exportVideo');
@@ -114,7 +109,7 @@ export function PrevizNode(props: NodeProps) {
       width={def?.size.width}
       collapsed={Boolean(data.collapsed)}
       canRun
-      runLabel={exportVideo ? '导出 mp4' : '导出预演'}
+      runLabel={exportVideo ? '导出 mp4' : '导出参考视频'}
       headExtra={
         <span className="jz-node__meta-chips">
           <Badge tone="accent">{modeLabel}</Badge>
@@ -131,12 +126,12 @@ export function PrevizNode(props: NodeProps) {
             actions.openStudio(props.id);
           }}
         >
-          <Icon name="external" size={11} /> 预演引擎
+          <Icon name="external" size={11} /> 打开预演页
         </button>
       }
     >
-      {/* 6 模式小胶囊：一眼看出当前导出模式 */}
-      <div className="jz-node__modes" aria-label="导出模式">
+      {/* 输出通道小胶囊：一眼看出当前渲哪一路 */}
+      <div className="jz-node__modes" aria-label="输出模式">
         {(selectOptionsOf('previzNode', 'mode') ?? []).map((o) => (
           <span key={o.value} className={o.value === mode ? 'jz-node__mode jz-node__mode--on' : 'jz-node__mode'}>
             {o.label}
@@ -144,7 +139,7 @@ export function PrevizNode(props: NodeProps) {
         ))}
       </div>
       <PreviewBox data={data} kind={exportVideo ? 'video' : 'image'} emptyHint="导出后在此预览" />
-      {exportVideo ? <HintLine>mp4 导出依赖浏览器 WebCodecs</HintLine> : null}
+      <HintLine>灰模参考视频，填进镜头「参考视频」走 Ref2VA</HintLine>
       <ParamPanel nodeId={props.id} fields={def?.fields ?? []} params={data.params} collapsed={Boolean(data.collapsed)} />
     </NodeShell>
   );

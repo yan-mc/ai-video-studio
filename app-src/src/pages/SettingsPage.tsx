@@ -9,6 +9,7 @@ import { useEffect, useState } from 'react';
 import { describeError, ensureToken } from '../api/client';
 import { ToolboxPanel } from './ToolboxPage';
 import type { AccelPlan, BackendId } from '../api/types';
+import { BACKEND_LABELS } from '../api/types';
 import { useProjectStore, useUiStore } from '../store';
 import {
   Alert,
@@ -27,6 +28,10 @@ import {
 } from '../ui';
 import { useTheme } from '../ui/theme';
 import { useToast } from '../ui/Toast';
+
+
+/** 后端下拉选项 —— 唯一来源是 api/types 的 BACKEND_LABELS，避免与 host 枚举漂移 */
+const BACKEND_OPTIONS = BACKEND_LABELS.map((b) => ({ value: b.value, label: b.label }));
 
 type Section = 'backend' | 'defaults' | 'promptLib' | 'appearance' | 'tools' | 'pricing' | 'shortcuts' | 'logs' | 'about';
 
@@ -85,7 +90,7 @@ export function SettingsPage() {
     const activeId = String(draft['accelPlan'] ?? accelCurrent ?? 'dmad8');
     const p = accelPlans.find((x) => x.id === activeId);
     if (!p) return '';
-    const shiftText = p.shift ? ` · shift ${p.shift.ref}` : '';
+    const shiftText = p.shift ? ` · shift ${p.shift.video}` : '';
     return `${p.hint}（${p.steps} 步 · ${p.sampler} + ${p.scheduler}${shiftText}）`;
   })();
 
@@ -187,10 +192,7 @@ export function SettingsPage() {
                   <Select<string>
                     value={String(draft['defaultBackend'] ?? 'h3-local')}
                     onChange={(v) => set('defaultBackend', v)}
-                    options={[
-                      { value: 'h3-local', label: 'H3 本地' },
-                      { value: 'mock', label: 'Mock（占位片，仅测试）' },
-                    ]}
+                    options={BACKEND_OPTIONS}
                   />
                 </Field>
                 <Field label={t('settings.defaultProfile')}>
@@ -240,7 +242,7 @@ export function SettingsPage() {
                         key={p.id}
                         tone={p.id === String(draft['accelPlan'] ?? accelCurrent) ? 'ok' : 'default'}
                       >
-                        {`${p.label}：${p.steps} 步 · ${p.sampler}${p.shift ? ` · shift ${p.shift.ref}` : ''}`}
+                        {`${p.label}：${p.steps} 步 · ${p.sampler}${p.shift ? ` · shift ${p.shift.video}` : ''}`}
                       </Badge>
                     ))}
                   </div>
@@ -379,10 +381,7 @@ export function SettingsPage() {
                 <Select<string>
                   value={String(draft['defaultBackend'] ?? 'h3-local')}
                   onChange={(v) => set('defaultBackend', v)}
-                  options={[
-                    { value: 'h3-local', label: 'H3 本地（ComfyUI）' },
-                    { value: 'mock', label: 'Mock（占位片，仅测试）' },
-                  ]}
+                  options={BACKEND_OPTIONS}
                 />
               </Field>
               <Field label="默认档位">

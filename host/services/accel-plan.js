@@ -6,17 +6,7 @@
  * ============================================================================
  *
  * H3 原模型是 50 步、无 CFG 的 guidance-distilled 模型。社区用**蒸馏 LoRA**
- * 把它压到 4–8 步。目前有两个来源完全不同的方案：
- *
- *   ┌─ lightx2v ─────────────────────────────────────────────────────────┐
- *   │ LightX2V Turbo（ModelTC/MiniMax-H3-Turbo）                         │
- *   │   轨迹蒸馏。两个专用 LoRA：Ref2VA 一个、FL2VA 一个（**不通用**）    │
- *   │   采样器 euler，调度 simple，shift 按模型不同：                     │
- *   │     FL2VA 4step v0.1(544p)   → 12 / 3                             │
- *   │     FL2VA 4step v1.0(768p)   →  6 / 3   ← 本机装的是这个           │
- *   │     FL2VA 8step v1.0(768p)   →  6 / 3                             │
- *   │     Ref2VA 4step v0.1        → 12 / 3                             │
- *   └────────────────────────────────────────────────────────────────────┘
+ * 把它压到 4–8 步。本项目统一采用 DMAD 一条路线：
  *
  *   ┌─ dmad ─────────────────────────────────────────────────────────────┐
  *   │ DMAD（ZhengmingYu/DMAD，arXiv:2610.02188，字节 + 德州农工）        │
@@ -25,6 +15,10 @@
  *   │   采样器 **lcm**，调度 simple，shift **12 / 2**（注意音频是 2 不是 3）│
  *   │   步数必须严格 4（4step 学生）或 8（8step 学生）                    │
  *   └────────────────────────────────────────────────────────────────────┘
+ *
+ * 历史说明：早期还接过 LightX2V Turbo（轨迹蒸馏，ref/fl2v 各一个专用 LoRA，
+ * 采样器 euler）。实测它在视频理解（角色形态 / 动作连续性 / 音频起伏）上
+ * 明显弱于 DMAD，已整条移除，不再作为回退方案。
  *
  * ============================================================================
  * 为什么必须显式设 shift
@@ -68,7 +62,6 @@ export const ACCEL_PLANS = Object.freeze({
     id: 'dmad8',
     label: 'DMAD 8步（推荐）',
     family: 'dmad',
-    loraKind: 'shared',              // 一个 LoRA 通吃 ref/fl2v
     lora: 'dmad_minimax_h3_8step_full_critic_comfyui.safetensors',
     sampler: 'lcm',
     scheduler: 'simple',
@@ -85,7 +78,6 @@ export const ACCEL_PLANS = Object.freeze({
     id: 'dmad4',
     label: 'DMAD 4步（最快）',
     family: 'dmad',
-    loraKind: 'shared',
     lora: 'dmad_minimax_h3_4step_full_critic_comfyui.safetensors',
     sampler: 'lcm',
     scheduler: 'simple',
@@ -96,41 +88,16 @@ export const ACCEL_PLANS = Object.freeze({
     hint: 'DMAD 4 步学生。最快，适合草稿与批量试错。',
   },
 
-  /**
-   * LightX2V Turbo（回退方案）。
-   *
-   * 保留原因：它是另一条独立技术路线（轨迹蒸馏），在**边缘锐度**上
-   * 实测更好（Laplacian 方差 347 vs DMAD 的 171）。用户如果更看重"锐"，
-   * 这条仍然可用。
-   *
-   * ⚠️ 它有两个专用 LoRA，且 FL2VA 那个必须用 shift 6/3（训练值），
-   *    这里按模型分别声明。Ref2VA 是 12/3。
-   */
-  'lightx2v': {
-    id: 'lightx2v',
-    label: 'LightX2V Turbo 4步（回退）',
-    family: 'lightx2v',
-    loraKind: 'split',               // ref / fl2v 各一个
-    loraRef: 'minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors',
-    loraFl2v: 'minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors',
-    sampler: 'euler',
-    scheduler: 'simple',
-    steps: 4,
-    // ⚠️ 两个分支的训练 shift 不同，取用时按 useRef 区分（见 planForShot）
-    shiftVideoRef: 12,
-    shiftAudioRef: 3,
-    shiftVideoFl2v: 6,               // v1.0 **768p** 是 6；v0.1 544p 才是 12
-    shiftAudioFl2v: 3,
-    strictSteps: true,
-    hint: '边缘更锐，但视频理解（形态/动作/音频）弱于 DMAD。',
-  },
+  // LightX2V Turbo（轨迹蒸馏，ref/fl2v 各一个专用 LoRA，采样器 euler）已移除：
+  // 仅在边缘锐度上略好，视频理解明显弱于 DMAD。本项目只维护 DMAD 一条线，
+  // 旧配置里若还写着 lightx2v，accelPlanOf() 会告警并回退到 dmad8。
 
   /** 不做加速：原模型 50 步。极慢，仅供对照与排障。 */
   'none': {
     id: 'none',
     label: '不加速（原模型 50 步）',
     family: 'none',
-    loraKind: 'none',
+    lora: '',
     sampler: 'euler',
     scheduler: 'simple',
     steps: 50,
@@ -158,33 +125,18 @@ export function accelPlanOf(id) {
  * 把方案解析成**本次生成实际要用的参数**。
  *
  * @param {string} planId
- * @param {boolean} useRef  是否走 Ref2VA（决定 LightX2V 用哪个 LoRA / 哪套 shift）
  * @returns {{plan, lora, sampler, scheduler, steps, shiftVideo, shiftAudio, warnings:string[]}}
  */
-export function planForShot(planId, useRef) {
+export function planForShot(planId) {
   const { plan, unknown } = accelPlanOf(planId);
   const warnings = [];
   if (unknown) {
     warnings.push(`未知加速方案「${planId}」，已回退到 ${plan.label}`);
   }
 
-  let lora = '';
-  let shiftVideo = null;
-  let shiftAudio = null;
-
-  if (plan.loraKind === 'shared') {
-    lora = plan.lora;
-    shiftVideo = plan.shiftVideo;
-    shiftAudio = plan.shiftAudio;
-  } else if (plan.loraKind === 'split') {
-    lora = useRef ? plan.loraRef : plan.loraFl2v;
-    shiftVideo = useRef ? plan.shiftVideoRef : plan.shiftVideoFl2v;
-    shiftAudio = useRef ? plan.shiftAudioRef : plan.shiftAudioFl2v;
-  } else {
-    lora = '';
-    shiftVideo = null;
-    shiftAudio = null;
-  }
+  const lora = plan.lora ?? '';
+  const shiftVideo = plan.shiftVideo ?? null;
+  const shiftAudio = plan.shiftAudio ?? null;
 
   /**
    * ⚠️ shift 显式性的判定。

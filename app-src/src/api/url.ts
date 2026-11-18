@@ -15,6 +15,16 @@ export interface JobOutput {
   role?: string;
   path?: string;
   rel?: string;
+  /**
+   * 归档进素材库后的正式相对路径（`assets/xxx.png`）。
+   *
+   * 与 `rel` 的区别很关键：`rel` 指向 `data/outputs/`，那是**可清理的临时区**
+   * （孤儿清理、换 dataDir、删项目都可能带走它）。要把产物长期挂在角色卡或
+   * 素材引用上，必须用 `archivedRel`。
+   */
+  archivedRel?: string;
+  /** 归档后对应的素材库 id */
+  assetId?: string;
   bytes?: number;
   mime?: string;
 }

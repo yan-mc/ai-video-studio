@@ -12,7 +12,6 @@
  *     40..    参考视频 / 音频（LoadVideo → GetVideoComponents）
  *     70/71   引导图 LoadImage
  *     80..    AddGuide
- *     60..63  控制视频通道
  *
  * 这种"编号即所有权"的约定非常脆，实际已经炸过两次：
  *
@@ -55,7 +54,6 @@ const ZONE = Object.freeze({
   TEMPLATE: 0,      // 模板自带的固定节点，不参与分配
   REF_IMAGE: 20,    // 20..28 参考图
   REF_MEDIA: 40,    // 40..59 参考视频/音频
-  CONTROL: 60,      // 60..63 控制通道
   GUIDE_IMG: 70,    // 70..79 引导图 LoadImage
   GUIDE: 80,        // 80..99 AddGuide
   MISC: 100,
@@ -155,10 +153,9 @@ export class NodeGraph {
    *
    * ⚠️ 只认真正的输出类节点（SaveVideo / SaveImage / Preview…），
    *    不能把"没有下游消费者"的节点也当根 —— 那正是模板里遗留的
-   *    占位符 LoadImage（20/21）和未接线的 FunControlNetApply（63）
-   *    的特征。早期版本把 sinks 也当根，结果一个节点都剪不掉，
-   *    20/21 依旧带着字面量 `{{REF_IMAGE_1}}` 提交给 ComfyUI，
-   *    报 Invalid file。
+   *    占位符 LoadImage（20/21）的特征。早期版本把 sinks 也当根，
+   *    结果一个节点都剪不掉，20/21 依旧带着字面量 `{{REF_IMAGE_1}}`
+   *    提交给 ComfyUI，报 Invalid file。
    *
    * 只有在模板里**完全没有**输出类节点时才退回 sinks，
    * 否则宁可什么都不剪（返回空 roots 会让 prune 删光整张图）。

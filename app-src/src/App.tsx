@@ -13,18 +13,17 @@ import { ProjectsPage } from './pages/ProjectsPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { JobsPage } from './pages/JobsPage';
 import { PrevizPage } from './pages/PrevizPage';
-import { ScriptPage } from './pages/ScriptPage';
-import { ComicPage } from './pages/ComicPage';
-import { ModelWorkbenchPage } from './pages/ModelWorkbenchPage';
 import { ImagePage } from './pages/ImagePage';
 import { BreakdownPage } from './pages/BreakdownPage';
 import { VaultPage } from './pages/VaultPage';
 import { RenderPage } from './pages/RenderPage';
+import { StoryboardPage } from './pages/StoryboardPage';
+import { ScriptAnalyzerPanel } from './pages/H3Page';
 
 import { useRouter } from './router';
 import type { RouteId } from './router';
 import { useJobsStore, useProjectStore, useUiStore } from './store';
-import { Icon, ThemeProvider, Toaster, useT } from './ui';
+import { Icon, ThemeProvider, Toaster, useT, ErrorBoundary } from './ui';
 import { useTheme } from './ui/theme';
 import type { IconName } from './ui/Icon';
 
@@ -51,9 +50,8 @@ interface NavEntry {
 const NAV: ReadonlyArray<NavEntry> = [
   // ---- 制作 ----
   { key: 'render', icon: 'video', labelKey: 'nav.render', groupBefore: '制作' },
-  { key: 'script', icon: 'text', labelKey: 'nav.script' },
-  { key: 'comic', icon: 'image', labelKey: 'nav.comic' },
-  { key: 'mw', icon: 'cube', labelKey: 'nav.mw' },
+  { key: 'storyboard', icon: 'text', labelKey: 'nav.storyboard' },
+  { key: 'workshop', icon: 'text', labelKey: 'nav.workshop' },
   // ---- 资源 ----
   { key: 'assets', icon: 'assets', labelKey: 'nav.assets', groupBefore: '资源' },
   { key: 'vault', icon: 'users', labelKey: 'nav.vault' },
@@ -191,7 +189,7 @@ function NavRail({ route, onNavigate }: { route: RouteId; onNavigate: (r: RouteI
             <div className="jz-nav__group" style={{ marginTop: 6 }}>{item.groupBefore}</div>
           ) : null}
           {item.groupBefore && collapsed ? (
-            <div style={{ height: 1, margin: '6px 10px', background: 'var(--jz-line)' }} />
+            <div style={{ height: 1, margin: '6px 10px', background: 'var(--jz-border)' }} />
           ) : null}
           <button
             type="button"
@@ -232,22 +230,20 @@ function RouteView({ route }: { route: RouteId }) {
   switch (route) {
     case 'render':
       return <RenderPage />;
+    case 'storyboard':
+      return <StoryboardPage />;
+    case 'workshop':
+      return <ScriptAnalyzerPanel />;
     case 'assets':
       return <AssetsPage />;
     case 'projects':
       return <ProjectsPage />;
-    case 'script':
-      return <ScriptPage />;
     case 'settings':
       return <SettingsPage />;
     case 'jobs':
       return <JobsPage />;
     case 'previz':
       return <PrevizPage />;
-    case 'comic':
-      return <ComicPage />;
-    case 'mw':
-      return <ModelWorkbenchPage />;
     case 'image':
       return <ImagePage />;
     case 'breakdown':
@@ -305,7 +301,10 @@ function AppBody() {
       <div className="jz-app__body">
         <NavRail route={route} onNavigate={navigate} />
         <main className="jz-app__content">
-          <RouteView route={route} />
+          {/* 每个页面单独兜错误：一个页面渲染炸了不能让整个外壳白屏 */}
+          <ErrorBoundary scope={t(`nav.${route}`)} resetKey={route}>
+            <RouteView route={route} />
+          </ErrorBoundary>
         </main>
       </div>
       <Toaster />

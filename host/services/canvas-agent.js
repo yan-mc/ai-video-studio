@@ -295,13 +295,12 @@ export function createCanvasAgent({ cfg, getProject, listAssets, runGenerate, ru
         };
       }
       case 'list_skills': {
+        // ⚠️ 阶段 3 已删除 script / comic / mw 三个模块，这里不能继续列出它们 ——
+        //    否则 Agent 会以为这些技能可用，调用后必然 SKILL_NOT_FOUND。
         return {
           ok: true,
           result: [
-            { id: 'script', name: '剧本创作', desc: '5 阶段流水线' },
-            { id: 'comic', name: '漫画工作台', desc: '分镜抽取 → 排版 → 导出' },
-            { id: 'mw', name: '模特工作台', desc: '电商/影视双模式套件' },
-            { id: 'director', name: '3D 导演台', desc: '58 动作 / 28 运镜' },
+            { id: 'previz', name: '3D 预演', desc: 'Blender 灰模参考视频' },
             { id: 'prompt', name: 'H3 提示词编译', desc: '六段式结构化提示词' },
           ],
         };

@@ -31,12 +31,7 @@ import { DEFAULT_CAMERA3D, h3Length } from '../store/models.js';
 /**
  * 支持的输出通道 —— 与 render_shot.py 的 MODE 一一对应。
  *
- * 分两类，别混：
- *
- *  **控制塔通道**（CONTROL_MODES）：depth / pose / canny / gray
- *    喂给 H3 Fun ControlNet Union。需要额外 4.22 GB 的 control patch 模型，
- *    且通道之间会互相打架（skip 相加 → 过饱和，实测 depth 1.0 + pose 1.0
- *    约等于单塔 2.0，画面发白人物糊）。
+ * 只有两类，别混：
  *
  *  **参考视频通道**（REFERENCE_MODES）：blockout
  *    **社区标准交付物**。Blender 只负责运动与空间，渲一段灰模视频，
@@ -44,16 +39,18 @@ import { DEFAULT_CAMERA3D, h3Length } from '../store/models.js';
  *    实测：180° 环绕用 blockout 参考 6/6 成功，纯文字 0/6 稳定。
  *
  *  **人眼预览**：preview（彩色灰模，不参与任何生成）
+ *
+ * 历史说明：曾经还有一条「控制塔」路线（depth / pose / canny / gray 四通道 +
+ * Fun ControlNet Union 逐帧约束）。它需要额外 4.22 GB 的 control patch 模型，
+ * 单镜耗时 +83%，且四通道会互相打架（skip 相加 → 过饱和）。该路线经测试后
+ * 放弃，已整条移除。
  */
-export const BLENDER_MODES = Object.freeze(['depth', 'pose', 'canny', 'gray', 'preview', 'blockout']);
-
-/** 控制塔通道（喂给 Fun ControlNet） */
-export const CONTROL_MODES = Object.freeze(['depth', 'pose', 'canny', 'gray']);
+export const BLENDER_MODES = Object.freeze(['preview', 'blockout']);
 
 /**
- * 参考视频通道（喂给 Ref2VA 的 ref_videos）—— **常规替代方案**。
+ * 参考视频通道（喂给 Ref2VA 的 ref_videos）—— **唯一喂模型的出口**。
  *
- * 为什么把 blockout 单独列出来：它的用途、接法与四个控制通道完全不同。
+ * 为什么把 blockout 单独列出来：它的用途、接法与 preview 完全不同。
  * 以前把它们混成一个"控制视频"概念，用户既分不清该渲哪个，也不知道
  * 渲完该填到镜头卡的哪个字段。
  */
@@ -64,7 +61,6 @@ export const PREVIEW_MODES = Object.freeze(['preview']);
 
 /** 某个 mode 的产物该怎么用 */
 export function modeUsage(mode) {
-  if (CONTROL_MODES.includes(mode)) return 'control';
   if (REFERENCE_MODES.includes(mode)) return 'reference';
   if (PREVIEW_MODES.includes(mode)) return 'preview';
   return 'unknown';
@@ -127,17 +123,16 @@ export function blenderStatus() {
     available,
     modes: [...BLENDER_MODES],
     // 分类给前端：让用户一眼看出"该渲哪个"
-    controlModes: [...CONTROL_MODES],
     referenceModes: [...REFERENCE_MODES],
     previewModes: [...PREVIEW_MODES],
     script: fs.existsSync(SCRIPT) ? SCRIPT : null,
     detail: available ? '已就绪' : '未找到 Blender（设 DSH_BLENDER 或放入 tools/blender-<版本>）',
     /**
-     * 推荐路线 —— 常规替代方案优先。
+     * Blender 的唯一用途：渲一段灰模参考视频。
      *
-     * 为什么默认推荐 blockout 而不是 depth：控制塔要多下一个 4.22 GB 模型，
-     * 单镜耗时 +83%，还要调 depth/pose 的强度配比；而灰模参考视频**零额外成本**，
-     * 且社区实测成功率更高。控制塔只在"必须硬锁结构"时才值得。
+     * 为什么不做控制塔：那要多下一个 4.22 GB 模型、单镜耗时 +83%、
+     * 还要调 depth/pose 的强度配比；而灰模参考视频**零额外成本**，
+     * 且社区实测成功率更高（180° 环绕 6/6 vs 纯文字 0/6）。
      */
     recommended: 'blockout',
     routes: [
@@ -147,13 +142,6 @@ export function blenderStatus() {
         mode: 'blockout',
         needsExtraModel: false,
         description: 'Blender 只渲一段灰模视频 → 填进镜头「参考视频」→ Ref2VA 的 <Video N> 取运镜与走位。不需要任何额外模型。',
-      },
-      {
-        id: 'control',
-        name: '控制塔（结构锁）',
-        mode: 'depth',
-        needsExtraModel: true,
-        description: '渲 depth/pose → 填进镜头「控制视频」→ Fun ControlNet。需 4.22 GB control patch，单镜耗时 +83%。建议 depth 0.3 + pose 0.7。',
       },
     ],
   };
@@ -425,8 +413,19 @@ export function buildSceneSpec(shot, opts = {}) {
    *
    *    现在统一按 h3Length() 取网格值，与生成时用的 `{{LENGTH}}` 完全一致。
    *    （h3Length 是 store/models.js 的**单一真源**，不要再在别处重算。）
+   *
+   * ⚠️ `opts.frames` 也**必须**落回网格。
+   *    历史缺陷：`Math.round(opts.frames || h3Length(dur))` 在传入 frames 时
+   *    完全绕过网格校验 —— 传 30 就是 30、传 100 就是 100、传 120 就是 120
+   *    （注释上面痛骂过的 120 帧缺陷原样回来）。而传入路径是敞开的：
+   *    `POST /blender/render` 的 body.frames、`studio_blender` 的 a.frames
+   *    （schema 里连 min/max 都没有）。
+   *    行为：把请求帧数换算成秒再取最近的网格值，非法值永远不会进 spec。
    */
-  const frames = Math.max(5, Math.round(opts.frames || h3Length(dur)));
+  const requested = Number(opts.frames);
+  const frames = Number.isFinite(requested) && requested > 0
+    ? h3Length(requested / fps)
+    : h3Length(dur);
 
   const { width, height } = sizeForRatio(shot?.ratio, opts.pixels);
 
@@ -581,21 +580,51 @@ export async function renderControl({ mode, spec, cfg = loadConfig(), jobId = ''
   // 渲染完成后按保留策略清理旧 run。
   // ⚠️ 只删**更早的**：prunePrevizRuns 永不删最新一次，所以本次产物安全。
   //    历史实现完全没有清理：实测 5 次渲染留下 452 文件 / 74 MB。
-  try {
-    const prunedInfo = prunePrevizRuns(cfg);
-    if (prunedInfo.removed) {
-      console.log?.(`[jiuzhang] previz 清理：删掉 ${prunedInfo.removed} 次旧渲染，`
-        + `释放 ${(prunedInfo.freedBytes / 1024 / 1024).toFixed(1)} MB`);
-    }
-  } catch { /* 清理失败不影响本次渲染 */ }
+  //
+  // ⚠️ 调用位置也很关键：必须在**产物判定通过之后**再清理。
+  //    放在前面时，一次正在收尾的并发渲染可能因为目录还是 0 文件
+  //    （刚创建、尚未写帧）而被排到"最旧"并直接删掉。
+  //    见下方 ok 分支末尾的调用。
 
   const framesDir = path.join(workDir, mode);
   const pngs = listFrames(framesDir);
-  if (!pngs.length) {
+
+  /**
+   * ⚠️ 产物判定必须同时满足三条，缺一不可：
+   *   1. 帧数 > 0
+   *   2. 帧数**等于** spec 声明的 frames（部分渲染不能当成功）
+   *   3. `_running` 哨兵不存在（render_shot.py 正常收尾才会删它）
+   *
+   * 历史缺陷：只判 `pngs.length > 0`。Blender 中途被杀 / 显存耗尽 /
+   * pad 阶段崩掉时，磁盘上已有几十上百帧 5 位 PNG → 判定成功 →
+   * ffmpeg 把残缺序列编成一段**时长错误**的 mp4 交给 H3，
+   * 模型把残缺运动当完整参考，而用户看到的是「成功 124 帧」。
+   * 这是最难发现的一类失败。
+   */
+  const wantFrames = Number(spec?.frames) || 0;
+  const sentinelPath = path.join(workDir, '_running');
+  const sentinelLeft = fs.existsSync(sentinelPath);
+
+  if (!pngs.length || sentinelLeft || (wantFrames > 0 && pngs.length !== wantFrames)) {
     // ⚠️ 无产物时要把**为什么**说清楚，而不是甩 600 字 stderr 给用户。
-    //    常见四类原因逐条识别，剩下的才回原始日志。
-    const log = String(r.stderr || r.stdout || '');
-    const reason = explainBlenderFailure(log, r.code);
+    //    stdout / stderr 必须**分别**匹配再合并 —— 历史实现用
+    //    `String(r.stderr || r.stdout || '')`，stderr 非空就永远不看 stdout，
+    //    而 `BLENDER_RENDER_DONE` 等标记恰恰在 stdout。
+    const log = `${r.stdout || ''}\n${r.stderr || ''}`;
+    let reason = sentinelLeft
+      ? {
+        code: 'BLENDER_INCOMPLETE',
+        detail: `渲染未正常收尾（进程被中断或崩在收尾阶段）：`
+          + `已落盘 ${pngs.length} 帧 / 应为 ${wantFrames || '?'} 帧。`
+          + '产物不完整，已丢弃，避免把残缺运动当成完整参考。',
+      }
+      : (wantFrames > 0 && pngs.length && pngs.length !== wantFrames)
+        ? {
+          code: 'BLENDER_INCOMPLETE_FRAMES',
+          detail: `渲染帧数不足：已落盘 ${pngs.length} 帧 / 应为 ${wantFrames} 帧。`
+            + '产物不完整，已丢弃。',
+        }
+        : explainBlenderFailure(log, r.code);
     cleanupWorkDir(workDir);
     throw new BlenderError(reason.code, reason.detail, { exitCode: r.code, log: log.slice(-2000) });
   }
@@ -607,37 +636,23 @@ export async function renderControl({ mode, spec, cfg = loadConfig(), jobId = ''
   const { resolveFfmpeg, runProcess } = await import("./ffmpeg-tools.js");
   const ffmpegExe = resolveFfmpeg(cfg);
 
-  // canny 通道：Blender 只负责渲"干净灰模"，边缘检测交给 ffmpeg。
-  //
-  // ⚠️ 为什么不在 Blender 里做：
-  //    ① Freestyle 在无头模式下要额外配 line set，渲染慢很多；
-  //    ② 早期实现**漏了这一步**，导致 canny 与 gray 产物完全一样
-  //       （实测两路 mp4 逐像素相同）—— 用户以为在控制边缘，其实喂的是灰模。
-  //
-  // ⚠️ 极性（本次修正）：必须是**黑底白线**。
-  //    Fun ControlNet 的 canny 分支取自 `cv2.Canny()` 的原生输出
-  //    （边缘=255、背景=0），ComfyUI 内置的 Detect Edges (Canny) 节点
-  //    用 kornia 的 canny，实测同样输出黑底白线（edge map max=1.0、
-  //    mean=0.002）。旧实现在这里多做了一次 `negate` → 白底黑线，
-  //    正好与训练分布相反，控制力被显著削弱。
-  //
-  // ⚠️ 阈值：ffmpeg 的 edgedetect 是 0–1 归一化，与 ComfyUI 的 0.4/0.8 同一量纲。
-  //    旧值 0.06/0.18 低了约 6 倍，会检出大量噪声纹理边缘（灰模的曲率、
-  //    地面网格线都会被当成结构线），把真正的轮廓淹没。这里对齐到 0.20/0.45
-  //    —— 略低于 ComfyUI 默认，因为灰模本身对比度不如实拍。
-  const needEdges = mode === "canny";
-  const edgeLow = 0.20;
-  const edgeHigh = 0.45;
-
+  // PNG 序列 → mp4。Blender 的 FFmpeg 输出不可控（编码器参数、色彩管理
+  // 都会插一脚），PNG 是"原样像素"，再由已有的 ffmpeg 链路统一编码，
+  // 与插件其它后处理保持一致。
   await runProcess(ffmpegExe, [
     "-y", "-v", "error",
     "-framerate", String(spec.fps || 24),
     "-i", path.join(framesDir, "f_%05d.png"),
-    ...(needEdges ? ["-vf", `edgedetect=low=${edgeLow}:high=${edgeHigh}`] : []),
     "-c:v", "libx264", "-preset", "veryfast",
     "-pix_fmt", "yuv420p", "-crf", "18",
     mp4,
   ], 300000);
+
+  // 产物已确认完整，这时才清理旧渲染目录（见上方"调用位置"注释）
+  let pruned = { removed: 0, freedBytes: 0 };
+  try {
+    pruned = prunePrevizRuns(cfg);
+  } catch { /* 清理失败不影响本次渲染 */ }
 
   return {
     ok: true,
@@ -655,15 +670,14 @@ export async function renderControl({ mode, spec, cfg = loadConfig(), jobId = ''
     blender: st.exe,
     exitCode: r.code,
     missingAssets: prepared.missing,
+    pruned,
     // 占位人偶警告一路带到 REST 响应，前端才能提示
     derived: Boolean(spec?.derived),
     warnings: Array.isArray(spec?.warnings) ? spec.warnings : [],
     // 直接告诉调用方"这个产物该填到哪"
-    hint: modeUsage(mode) === 'control'
-      ? '填进镜头的「控制视频」字段（shot.control.videoRel），走 Fun ControlNet'
-      : modeUsage(mode) === 'reference'
-        ? '填进镜头的「参考视频」列表（shot.refs.videos），走 Ref2VA 的 <Video N>'
-        : '仅供人眼验收，不要填进镜头卡',
+    hint: modeUsage(mode) === 'reference'
+      ? '填进镜头的「参考视频」列表（shot.refs.videos），走 Ref2VA 的 <Video N>'
+      : '仅供人眼验收，不要填进镜头卡',
   };
 }
 
@@ -868,12 +882,30 @@ export async function listAssetActions({ assetRel, cfg = loadConfig(), timeoutMs
   const r = await runProc(st.exe, [
     '-b', '--factory-startup', '--disable-autoexec', '--python', probe, '--', abs,
   ], timeoutMs);
-  const out = String(r.stdout || r.stderr || '');
+
+  /**
+   * ⚠️ stdout 与 stderr 必须**拼接**，不能 `stdout || stderr`。
+   *
+   * 历史缺陷：`String(r.stdout || r.stderr || '')` 在 stderr 非空时只返回 stderr，
+   * 而 `JZ_*` 标记全部打在 stdout。Blender 每次运行都会往 stderr 写一条
+   * `DeprecationWarning: 'Material.use_nodes' ...`，于是 `out` 恒等于那条警告，
+   * 下面的正则永远匹配不到 —— 读模型动作名的功能**从来没成功过**。
+   */
+  const out = `${r.stdout || ''}\n${r.stderr || ''}`;
   if (/JZ_IMPORT_ERR/.test(out)) {
     const m = /JZ_IMPORT_ERR:(.+)/.exec(out);
     throw new BlenderError('ASSET_IMPORT_FAILED', String(m?.[1] || '').trim().slice(0, 300));
   }
-  const m = /JZ_ACTIONS:(\[[\s\S]*?\])/.exec(out);
+
+  /**
+   * ⚠️ 必须行首锚定 + **贪婪**匹配。
+   *
+   * 历史缺陷：`/JZ_ACTIONS:(\[[\s\S]*?\])/` 的 `*?` 遇到第一个 `]` 就停，
+   * 而每条动作自带 `"frames": [1.0, 24.0]` —— 于是截断成
+   * `[{"name":"…","frames": [1.0, 24.0]`，`JSON.parse` 必然失败。
+   * 实测：任何带动作的模型都会抛 ACTION_LIST_PARSE_FAILED。
+   */
+  const m = /^JZ_ACTIONS:(\[[\s\S]*\])\s*$/m.exec(out);
   if (!m) {
     throw new BlenderError('ACTION_LIST_FAILED', out.trim().split(/\r?\n/).slice(-4).join(' | ').slice(0, 400));
   }
@@ -887,7 +919,7 @@ export async function listAssetActions({ assetRel, cfg = loadConfig(), timeoutMs
 
   // 顺带把 summary 也拿出来（骨架/网格数），前端可以据此判断"这是角色还是道具"
   let summary = null;
-  const sm = /JZ_SUMMARY:(\{[\s\S]*?\})/.exec(out);
+  const sm = /^JZ_SUMMARY:(\{[\s\S]*\})\s*$/m.exec(out);
   if (sm) {
     try { summary = JSON.parse(sm[1]); } catch { /* ignore */ }
   }

@@ -150,21 +150,31 @@ export function BreakdownPage() {
    * 于是「立绘 → 拆解 → 设定卡 → 角色卡仓库」这条主线在第三步断掉：
    * 用户只能去仓库页手动新建，再从几百张自动归档的素材里靠缩略图找。
    *
-   * 这里用已有的 `vaultUpsert` 直接建卡（后端无需新路由）：
-   * sheet 槽放这张拆解图，refPolicy 用 sheet-first。
+   * 这里用已有的 `vaultUpsert` 直接建卡（后端无需新路由）。
+   *
+   * ⚠️ 必须用 **archivedRel**（素材库里的正式副本），不能用产物原始 rel。
+   *    产物落在 `data/outputs/`，那是可清理的临时区 —— 用户跑一次「清理孤儿」
+   *    或换个 dataDir，卡片图就全裂了。后端 runAndArchive 已经算好 archivedRel
+   *    附在 output 上，直接用即可。
    */
   async function handleSaveAsCard() {
     const name = cardName.trim();
     if (!name) { toast.error('请先填角色名'); return; }
-    const rel = result?.rel ?? result?.path ?? '';
-    if (!rel) { toast.error('还没有可用的拆解图'); return; }
+    // 优先用素材库里的正式副本；产物原始 rel 落在可清理的临时区
+    const sheetRel = result?.archivedRel || result?.rel || result?.path || '';
+    if (!sheetRel) { toast.error('还没有可用的拆解图'); return; }
     setSavingCard(true);
     try {
       await api.vaultUpsert({
         name,
         description: `由立绘拆解生成${character ? `（${character}）` : ''}`,
-        images: { sheet: [rel] },
-        refPolicy: { mode: 'sheet-first', maxImages: 1 },
+        // 拆解图进设定卡；原立绘如果有的话一并放进 origin 槽位，
+        // 这样卡的 refPolicy 才有"两个来源"可选。
+        images: {
+          sheet: [sheetRel],
+          ...(refRel ? { origin: [refRel] } : {}),
+        },
+        refPolicy: { mode: refRel ? 'both' : 'sheet-first', maxImages: refRel ? 2 : 1 },
       });
       toast.ok(`已建角色卡「${name}」，可在角色卡仓库查看`);
       setCardName('');

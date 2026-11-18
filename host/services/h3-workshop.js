@@ -13,6 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { runProcess, resolveFfmpeg, resolveFfprobe } from './ffmpeg-tools.js';
+import { resolveUserPath } from '../security.js';
 import { readWorkflow, resolveWorkflowFile } from './workflow-paths.js';
 import { h3Length, resolutionFor, assets as assetStore } from '../store/models.js';
 
@@ -329,8 +330,13 @@ export function createH3Workshop({ cfg } = {}) {
       //    导致找到 C:\Users\…\.dsh\profiles\desktop\outputs\xxx.mp4 这种不存在的路径。
       //    ffmpeg 对 concat 清单里的相对路径也是相对**清单文件所在目录**解析，
       //    所以这里统一转成绝对路径。
+      //
+      // ⚠️ 安全：以前这里是 `path.isAbsolute(p) ? p : join(dataDir, p)` ——
+      //    绝对路径原样放行，于是 `POST /h3/film/render {"inputs":["F:/任意/文件"]}`
+      //    能让 ffmpeg 去读机器上任何文件（审计实测读到了 data/jobs.json）。
+      //    现在统一走 resolveUserPath：绝对路径必须在 dataDir 之内，否则 FORBIDDEN_PATH。
       const lines = inputs.map((p) => {
-        const abs = path.isAbsolute(p) ? p : path.join(cfg.dataDir, p);
+        const abs = resolveUserPath({ root: cfg.dataDir, input: p, mustExist: true });
         return `file '${abs.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`;
       });
       fs.writeFileSync(listFile, lines.join('\n'), 'utf8');
@@ -339,9 +345,9 @@ export function createH3Workshop({ cfg } = {}) {
       const args = ['-y', '-f', 'concat', '-safe', '0', '-i', listFile];
 
       // 可选字幕烧录
-      // 同样按 dataDir 解析相对路径（理由同上）
+      // 同样按 dataDir 解析相对路径（理由同上），并且同样不允许逃出 dataDir。
       const subAbs = body.subtitleFile
-        ? (path.isAbsolute(body.subtitleFile) ? body.subtitleFile : path.join(cfg.dataDir, body.subtitleFile))
+        ? resolveUserPath({ root: cfg.dataDir, input: body.subtitleFile, mustExist: true })
         : '';
       if (subAbs && fs.existsSync(subAbs)) {
         args.push('-vf', `subtitles='${subAbs.replace(/\\/g, '/').replace(/:/g, '\\:')}'`);

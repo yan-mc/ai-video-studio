@@ -79,7 +79,6 @@ export function ExportVideoNode(props: NodeProps) {
   const taskId = data.result?.taskId;
   const lastFrame = data.result?.lastFrameUrl;
   const keepLastFrame = paramBool(data.params, 'keepLastFrame', true);
-  const openInDirector = paramBool(data.params, 'openInDirector');
 
   const statusText =
     runStatus === 'queued'
@@ -119,13 +118,13 @@ export function ExportVideoNode(props: NodeProps) {
           <button
             type="button"
             className="jz-node__foot-btn jz-node__foot-btn--ghost nodrag"
-            title="在总导演台中打开"
+            title="在预演页继续处理"
             onClick={(e) => {
               e.stopPropagation();
               actions.openStudio(props.id);
             }}
           >
-            <Icon name="external" size={11} /> 导演台
+            <Icon name="external" size={11} /> 预演页
           </button>
         </span>
       }
@@ -146,7 +145,6 @@ export function ExportVideoNode(props: NodeProps) {
         </div>
       ) : null}
 
-      {openInDirector ? <HintLine>完成后将在总导演台打开</HintLine> : null}
       <ParamPanel nodeId={props.id} fields={def?.fields ?? []} params={data.params} collapsed={Boolean(data.collapsed)} />
     </NodeShell>
   );

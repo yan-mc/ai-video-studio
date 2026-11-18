@@ -20,7 +20,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
  */
 export const ROUTES = [
   // 制作
-  'render', 'script', 'comic', 'mw',
+  'render', 'storyboard', 'workshop',
   // 资源
   'assets', 'vault', 'projects',
   // 工具
@@ -34,7 +34,7 @@ export const DEFAULT_ROUTE: RouteId = 'render';
 
 /** 旧路由 → 新路由（书签兼容） */
 const LEGACY_ROUTES: Record<string, RouteId> = {
-  h3: 'script',
+  h3: 'render',
   prompt: 'render',
   director: 'previz',
   toolbox: 'settings',
@@ -50,6 +50,22 @@ export function parseHash(hash: string): RouteId {
   const path = raw.split('?')[0]?.split('/')[0] ?? '';
   if (isRouteId(path)) return path;
   if (LEGACY_ROUTES[path]) return LEGACY_ROUTES[path];
+  /**
+   * ⚠️ 未知路由必须留痕。
+   *
+   * 历史实现直接静默 `return DEFAULT_ROUTE`。于是侧栏入口一旦带上一个
+   * 已删除的页面名（曾经有 script / comic / mw 三项），用户点进去看到的是
+   * 渲染页 —— 看起来像"入口坏了"，但控制台一句话都没有，根本查不到原因。
+   * 这里补一条 warn，让"点了 A 却出现 B"至少能被看见。
+   */
+  if (path) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[jiuzhang] 未知路由 "${path}"，已回退到 "${DEFAULT_ROUTE}"。`
+      + '如果这是侧栏入口，请检查 client.js 的 entries 是否与 router.tsx 的 ROUTES 一致'
+      + '（可用 tools/check-routes.mjs 自动核对）。',
+    );
+  }
   return DEFAULT_ROUTE;
 }
 

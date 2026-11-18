@@ -1,1493 +1,583 @@
 /**
- * 渲染页 —— 一条镜头的完整制作闭环。
+ * 渲染页 —— 南风 V15 驱动的渲染台。
  *
  * ============================================================================
- * 为什么要有这个页面
- * ============================================================================
- *
- * 之前做一个镜头要跨 5 个页面：提示词在「提示词工作台」写、参考图在「镜头卡」挂、
- * 渲染去「任务」看、成片回「素材库」找。这个割裂是当前最难用的地方。
- *
- * 本页把 ④写提示词 → ⑤选素材 → ⑥渲染 → ⑦预览 合成一个工作台：
- *
- *   左栏 选素材（角色卡 / 首尾帧 / 手动参考）
- *   中栏 预览（渲染结果 / 首尾帧）
- *   右栏 参数（模式 / 画风 / 时长 / 档位 / 种子）
- *   底部 提示词编辑器（可折叠，实时编译预览）
+ * 由南风 V15 驱动：217 个参数（12 组折叠）+ 7 个预设 + 二采 + 跨镜头续写。
+ * 旧的固定 30 参数 / h3.json 模板替换实现已在 2.0.0 移除。
  *
  * ============================================================================
- * 关键设计
+ * 布局
  * ============================================================================
  *
- * 1. **参考图编号由后端算**（`/render/plan`），前端不拼 `<Picture N>`。
- *    手填编号必然与实际上传顺序错位 —— 这个坑已经踩过一次。
+ *   ┌────────────────────────────────────────────────────────────┐
+ *   │ 顶栏：项目 / 预设 / [开始渲染]                              │
+ *   ├──────────────┬──────────────────────────┬──────────────────┤
+ *   │ 左：素材      │ 中：提示词 + 概览         │ 右：参数面板      │
+ *   │ · 角色卡      │                          │ · 搜索框          │
+ *   │ · 参考图×9    │                          │ · A 核心          │
+ *   │ · 视频×3      │                          │ · B 素材          │
+ *   │ · 音频×3      │                          │ · C 模式          │
+ *   │              │                          │ · D 二次采样      │
+ *   │              │                          │ · E-L（折叠）     │
+ *   └──────────────┴──────────────────────────┴──────────────────┘
  *
- * 2. **预算始终可见**。H3 的 ref_images 上限 9 张是整条提示词共享，
- *    超限会被裁。必须在**点渲染之前**就看到"用了 5/9、还剩 4"，
- *    而不是渲染完才发现丢图。
+ * 每个参数都带一句话中文说明；「死参数/缺依赖参数」默认折叠，
+ * 组头显示被隐藏的数量。另有「参数速查」抽屉可全局搜索。
  *
- * 3. **提示词与素材同屏**。改角色卡勾选，提示词实时跟着变
- *    （因为 subject_definitions 的编号来自渲染计划）。
+ * @module pages/RenderPage
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { api, describeError } from '../api/client';
-import { outputUrl } from '../api/url';
-import { useProjectStore } from '../store';
-import type { ShotActor } from '../api/types';
+import { subscribeEvents, eventsConnected } from '../api/events';
+import { Alert, Badge, Button, Field, Input, Page, Panel, Select, Spinner, useToast } from '../ui';
+import { useProjectStore } from '../store/project';
 import {
-  Alert, Badge, Button, Field, Icon, Input, KeyValue, Loading, Page, Panel,
-  Select, Tabs, Textarea, useToast,
-} from '../ui';
+  NanfengParams, ParamReference,
+  type GroupDef, type ParamDef,
+} from '../components/NanfengParams';
+import { AssetPicker, type AssetItem, type PickedMedia } from '../components/AssetPicker';
+import { ContinuationPanel } from '../components/ContinuationPanel';
 
-/* ------------------------------------------------------------------ 类型 */
+/** 生成模式 */
+const MODES: Array<{ id: string; label: string }> = [
+  { id: 'ref2va', label: 'Ref2VA（参考图/视频/音频）' },
+  { id: 'i2va', label: 'I2VA（图生视频）' },
+  { id: 'fl2va', label: 'FL2VA（首尾帧）' },
+  { id: 't2va', label: 'T2VA（文生视频）' },
+];
 
-interface VaultCardLite {
+/**
+ * 镜头卡（本页用到的最小子集）。
+ *
+ * ⚠️ 以前这里只有 6 个字段，而 handleRender 会提交 10 多个 —— 于是"回填"只能
+ *    覆盖其中两个，其余字段在切换镜头时保持上一个镜头的值，最终被静默写进
+ *    新镜头卡。现在把这个类型补齐到与实际提交形状一致；新增提交字段时
+ *    必须同步加在这里（否则 tsc 会在回填处报错，这正是我们想要的护栏）。
+ */
+interface ShotLite {
   id: string;
-  name: string;
-  description: string;
-  traits: string[];
-  imageCount: number;
-  resolvedImages: { slot: string; rel: string }[];
-}
-
-interface AssetItem { id: string; name: string; rel?: string; kind: string }
-interface MediaPick { rel: string; name: string; hasAudio?: boolean }
-
-/** 3D 模型资产（glb/gltf/fbx/obj） */
-interface ModelAsset { rel: string; name: string; ext: string; kind: 'actor' | 'prop'; bytes: number }
-/** 模型内置动作（Mixamo 的 Action 名形如 Armature|Armature|walk） */
-interface AssetAction { name: string; frames: [number, number]; durationFrames: number }
-
-interface PlanImage { index: number; rel: string; source: string; cardId?: string; cardName?: string; slot?: string }
-
-interface RenderPlan {
-  images: PlanImage[];
-  subjects: Array<{ id: string; name: string; pictureIndex: number | null; hasImage: boolean }>;
-  suggestedMode: string;
-  refImageSize?: string;
-  refImageSizeRequested?: string;
-  refImageSizeDowngraded?: boolean;
-  warnings: string[];
-  stats: {
-    total: number; limit: number; remaining: number;
-    bySource: Record<string, number>;
-    cardsWithImage: number; cardsWithoutImage: number;
-    /** 参考视频 + 音频的合计时长（秒） */
-    mediaSec?: number;
-    /** 合计时长上限（默认 14.8s） */
-    mediaSecLimit?: number;
-    mediaSecRemaining?: number;
-    /** 是否超限（超限时后端会自动裁剪并告警） */
-    mediaSecOver?: boolean;
+  title?: string;
+  durationSec?: number;
+  ratio?: string;
+  mode?: string;
+  updatedAt?: number;
+  /** 编译后的提示词 */
+  prompt?: string;
+  /** 老镜头卡只有 description（就是提示词原文） */
+  description?: string;
+  styleId?: string;
+  lightingId?: string;
+  accelPlan?: string;
+  refs?: { images?: string[]; videos?: string[]; audios?: string[] };
+  nanfeng?: {
+    presets?: string | { inherit?: string; chain?: string[]; overrides?: Record<string, unknown> };
+    overrides?: Record<string, unknown>;
   };
 }
 
-interface CompileResult { prompt: string; mode: string; chars: number; warnings: string[]; plan: RenderPlan }
-
-interface JobLite {
-  id: string; status: string; error?: string | null;
-  outputs?: { rel?: string; path?: string; role?: string }[];
+interface SchemaPayload {
+  paramCount: number;
+  groups: Record<string, GroupDef>;
+  params: Record<string, ParamDef>;
+  /** 死参数/禁用参数清单 */
+  inert?: Array<{ name: string; flag: string; zh: string; hint: string }>;
 }
-
-const MODES = [
-  { value: 'ref2va', label: 'Ref2VA · 全参考（有参考图时用这个）' },
-  { value: 'fl2va', label: 'FL2VA · 首尾帧' },
-  { value: 'i2va', label: 'I2VA · 首帧' },
-  { value: 't2va', label: 'T2VA · 纯文本' },
-];
-
-// 动作清单不再在前端硬编码。
-//
-// ⚠️ 历史缺陷：这里曾经手抄了一份 57 项的动作名数组，与
-//    host/store/models.js 的白名单（59 项）、render_shot.py 的
-//    action_curve（27 个分支）三份枚举长期漂移，
-//    结果 32 个动作"前端能选、后端收下、Blender 渲出来人站着不动"。
-//
-// 现在唯一真源是 host/blender/actions.py，经 GET /blender/actions/catalog
-// 下发（含中文名 / 分组 / 三态 kind），前端只负责渲染。
-// 拿不到目录时退化成"只有 stand"并显示提示，而不是继续用一份过期硬编码。
-
-const SOURCE_LABEL: Record<string, string> = {
-  'card-sheet': '角色设定卡',
-  'card-origin': '角色原立绘',
-  manual: '手工参考',
-  'previz-first': '预演首帧',
-  'previz-last': '预演尾帧',
-  scene: '场景/道具',
-};
-
-/* ------------------------------------------------------------------ 页面 */
 
 export function RenderPage() {
   const toast = useToast();
-  const [tab, setTab] = useState<'shot' | 'film'>('shot');
-
   const projects = useProjectStore((s) => s.projects);
   const currentProjectId = useProjectStore((s) => s.currentProjectId);
   const selectProject = useProjectStore((s) => s.selectProject);
   const loadProjects = useProjectStore((s) => s.loadProjects);
 
-  const profileOptions = useProjectStore((s) => s.profileOptions);
-
-  /* 素材 */
-  const [cards, setCards] = useState<VaultCardLite[]>([]);
-  const [assets, setAssets] = useState<AssetItem[]>([]);
-  const [pickedVideos, setPickedVideos] = useState<MediaPick[]>([]);
-  const [pickedAudios, setPickedAudios] = useState<MediaPick[]>([]);
-  const [templates, setTemplates] = useState<Array<{ id: string; name: string; category: string; content: string }>>([]);
-  const [pickedCards, setPickedCards] = useState<string[]>([]);
-  const [styles, setStyles] = useState<Array<{ id: string; name: string }>>([]);
+  // ---- 后端元信息 ----
+  const [schema, setSchema] = useState<SchemaPayload | null>(null);
+  const [presets, setPresets] = useState<Array<{ id: string; label: string; desc: string }>>([]);
+  const [styles, setStyles] = useState<Array<{ id: string; name: string; category: string; changesAppearance: boolean }>>([]);
+  const [lightings, setLightings] = useState<Array<{ id: string; name: string; ratio: string | null; zh: string }>>([]);
+  const [accelPlans, setAccelPlans] = useState<Array<{ id: string; label: string; steps: number; lora: string | null; hint: string }>>([]);
   const [loading, setLoading] = useState(true);
-
-  /* 计划与编译 */
-  const [plan, setPlan] = useState<RenderPlan | null>(null);
-  const [compiled, setCompiled] = useState<CompileResult | null>(null);
   const [error, setError] = useState('');
-  /** 首尾帧（来自镜头卡 previz）—— 参与 9 图预算，所以要进 plan 请求 */
-  const [previzRefs, setPrevizRefs] = useState<{ firstRel: string; lastRel: string }>({ firstRel: '', lastRel: '' });
-  /**
-   * 选中的服化道条目 id。
-   *
-   * 服化道以前只存在于工具箱里，**完全不参与出图** —— 用户录了衣服，
-   * 渲染时一点用都没有。这里把它接进参考图与画面描述：
-   * 选中条目的图走 manualImages，文字拼进 summary。
-   */
-  const [pickedWardrobe, setPickedWardrobe] = useState<string[]>([]);
-  const [wardrobeItems, setWardrobeItems] = useState<Array<{ id: string; kind: string; name: string; desc: string; imageRel?: string | null }>>([]);
 
-  /* 参数 */
+  // ---- 表单状态 ----
+  const [presetId, setPresetId] = useState('standard');
   const [mode, setMode] = useState('ref2va');
-  const [styleId, setStyleId] = useState('ghibli');
+  const [prompt, setPrompt] = useState('');
   const [durationSec, setDurationSec] = useState('5');
-  const [ratio, setRatio] = useState('16:9');
-  const [profile, setProfile] = useState('P24-quality');
   const [seed, setSeed] = useState('');
-  const [summary, setSummary] = useState('');
-  const [shotAction, setShotAction] = useState('');
-  const [soundscape, setSoundscape] = useState('');
-  const [music, setMusic] = useState('N/A');
-  const [customStyle, setCustomStyle] = useState('');
-  const [refImageSize, setRefImageSize] = useState<'match' | 'max'>('match');
+  const [overrides, setOverrides] = useState<Record<string, unknown>>({});
+  const [submitting, setSubmitting] = useState(false);
 
-  /* 控制视频（H3 Fun ControlNet Union）—— 锁空间结构与时间推进 */
-  const [controlRel, setControlRel] = useState('');
-  const [controlStrength, setControlStrength] = useState('1.0');
-  const [controlStart, setControlStart] = useState('0.0');
-  const [controlEnd, setControlEnd] = useState('0.8');
-  const [blenderBusy, setBlenderBusy] = useState('');
-  const [blenderMsg, setBlenderMsg] = useState('');
+  // ---- 画风 / 打光 / 加速（正交通道）----
+  const [styleId, setStyleId] = useState('ova90s');
+  const [lightingId, setLightingId] = useState('none');
+  const [accelPlanId, setAccelPlanId] = useState('dmad8');
 
-  /* 3D 走位（Blender 渲染的输入）
-     ⚠️ 坐标系 (x, y=高度, z=深度) —— 与预演引擎一致；后端转 Blender Z-up。
-     没有这些数据时 Blender 只能渲"默认两人对峙"，等于没用。 */
-  const [actors, setActors] = useState<ShotActor[]>([]);
-  const [stagingOpen, setStagingOpen] = useState(false);
-  /* 3D 资产库 + 每个模型内置的动作（懒加载：选模型时才启 Blender 读） */
-  const [modelAssets, setModelAssets] = useState<ModelAsset[]>([]);
-  const [assetActions, setAssetActions] = useState<Record<string, AssetAction[]>>({});
+  // ---- 素材 ----
+  const [assets, setAssets] = useState<AssetItem[]>([]);
+  const [images, setImages] = useState<PickedMedia[]>([]);
+  const [videos, setVideos] = useState<PickedMedia[]>([]);
+  const [audios, setAudios] = useState<PickedMedia[]>([]);
 
-  /* 动作目录（单一真源在 host/blender/actions.py，经 API 下发） */
-  const [actionCatalog, setActionCatalog] = useState<
-    Array<{ name: string; label: string; group: string; groupLabel: string; kind: string }>
-  >([]);
+  // ---- 镜头 ----
+  const [shots, setShots] = useState<ShotLite[]>([]);
+  const [shotId, setShotId] = useState('');
 
-  /**
-   * 当前编辑中的镜头卡 id。
-   *
-   * ⚠️ 历史缺陷：saveShot 从来不带 id → 后端每次 newShot() 新建一张镜头卡
-   *    → 每点一次「开始渲染」或「用 Blender 现渲」就往 shots.json 里多塞一条
-   *    重复记录（实测某项目堆到 19 张，全是同参数）。而且因为没有回读，
-   *    用户加的演员刷新即归零。
-   */
-  const shotIdRef = useRef<string>('');
-  /** 已从磁盘回填的镜头标题（null = 本页还没有可回填的镜头） */
-  const [restoredShot, setRestoredShot] = useState<string | null>(null);
+  // ---- 参数面板 ----
+  const [paramFilter, setParamFilter] = useState('');
+  const [showReference, setShowReference] = useState(false);
 
-  /* 提示词编辑器（可折叠） */
-  const [editorOpen, setEditorOpen] = useState(false);
-  const [manualPrompt, setManualPrompt] = useState('');
-  const [useManualPrompt, setUseManualPrompt] = useState(false);
+  /* ------------------------------ 初始化 ------------------------------ */
 
-  /* 渲染 */
-  const [busy, setBusy] = useState(false);
-  const [job, setJob] = useState<JobLite | null>(null);
-  const pollRef = useRef<number | null>(null);
-
-  /* ------------------------------------------------------------ 载入 */
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [cs, meta, as, tpl, asts, catalog, wd] = await Promise.all([
-        api.vaultCards(),
-        api.promptMeta(),
-        api.listAssets({}),
-        api.toolboxTemplates(),
-        // 3D 资产库拿不到不影响渲染，单独 catch 掉（但要在 UI 里说明原因）
-        api.blenderAssets().catch(() => ({ assets: [] as ModelAsset[], _failed: true })),
-        api.blenderActionCatalog().catch(() => null),
-        // 服化道同理：拿不到就当没有，不让整个渲染页打不开
-        api.toolboxWardrobe().catch(() => [] as unknown[]),
-      ]);
-      setCards(cs as VaultCardLite[]);
-      setAssets((as as AssetItem[]).filter((x) => x.rel));
-      setTemplates((tpl as Array<{ id: string; name: string; category: string; content: string }>) ?? []);
-      setWardrobeItems((wd as Array<{ id: string; kind: string; name: string; desc: string; imageRel?: string | null }>) ?? []);
-      const m = meta as { styles?: Array<{ id: string; name: string }> };
-      setStyles(m.styles ?? []);
-      setModelAssets((asts as { assets?: ModelAsset[] })?.assets ?? []);
-      if (!projects.length) await loadProjects();
-      if (catalog?.actions?.length) {
-        setActionCatalog(catalog.actions);
-      } else {
-        // 目录拿不到时保住最基本可用性，并让用户知道为什么
-        setActionCatalog([{ name: 'stand', label: '站立', group: 'base', groupLabel: '基础', kind: 'static' }]);
-        setError('动作目录加载失败（Blender 侧 actions.py 未就绪），暂时只能选「站立」');
-      }
-    } catch (e) {
-      setError(describeError(e));
-    } finally {
-      setLoading(false);
-    }
+  useEffect(() => {
+    void loadProjects();
   }, [loadProjects]);
 
-  useEffect(() => { void load(); }, [load]);
-
-  /* 项目切换时，带上项目绑定的角色卡 */
   useEffect(() => {
-    if (!currentProjectId) return;
-    void (async () => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError('');
       try {
-        const bound = await api.projectCards(currentProjectId) as { cardIds?: string[] };
-        if (bound.cardIds?.length) setPickedCards(bound.cardIds);
-      } catch { /* ignore */ }
+        const [sch, pre, pm] = await Promise.all([
+          api.nanfengSchema(),
+          api.nanfengPresets(),
+          api.promptMeta() as unknown as Promise<{
+            styles?: Array<{ id: string; name: string; category: string; changesAppearance: boolean }>;
+            lightings?: Array<{ id: string; name: string; ratio: string | null; zh: string }>;
+          }>,
+        ]);
+        if (cancelled) return;
+        setSchema(sch as unknown as SchemaPayload);
+        setPresets(pre.presets);
+        setPresetId(pre.default || 'standard');
+        // 打光 / 加速方案随预设接口一起下发
+        const preAny = pre as unknown as {
+          accelPlans?: Array<{ id: string; label: string; steps: number; lora: string | null; hint: string }>;
+        };
+        if (Array.isArray(preAny.accelPlans)) {
+          setAccelPlans(preAny.accelPlans);
+          const def = preAny.accelPlans.find((p) => p.id === 'dmad8');
+          if (def) setAccelPlanId(def.id);
+        }
+        if (Array.isArray(pm.styles) && pm.styles.length) setStyles(pm.styles);
+        if (Array.isArray(pm.lightings) && pm.lightings.length) setLightings(pm.lightings);
+      } catch (e) {
+        if (!cancelled) setError(describeError(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     })();
-  }, [currentProjectId]);
+    return () => { cancelled = true; };
+  }, []);
 
-  /**
-   * 载入该项目最近一张镜头卡，把走位/控制视频/提示词回填到表单。
-   *
-   * ⚠️ 历史缺陷：全站**没有任何地方**调用 api.listShots —— 加的角色、
-   *    渲好的控制视频、写过的提示词一旦刷新就全没了，
-   *    而 shots.json 里其实存着（还越存越多重复的）。
-   *
-   * 这里只回填"走位与素材"这类编辑器状态，不覆盖用户正在输入的提示词
-   * （除非用户点的是"载入"按钮）。
-   */
-  const loadLatestShot = useCallback(async (projectId: string, { silent = false } = {}) => {
+  // 镜头列表
+  const loadShots = useCallback(async (pid: string) => {
+    if (!pid) { setShots([]); setShotId(''); return; }
     try {
-      const list = (await api.listShots(projectId)) as unknown as Array<Record<string, unknown>>;
-      if (!list.length) return null;
-      const latest = [...list].sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0))[0];
-      shotIdRef.current = String(latest.id ?? '');
-      const a = Array.isArray(latest.actors) ? latest.actors as ShotActor[] : [];
-      if (a.length) setActors(a);
-      const ctl = latest.control as { videoRel?: string; strength?: number; startPercent?: number; endPercent?: number } | null | undefined;
-      if (ctl?.videoRel) {
-        setControlRel(ctl.videoRel);
-        setControlStrength(String(ctl.strength ?? 1));
-        setControlStart(String(ctl.startPercent ?? 0));
-        setControlEnd(String(ctl.endPercent ?? 0.8));
-      }
-      const refs = latest.refs as { videos?: unknown[]; audios?: unknown[] } | undefined;
-      if (Array.isArray(refs?.videos) && refs.videos.length) {
-        setPickedVideos(refs.videos as typeof pickedVideos);
-      }
-      if (Array.isArray(refs?.audios) && refs.audios.length) {
-        setPickedAudios(refs.audios as typeof pickedAudios);
-      }
-      /**
-       * 首尾帧也要回填 —— 它们是**占用 9 图预算的参考图**。
-       *
-       * ⚠️ 以前只回填 control，不碰 previz；而 `refreshPlan` 也从不传
-       *    `previz`，于是 `buildRenderPlan` 里那两个 `if (previz?.firstRel)`
-       *    恒不成立 —— 顶栏「参考图 N/9」徽标**永远不算首尾帧**。
-       *    用户已经 8 张卡图 + 1 张首帧时，徽标显示 8/9（安全），
-       *    实际提交 9 张，再加一张就静默超限。
-       */
-      const pv = latest.previz as { firstFramePath?: string; lastFramePath?: string } | null | undefined;
-      if (pv?.firstFramePath || pv?.lastFramePath) {
-        setPrevizRefs({
-          firstRel: pv.firstFramePath ?? '',
-          lastRel: pv.lastFramePath ?? '',
-        });
-      }
-      if (!silent) setRestoredShot(String(latest.title ?? '最近镜头'));
-      return latest;
+      const list = (await api.listShots(pid)) as unknown as ShotLite[];
+      const sorted = (Array.isArray(list) ? list : []).slice().sort(
+        (a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0),
+      );
+      setShots(sorted);
+      setShotId(sorted[0]?.id ?? '');
     } catch {
-      return null;
+      setShots([]);
+      setShotId('');
     }
   }, []);
 
   useEffect(() => {
-    if (!currentProjectId) return;
-    shotIdRef.current = '';
-    setRestoredShot(null);
-    void loadLatestShot(currentProjectId);
-  }, [currentProjectId, loadLatestShot]);
+    void loadShots(currentProjectId ?? '');
+  }, [currentProjectId, loadShots]);
 
-  /* ------------------------------------------------------ 计划 / 编译 */
-
-  const refreshPlan = useCallback(async () => {
+  /** 加载素材库 */
+  const loadAssets = useCallback(async () => {
     try {
-      // 服化道：拿服务端解析出的参考图（唯一转换点，不要在页面里再实现一遍）
-      const wd = pickedWardrobe.length
-        ? await api.toolboxWardrobeResolve(pickedWardrobe).catch(() => ({ images: [] as string[] }))
-        : { images: [] as string[] };
-      const p = await api.renderPlan({
-        cardIds: pickedCards,
-        manualImages: wd.images ?? [],
-        videos: pickedVideos.map((v) => ({ rel: v.rel, name: v.name, hasAudio: v.hasAudio !== false })),
-        audios: pickedAudios.map((a) => ({ rel: a.rel, name: a.name })),
-        refImageSize,
-        // ⚠️ 首尾帧必须传：它们在 buildRenderPlan 里是 PREVIZ_FIRST/LAST 两类
-        //    参考图，占 9 图预算。不传 → 徽标与实际提交数量对不上。
-        previz: (previzRefs.firstRel || previzRefs.lastRel)
-          ? { firstRel: previzRefs.firstRel || undefined, lastRel: previzRefs.lastRel || undefined }
-          : null,
-      }) as RenderPlan;
-      setPlan(p);
-      // 模式跟着计划推荐（用户手动改过就不覆盖）
-      return p;
-    } catch (e) {
-      setError(describeError(e));
-      return null;
+      const list = (await api.listAssets({})) as unknown as AssetItem[];
+      setAssets(Array.isArray(list) ? list : []);
+    } catch {
+      setAssets([]);
     }
-  }, [pickedCards, pickedVideos, pickedAudios, refImageSize, previzRefs, pickedWardrobe]);
+  }, []);
 
-  useEffect(() => { void refreshPlan(); }, [refreshPlan]);
-
-  const recompile = useCallback(async () => {
-    try {
-      const wd = pickedWardrobe.length
-        ? await api.toolboxWardrobeResolve(pickedWardrobe).catch(() => ({ images: [] as string[], notes: [] as string[] }))
-        : { images: [] as string[], notes: [] as string[] };
-      /**
-       * 服化道的文字描述拼进画面概要。
-       *
-       * 为什么拼 summary 而不是另开字段：H3 的提示词没有"服装道具"这种
-       * 官方字段，服装差异必须体现在画面描述里（官方顺序：主体 → 动作 →
-       * 镜头 → 光线）。拼在 summary 的**主体段**是对的。
-       */
-      const wardrobeNote = (wd.notes ?? []).length
-        ? `服装与配饰：${(wd.notes ?? []).join('；')}。`
-        : '';
-      const r = await api.renderCompile({
-        cardIds: pickedCards,
-        manualImages: wd.images ?? [],
-        videos: pickedVideos.map((v) => ({ rel: v.rel, name: v.name, hasAudio: v.hasAudio !== false })),
-        audios: pickedAudios.map((a) => ({ rel: a.rel, name: a.name })),
-        refImageSize,
-        mode,
-        styleId,
-        durationSec: Number(durationSec) || 5,
-        ratio,
-        summary: [summary, wardrobeNote].filter(Boolean).join(' '),
-        sceneLayout: shotAction,
-        // 与 /render/plan 保持同一份 previz 输入，否则两处预算口径不一致
-        previz: (previzRefs.firstRel || previzRefs.lastRel)
-          ? { firstRel: previzRefs.firstRel || undefined, lastRel: previzRefs.lastRel || undefined }
-          : null,
-        ...(soundscape.trim() ? { overall_soundscape: soundscape.trim() } : {}),
-        ...(music.trim() && music !== 'N/A' ? { non_diegetic_music: music.trim() } : {}),
-        ...(customStyle.trim() ? { styleEn: customStyle.trim() } : {}),
-      }) as CompileResult;
-      setCompiled(r);
-      setError('');
-    } catch (e) {
-      setError(describeError(e));
-    }
-  }, [pickedCards, pickedVideos, pickedAudios, refImageSize, mode, styleId, durationSec, ratio, summary, shotAction, soundscape, music, customStyle, previzRefs, pickedWardrobe]);
-
-  useEffect(() => { void recompile(); }, [recompile]);
-
-  /* --------------------------------------------------------- 渲染 */
-
-  const stopPolling = () => {
-    if (pollRef.current) { window.clearInterval(pollRef.current); pollRef.current = null; }
-  };
-  useEffect(() => stopPolling, []);
+  useEffect(() => { void loadAssets(); }, [loadAssets]);
 
   /**
-   * 用 Blender 现渲一路控制序列。
+   * 订阅服务端事件。
    *
-   * 渲完直接写进 controlRel —— 用户的心智是"给我一个控制视频"，
-   * 而不是"先去别的页面渲染，回来再选文件"。
+   * 关键场景：DSH Agent 调 studio_shot 改了镜头卡 → 后端广播 shot-updated
+   * → 这里收到后重新拉镜头列表 → 用户界面上立刻看到 Agent 改了什么。
    *
-   * 实测耗时：124 帧 @864×480 约 20 秒（H3 本身要 3—4 分钟）。
+   * 这是本项目的核心交互：**Agent 和浏览器操作同一份状态**。
    */
-  /* ---------------------------- 走位编辑 ---------------------------- */
-
-  /**
-   * 动作下拉的选项。
-   *
-   * ⚠️ 数据来自后端目录（单一真源 actions.py）而不是硬编码。
-   * `kind` 三态：animated 随时间变化 / hold 保持恒定姿态 / static 有意静止。
-   * 后两者在 label 上标注出来，避免用户以为"选了没反应"。
-   */
-  const actionOptions = useMemo(
-    () => actionCatalog.map((a) => {
-      const tag = a.kind === 'hold' ? '（定格姿态）' : (a.kind === 'static' ? '（静止）' : '');
-      return { value: a.name, label: `${a.groupLabel} · ${a.label}${tag}` };
-    }),
-    [actionCatalog],
-  );
-
-  function addActor() {
-    const n = actors.length;
-    setActors([...actors, {
-      name: `角色${n + 1}`,
-      heightM: 1.7,
-      color: '#e1e3e7',
-      // 加人时左右均匀排开，避免全叠在原点（叠在一起等于只有一个人）
-      position: [n === 0 ? -0.6 : n * 0.6 - 0.6, 0, 0],
-      rotationDeg: 0,
-      action: 'stand',
-      startFrame: 0,
-      emotion: 'neutral',
-      intensity: 1,
-    }]);
-    setStagingOpen(true);
-  }
-
-  function removeActor(i: number) {
-    setActors(actors.filter((_, k) => k !== i));
-  }
-
-  /**
-   * 更新某个演员。
-   *
-   * ⚠️ 必须用**函数式** setState：历史实现是 `setActors(actors.map(...))`，
-   *    闭包里捕获的是渲染时的旧数组，并发两次修改会丢更新。
-   *    而且 pickActorAsset 里有一次 1–3 秒的异步（真启 Blender 读动作），
-   *    await 期间用户删掉一个演员 → 索引 i 指向别人 → 改错人。
-   */
-  function updateActor(i: number, patch: Partial<ShotActor>) {
-    setActors((prev) => prev.map((a, k) => (k === i ? { ...a, ...patch } : a)));
-  }
-
-  function updateActorPos(i: number, axis: 0 | 1 | 2, value: number) {
-    setActors((prev) => prev.map((a, k) => {
-      if (k !== i) return a;
-      const pos = [...a.position] as [number, number, number];
-      pos[axis] = value;
-      return { ...a, position: pos };
-    }));
-  }
-
-  /**
-   * 选模型时顺带把它的动作列出来。
-   *
-   * 为什么要现读：Mixamo 导出的 Action 名是 `Armature|Armature|walk` 这种，
-   * 用户不可能猜得到；与其让人试错，不如真启一次 Blender 读出来（1—3 秒）。
-   */
-  async function pickActorAsset(i: number, rel: string) {
-    // 外部模型的动作名由模型自带 Action 决定，不能塞进程序化动作白名单
-    updateActor(i, { assetRel: rel || undefined, action: rel ? '' : 'stand' });
-    if (!rel || assetActions[rel]) return;
-    try {
-      const r = await api.blenderActions(rel);
-      setAssetActions((prev) => ({ ...prev, [rel]: r.actions }));
-      if (r.actions.length === 1) {
-        // 只有一个动作时直接选上 —— 少一次点击，也避免用户忘了选。
-        // ⚠️ 这里用**函数式**更新 + 校验"索引 i 上还是这个模型"，
-        //    因为 await 期间用户可能删/加了演员，索引会漂移。
-        setActors((prev) => prev.map((a, k) => {
-          if (k !== i) return a;
-          if (a.assetRel !== rel) return a;        // 该行已被改成别的模型，别覆盖
-          return { ...a, action: r.actions[0].name };
-        }));
-      } else if (r.actions.length === 0) {
-        toast.error('这个模型里没有内置动作（OBJ 或静态网格），只能做整体位移');
+  useEffect(() => {
+    const off = subscribeEvents((e) => {
+      if (e.type === 'shot-updated' && e.projectId === currentProjectId) {
+        void loadShots(currentProjectId ?? '');
       }
-    } catch (e) {
-      toast.error(`读动作失败：${describeError(e)}`);
+    });
+    return off;
+  }, [currentProjectId, loadShots]);
+
+  /**
+   * 选中镜头时把它的**全部可编辑字段**回填到表单。
+   *
+   * ⚠️ 这里必须回填所有会在 handleRender 里被写回镜头卡的字段。
+   *    历史缺陷：只回填了 durationSec / mode，提示词、素材、画风、打光、
+   *    加速方案、预设都还停在上一个镜头 —— 用户从下拉切到镜头 B 后看到的是
+   *    A 的提示词，点「渲染」就把 A 的提示词静默写进 B 的镜头卡，
+   *    A 的素材也一起搬过去了。数据被覆盖且没有任何提示。
+   *
+   *    规则：**凡是 handleRender 提交的字段，这里都要回填**。
+   *    新增字段时两边一起改（同一个对象形状）。
+   */
+  useEffect(() => {
+    if (!shotId) return;
+    const s = shots.find((x) => x.id === shotId);
+    if (!s) return;
+
+    if (typeof s.durationSec === 'number') setDurationSec(String(s.durationSec));
+    if (s.mode) setMode(s.mode);
+
+    // 提示词/描述：优先 prompt，回退 description（老镜头卡只有 description）
+    setPrompt(s.prompt || s.description || '');
+
+    // 画风 / 打光 / 加速方案
+    if (s.styleId) setStyleId(s.styleId);
+    if (s.lightingId) setLightingId(s.lightingId);
+    if (s.accelPlan) setAccelPlanId(s.accelPlan);
+
+    // 素材：必须是全量替换，不能沿用上一个镜头的选择
+    const asPicked = (rel: string): PickedMedia => ({
+      rel,
+      name: rel.split('/').pop() ?? rel,
+    });
+    setImages((s.refs?.images ?? []).map(asPicked));
+    setVideos((s.refs?.videos ?? []).map(asPicked));
+    setAudios((s.refs?.audios ?? []).map(asPicked));
+
+    // 南风预设 + 单镜覆盖
+    const nf = (s as { nanfeng?: { presets?: unknown; overrides?: Record<string, unknown> } }).nanfeng;
+    if (typeof nf?.presets === 'string') setPresetId(nf.presets);
+    setOverrides(nf?.overrides && typeof nf.overrides === 'object' ? nf.overrides : {});
+  }, [shotId, shots]);
+
+  /* ------------------------------ 计算 ------------------------------ */
+
+  // 当前生效参数 = schema 默认 + 覆盖
+  const effectiveValues = useMemo(() => {
+    const base: Record<string, unknown> = {};
+    if (schema) {
+      for (const [k, d] of Object.entries(schema.params)) base[k] = d.default;
     }
-  }
+    return { ...base, ...overrides };
+  }, [schema, overrides]);
 
-  async function renderWithBlender(mode: string) {
-    if (!currentProjectId) { toast.error('先选一个项目'); return; }
-    setBlenderBusy(mode);
-    setBlenderMsg('');
-    try {
-      // 先把当前参数存成镜头卡 —— Blender 从镜头卡读 durationSec / ratio / actors
-      const saved = await api.saveShot(currentProjectId, {
-        // ⚠️ 必须带上已有 id：不带的话后端 newShot() 每次新建一张镜头卡，
-        //    shots.json 会被同参数的重复记录撑爆（实测堆到 19 张）。
-        ...(shotIdRef.current ? { id: shotIdRef.current } : {}),
-        title: summary.slice(0, 40) || `镜头 ${new Date().toLocaleTimeString('zh-CN')}`,
-        durationSec: Number(durationSec) || 5,
-        ratio,
-        profile,
-        backend: 'h3-local',
-        mode,
-        refImageSize,
-        description: [summary, shotAction].filter(Boolean).join('。'),
-        cardIds: pickedCards,
-        ...(actors.length ? { actors } : {}),
-      } as never) as { id?: string };
-      if (!saved?.id) throw new Error('镜头卡保存失败');
-      shotIdRef.current = String(saved.id);
-
-      const r = await api.blenderRender({ mode, projectId: currentProjectId, shotId: saved.id });
-      setControlRel(r.rel);
-      setBlenderMsg(`已生成 ${r.frames} 帧 / ${r.seconds}s → ${r.rel}`);
-      toast.ok(`控制视频就绪（${r.seconds}s）`);
-    } catch (e) {
-      const msg = describeError(e);
-      setBlenderMsg(msg);
-      toast.error(msg);
-    } finally {
-      setBlenderBusy('');
+  // 已改数量（只统计真正有效、且与默认不同的）
+  const changedTotal = useMemo(() => {
+    let n = 0;
+    for (const [k, v] of Object.entries(overrides)) {
+      const d = schema?.params[k];
+      if (!d) continue;
+      if (v === d.default) continue;
+      if (d.flag) continue;      // 死参数不算"已改"
+      n += 1;
     }
-  }
+    return n;
+  }, [overrides, schema]);
 
-  async function doRender() {
+  const setParam = useCallback((key: string, value: unknown) => {
+    setOverrides((prev) => ({ ...prev, [key]: value }));
+  }, []);
+
+  /* ------------------------------ 提交 ------------------------------ */
+
+  const handleRender = useCallback(async () => {
     if (!currentProjectId) { toast.error('先选一个项目'); return; }
-    setBusy(true);
-    setError('');
+    setSubmitting(true);
     try {
-      // 手工编辑过的提示词必须**随镜头卡一起存**。
-      //
-      // 为什么：`manualPrompt` 原先只活在本地 state 里，`saveShot` 不传 `prompt`，
-      // 生成时后端拿镜头卡重新 `compilePrompt(shot)` → 用户在编辑器里写的东西
-      // **完全被丢掉**，而且没有任何提示（实测：填入 2151 字手写提示词，
-      // 送进模型的却是 1134 字的自动编译版，摘要退化成"一段戏"）。
-      const manual = useManualPrompt ? manualPrompt.trim() : '';
-      // 服化道：解析成参考图 + 文字（服务端唯一转换点）
-      const wd = pickedWardrobe.length
-        ? await api.toolboxWardrobeResolve(pickedWardrobe).catch(() => ({ images: [] as string[], notes: [] as string[] }))
-        : { images: [] as string[], notes: [] as string[] };
-      const wardrobeImages = wd.images ?? [];
-      const wardrobeNote = (wd.notes ?? []).length ? `服装与配饰：${(wd.notes ?? []).join('；')}。` : '';
-      // 1) 先把当前配置存成镜头卡（渲染以镜头卡为单位）
+      // 1) 先把当前表单存成镜头卡（保留 id 复用）
       const saved = await api.saveShot(currentProjectId, {
-        // ⚠️ 必须带上已有 id：不带的话后端 newShot() 每次新建一张镜头卡，
-        //    shots.json 会被同参数的重复记录撑爆（实测堆到 19 张）。
-        ...(shotIdRef.current ? { id: shotIdRef.current } : {}),
-        title: summary.slice(0, 40) || `镜头 ${new Date().toLocaleTimeString('zh-CN')}`,
+        ...(shotId ? { id: shotId } : {}),
+        title: prompt.slice(0, 40) || `镜头 ${new Date().toLocaleTimeString('zh-CN')}`,
         durationSec: Number(durationSec) || 5,
-        ratio,
-        profile,
-        backend: 'h3-local',
         mode,
-        refImageSize,
-        // 服化道的文字描述拼进画面描述（H3 没有"服装道具"字段，
-        // 服装差异只能体现在主体描述里 —— 官方顺序：主体 → 动作 → 镜头 → 光线）
-        description: [summary, wardrobeNote, shotAction].filter(Boolean).join('。'),
-        // 手工提示词优先；后端 compilePrompt 会优先用 shot.prompt
-        ...(manual ? { prompt: manual } : {}),
-        // 角色卡通过 cardIds 传，后端解析成图与文字
-        cardIds: pickedCards,
+        description: prompt,
+        // 画风 / 打光是正交通道，写进镜头卡后编译提示词时会带上
+        styleId,
+        lightingId,
+        // 加速方案写进镜头卡 → runH3Nanfeng 据此填 LoRA / 采样器 / 步数
+        accelPlan: accelPlanId,
         refs: {
-          // 服化道的图进参考图（manualImages 通道）；没有图的条目只影响文字
-          images: wardrobeImages,
-          videos: pickedVideos.map((v) => ({ rel: v.rel, name: v.name, hasAudio: v.hasAudio !== false })),
-          audios: pickedAudios.map((a) => ({ rel: a.rel, name: a.name })),
+          images: images.map((m) => m.rel),
+          videos: videos.map((m) => m.rel),
+          audios: audios.map((m) => m.rel),
         },
-        // 控制视频：只传 rel，后端 resolveControl 统一收敛强度/区间
-        control: controlRel
-          ? {
-            videoRel: controlRel,
-            // ⚠️ 用 Number.isFinite 而不是 `|| 默认值`：
-            //    strength=0 是"关闭控制"、endPercent=0 是"全程不受控"，
-            //    用 || 会把 0 当成未填并改成默认值，用户的意图被静默改写。
-            strength: Number.isFinite(Number(controlStrength)) ? Number(controlStrength) : 1,
-            startPercent: Number.isFinite(Number(controlStart)) ? Number(controlStart) : 0,
-            endPercent: Number.isFinite(Number(controlEnd)) ? Number(controlEnd) : 0.8,
-          }
-          : null,
-        // 走位：有才传，没配就不覆盖已有数据
-        ...(actors.length ? { actors } : {}),
-      } as never) as { id?: string };
+        nanfeng: {
+          presets: presetId,
+          overrides,
+        },
+      });
 
       if (!saved?.id) throw new Error('镜头卡保存失败');
-      shotIdRef.current = String(saved.id);
+      setShotId(String(saved.id));
 
-      // 2) 提交
-      const j = await api.generate({
+      // 2) 提交生成
+      //
+      // ⚠️ 不写 `as never`：GenerateInput 是真实契约，类型对不上就该让 tsc 报错。
+      //    否则字段名写错（例如 backend 拼成 backendId）会一路无声无息地
+      //    被后端按默认值处理，用户只看到"设置了但没生效"。
+      const job = await api.generate({
         projectId: currentProjectId,
-        shotId: saved.id,
-        backend: 'h3-local',
-        ...(seed.trim() ? { seed: Number(seed) } : {}),
-      } as never) as JobLite;
+        shotId: String(saved.id),
+        backend: 'h3-nanfeng',
+        ...(seed ? { seed: Number(seed) } : {}),
+      });
 
-      setJob(j);
-      toast.ok(`已提交 ${String(j.id).slice(0, 12)}…`);
-
-      // 3) 轮询
-      stopPolling();
-      pollRef.current = window.setInterval(() => {
-        void (async () => {
-          try {
-            const list = await api.listJobs() as JobLite[];
-            const cur = list.find((x) => x.id === j.id);
-            if (!cur) return;
-            setJob({ ...cur });
-            // ⚠️ interrupted 也是终态：插件重启会把 running/queued 标记成它，
-            //    漏掉的话按钮会永久停在"渲染中"。
-            if (['completed', 'failed', 'cancelled', 'interrupted'].includes(cur.status)) {
-              stopPolling();
-              setBusy(false);
-              if (cur.status === 'completed') toast.ok('渲染完成');
-              else toast.error(cur.error || `渲染${cur.status}`);
-            }
-          } catch { /* 网络抖动不中断 */ }
-        })();
-      }, 4000);
+      toast.ok(`已提交（任务 ${String(job.id).slice(0, 8)}）`);
+      void loadShots(currentProjectId);
     } catch (e) {
-      setError(describeError(e));
-      setBusy(false);
+      toast.error(describeError(e));
+    } finally {
+      setSubmitting(false);
     }
+  }, [currentProjectId, shotId, prompt, durationSec, mode, images, videos, audios, presetId, overrides, seed, toast, loadShots, styleId, lightingId, accelPlanId]);
+
+  /* ------------------------------ 渲染 ------------------------------ */
+
+  if (loading) {
+    return (
+      <Page title="渲染">
+        <Spinner />
+      </Page>
+    );
   }
 
-  /* ------------------------------------------------------------ 视图 */
-
-  const previewUrl = useMemo(() => {
-    const out = job?.outputs?.[0];
-    if (!out) return '';
-    return outputUrl(out);
-  }, [job]);
-
-  const budget = plan?.stats;
-  const over = Boolean(budget && budget.total > budget.limit);
-  // 参考视频 + 音频的合计时长预算（后端上限 14.8s，超了会自动裁剪并告警）
-  const mediaSec = budget?.mediaSec ?? 0;
-  const mediaLimit = budget?.mediaSecLimit ?? 14.8;
-  const mediaOver = Boolean(budget?.mediaSecOver);
-  const mediaTone = mediaOver ? 'danger' : (mediaLimit - mediaSec) <= 1.5 ? 'warn' : 'ok';
-
-  if (loading) return <Page title="渲染"><Loading text="载入中" /></Page>;
+  const inertCount = schema?.inert?.length ?? 0;
 
   return (
     <Page
       title="渲染"
-      subtitle="选素材 → 编译提示词 → 渲染 → 预览，一条镜头在这里做完"
-      actions={
-        <>
-          <Tabs<'shot' | 'film'>
-            items={[
-              { value: 'shot', label: '单镜头渲染' },
-              { value: 'film', label: '成片合成' },
-            ]}
-            value={tab}
-            onChange={setTab}
-            ariaLabel="渲染模式"
-          />
-          <Badge tone={over ? 'danger' : (budget?.remaining ?? 9) <= 1 ? 'warn' : 'ok'}>
-            参考图 {budget?.total ?? 0}/{budget?.limit ?? 9}
-          </Badge>
-          <Badge tone={mediaTone}>
-            音视频 {mediaSec.toFixed(1)}/{mediaLimit}s
-          </Badge>
-          <Button icon={<Icon name="refresh" size={15} />} onClick={() => void load()} disabled={busy}>刷新</Button>
-          {tab === 'shot' ? (
-            <Button variant="primary" icon={<Icon name="video" size={15} />} onClick={() => void doRender()} disabled={busy}>
-              {busy ? '渲染中…' : '开始渲染'}
-            </Button>
-          ) : null}
-        </>
-      }
+      subtitle={`南风 V15 · ${schema?.paramCount ?? 0} 个参数 · ${presets.length} 个预设`}
     >
-      {tab === 'film' ? (
-        <FilmComposer />
-      ) : (
-      <div className="jz-col" style={{ gap: 'var(--jz-sp-4)' }}>
-        {error ? <Alert tone="danger">{error}</Alert> : null}
-        {(plan?.warnings ?? []).map((w, i) => (
-          <Alert key={i} tone="warn">{w}</Alert>
-        ))}
+      {error ? <Alert tone="danger">{error}</Alert> : null}
 
-        {/* 顶栏：项目 / 镜头描述 */}
-        <Panel title="镜头">
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px,1fr))', gap: 'var(--jz-sp-3)' }}>
-            <Field label="项目">
-              <Select<string>
-                value={currentProjectId ?? ''}
-                onChange={(v) => { void selectProject(v); }}
-                options={[
-                  { value: '', label: projects.length ? '请选择…' : '（还没有项目）' },
-                  ...projects.map((p) => ({ value: p.id, label: p.name })),
-                ]}
-              />
-            </Field>
-            <Field label="画面概要" hint="一句话说清这一镜拍什么">
-              <Input value={summary} onChange={(e) => setSummary(e.target.value)}
-                placeholder="两人在夜晚天台并肩而立" />
-            </Field>
-            <Field label="动作 / 运镜">
-              <Input value={shotAction} onChange={(e) => setShotAction(e.target.value)}
-                placeholder="中景缓慢推进，微风吹动发丝" />
-            </Field>
-          </div>
-        </Panel>
-
-        <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr 300px', gap: 'var(--jz-sp-4)', alignItems: 'start' }}>
-          {/* ---------------- 左：素材 ---------------- */}
-          <div className="jz-col" style={{ gap: 'var(--jz-sp-4)' }}>
-            <Panel title={`角色卡（已选 ${pickedCards.length}）`}>
-              {cards.length === 0 ? (
-                <div className="jz-sm jz-muted">仓库里还没有角色卡。</div>
-              ) : (
-                <div className="jz-col" style={{ gap: 6, maxHeight: 320, overflow: 'auto' }}>
-                  {cards.map((c) => {
-                    const on = pickedCards.includes(c.id);
-                    return (
-                      <button
-                        key={c.id}
-                        type="button"
-                        onClick={() => setPickedCards((p) => (on ? p.filter((x) => x !== c.id) : [...p, c.id]))}
-                        className="jz-card"
-                        style={{
-                          padding: '7px 9px', textAlign: 'left', cursor: 'pointer',
-                          borderColor: on ? 'var(--jz-accent)' : undefined,
-                          borderWidth: on ? 2 : 1,
-                        }}
-                      >
-                        <div className="jz-row" style={{ justifyContent: 'space-between', gap: 6 }}>
-                          <b className="jz-truncate jz-sm">{c.name}</b>
-                          {on ? <Badge tone="ok">✓</Badge> : <Badge>{c.imageCount} 图</Badge>}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </Panel>
-
-            {/* ---------------- 服化道 ---------------- */}
-            {/*
-              ⚠️ 这个面板是「服化道」第一次真正影响出图。
-              以前它只是工具箱里的一张表：录了衣服，渲染时完全不用。
-              现在选中条目的 imageRel 进参考图（manualImages 通道），
-              name/desc 拼进画面概要 —— 后端零新增依赖。
-            */}
-            <Panel title={`服化道（已选 ${pickedWardrobe.length}）`}>
-              {wardrobeItems.length === 0 ? (
-                <div className="jz-sm jz-muted">
-                  服化道库还是空的。可在「设置 → 工具 → 服化道」里登记服装/饰品/武器/道具。
-                </div>
-              ) : (
-                <div className="jz-col" style={{ gap: 6, maxHeight: 240, overflow: 'auto' }}>
-                  {wardrobeItems.map((w) => {
-                    const on = pickedWardrobe.includes(w.id);
-                    return (
-                      <button
-                        key={w.id}
-                        type="button"
-                        onClick={() => setPickedWardrobe((p) => (on ? p.filter((x) => x !== w.id) : [...p, w.id]))}
-                        className="jz-card"
-                        style={{
-                          padding: '7px 9px', textAlign: 'left', cursor: 'pointer',
-                          borderColor: on ? 'var(--jz-accent)' : undefined,
-                          borderWidth: on ? 2 : 1,
-                        }}
-                      >
-                        <div className="jz-row" style={{ justifyContent: 'space-between', gap: 6 }}>
-                          <b className="jz-truncate jz-sm">{w.name}</b>
-                          {on
-                            ? <Badge tone="ok">✓</Badge>
-                            : <Badge>{w.imageRel ? '有图' : '仅文字'}</Badge>}
-                        </div>
-                        {w.desc ? <div className="jz-xs jz-muted jz-truncate" style={{ marginTop: 2 }}>{w.desc}</div> : null}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-              {pickedWardrobe.length ? (
-                <div className="jz-xs jz-muted" style={{ marginTop: 6 }}>
-                  有图的条目会占用参考图名额；只有文字的会拼进画面概要。
-                </div>
-              ) : null}
-            </Panel>
-
-            <Panel title="参考图清单">
-              {!plan || plan.images.length === 0 ? (
-                <div className="jz-sm jz-muted">还没有参考图。</div>
-              ) : (                <div className="jz-col" style={{ gap: 4 }}>
-                  {plan.images.map((im) => (
-                    <div key={`${im.index}-${im.rel}`} className="jz-row" style={{ gap: 6, justifyContent: 'space-between' }}>
-                      <span className="jz-xs jz-mono">P{im.index}</span>
-                      <span className="jz-xs jz-truncate" style={{ flex: 1 }}>
-                        {im.cardName ? `${im.cardName} · ${SOURCE_LABEL[im.source] ?? im.source}` : (SOURCE_LABEL[im.source] ?? im.source)}
-                      </span>
-                    </div>
-                  ))}
-                  <div className="jz-xs jz-muted" style={{ marginTop: 6 }}>
-                    这些图会按顺序上传，提示词里的 &lt;Picture N&gt; 就指它们。
-                  </div>
-                </div>
-              )}
-            </Panel>
-
-            {/* 参考视频 / 音频 —— 来自素材库，按 H3 的四类参考输入组织 */}
-            <MediaPicker
-              assets={assets}
-              videos={pickedVideos}
-              audios={pickedAudios}
-              onVideos={setPickedVideos}
-              onAudios={setPickedAudios}
-            />
-          </div>
-
-          {/* ---------------- 中：预览 ---------------- */}
-          <Panel title={job ? `渲染结果 · ${job.status}` : '预览'}>
-            {previewUrl ? (
-              <div className="jz-col" style={{ gap: 8 }}>
-                {job?.outputs?.[0]?.role === 'video' ? (
-                  <video src={previewUrl} controls style={{ width: '100%', borderRadius: 6 }} />
-                ) : (
-                  <img src={previewUrl} alt="渲染结果" style={{ width: '100%', borderRadius: 6 }} />
-                )}
-                <div className="jz-row" style={{ gap: 8 }}>
-                  <a href={previewUrl} download className="jz-sm">下载</a>
-                  <span className="jz-xs jz-muted">{job?.outputs?.[0]?.rel}</span>
-                </div>
-              </div>
-            ) : busy ? (
-              <div className="jz-col" style={{ alignItems: 'center', gap: 10, padding: 60 }}>
-                <Icon name="video" size={40} />
-                <div className="jz-muted">渲染中…（5 秒片约 2—6 分钟）</div>
-                <div className="jz-xs jz-mono">{job?.id?.slice(0, 20)}…</div>
-              </div>
-            ) : (
-              <div className="jz-col" style={{ alignItems: 'center', gap: 10, padding: 60 }}>
-                <Icon name="video" size={40} />
-                <div className="jz-muted">选好素材与参数，点「开始渲染」。</div>
-              </div>
-            )}
-          </Panel>
-
-          {/* ---------------- 右：参数 ---------------- */}
-          <div className="jz-col" style={{ gap: 'var(--jz-sp-4)' }}>
-            <Panel title="参数">
-              <Field label="模式">
-                <Select<string> value={mode} onChange={setMode} options={MODES} />
-              </Field>
-              <Field label="画风">
-                <Select<string>
-                  value={styleId}
-                  onChange={setStyleId}
-                  options={styles.map((s) => ({ value: s.id, label: s.name }))}
-                />
-              </Field>
-              <Field label="时长（秒）">
-                <Input value={durationSec} onChange={(e) => setDurationSec(e.target.value)} mono />
-              </Field>
-              <Field label="画幅">
-                <Select<string>
-                  value={ratio}
-                  onChange={setRatio}
-                  options={['16:9', '9:16', '1:1', '4:3', '3:4'].map((v) => ({ value: v, label: v }))}
-                />
-              </Field>
-              <Field label="档位">
-                <Select<string>
-                  value={profile}
-                  onChange={setProfile}
-                  options={profileOptions()}
-                />
-              </Field>
-              <Field label="种子（留空随机）">
-                <Input value={seed} onChange={(e) => setSeed(e.target.value)} mono />
-              </Field>
-              <Field label="参考图保真" hint="max 一致性更好但明显更慢；12G 显存谨慎使用">
-                <Select<'match' | 'max'>
-                  value={refImageSize}
-                  onChange={setRefImageSize}
-                  options={[
-                    { value: 'match', label: '跟随生成面积（快）' },
-                    { value: 'max', label: '最高保真（慢）' },
-                  ]}
-                />
-              </Field>
-              <Field label="环境声" hint="H3 要求这一项不能为空">
-                <Input value={soundscape} onChange={(e) => setSoundscape(e.target.value)}
-                  placeholder="雨声、远处车流、轻柔空气声" />
-              </Field>
-              <Field label="配乐（留空=无）">
-                <Input value={music} onChange={(e) => setMusic(e.target.value)} placeholder="N/A" />
-              </Field>
-              <Field label="自定义画风（英文，覆盖画风选择）">
-                <Input value={customStyle} onChange={(e) => setCustomStyle(e.target.value)}
-                  placeholder="90s OVA, cel animation, high saturation" />
-              </Field>
-            </Panel>
-
-            {/* 3D 走位 —— Blender 渲染的输入
-                没有这块数据时 Blender 只能渲"默认两人对峙"，等于没用。
-                坐标系 (x, y=高度, z=深度)；单位米。 */}
-            <Panel
-              title={`3D 走位（${actors.length} 人）`}
-              actions={(
-                <Button onClick={() => setStagingOpen((v) => !v)}>
-                  {stagingOpen ? '收起' : '编辑'}
-                </Button>
-              )}
-            >
-              {restoredShot ? (
-                <div className="jz-xs jz-muted" style={{ marginBottom: 6 }}>
-                  已从磁盘回填镜头「{restoredShot}」的走位与素材（改完保存会更新同一条，不再新建）。
-                </div>
-              ) : null}
-              {!actors.length ? (
-                <div className="jz-xs jz-muted">
-                  还没配走位。Blender 渲控制视频时会用「默认两人对峙」占位——
-                  那只能验证链路，不能当真实预演。点「编辑」加角色。
-                </div>
-              ) : (
-                <div className="jz-col" style={{ gap: 6 }}>
-                  {actors.map((a, i) => (
-                    <div key={i} className="jz-row" style={{ gap: 6, justifyContent: 'space-between' }}>
-                      <span className="jz-sm">
-                        {a.name} · {a.heightM}m · {a.action}
-                      </span>
-                      <span className="jz-xs jz-muted jz-mono">
-                        [{a.position.map((v) => v.toFixed(1)).join(', ')}]
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {stagingOpen ? (
-                <div className="jz-col" style={{ gap: 10, marginTop: 10 }}>
-                  {actors.map((a, i) => (
-                    <div key={i} className="jz-card" style={{ padding: 8 }}>
-                      <div className="jz-row" style={{ gap: 6, marginBottom: 6 }}>
-                        <Input
-                          value={a.name}
-                          onChange={(e) => updateActor(i, { name: e.target.value })}
-                          placeholder="角色名"
-                        />
-                        <Button variant="danger" onClick={() => removeActor(i)}>删除</Button>
-                      </div>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px,1fr))', gap: 6 }}>
-                        <Field label="身高(m)">
-                          <Input value={String(a.heightM)} mono
-                            onChange={(e) => updateActor(i, { heightM: Number(e.target.value) || 1.72 })} />
-                        </Field>
-                        <Field
-                          label="动作"
-                          hint={
-                            a.assetRel
-                              ? '已选外部模型：动作由模型自带 Action 驱动，这里只做整体位移'
-                              : undefined
-                          }
-                        >
-                          <Select<string>
-                            value={a.action}
-                            onChange={(v) => updateActor(i, { action: v })}
-                            options={
-                              a.assetRel
-                                ? [{ value: a.action, label: a.action || '（模型自带动作）' }]
-                                : actionOptions
-                            }
-                          />
-                        </Field>
-                        <Field label="X（左右）">
-                          <Input value={String(a.position[0])} mono
-                            onChange={(e) => updateActorPos(i, 0, Number(e.target.value) || 0)} />
-                        </Field>
-                        <Field label="Y（高度）">
-                          <Input value={String(a.position[1])} mono
-                            onChange={(e) => updateActorPos(i, 1, Number(e.target.value) || 0)} />
-                        </Field>
-                        <Field label="Z（深度）">
-                          <Input value={String(a.position[2])} mono
-                            onChange={(e) => updateActorPos(i, 2, Number(e.target.value) || 0)} />
-                        </Field>
-                      </div>
-                      {/* 导入模型（glb/fbx）—— 选中后替换程序化人偶。
-                          选了模型之后，「动作」下拉会切到该模型自带的动作列表
-                          （Mixamo 的 Action 名是 Armature|Armature|walk 这种，
-                           不给用户看名字就只能靠猜）。 */}
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px,1fr))', gap: 6, marginTop: 6 }}>
-                        <Field label="模型（可选）" hint="选 glb/fbx 后用它代替程序化人偶">
-                          <Select<string>
-                            value={a.assetRel ?? ''}
-                            onChange={(v) => void pickActorAsset(i, v)}
-                            options={[
-                              { value: '', label: '（程序化人偶）' },
-                              ...modelAssets.map((m) => ({ value: m.rel, label: m.name })),
-                            ]}
-                          />
-                        </Field>
-                        {a.assetRel ? (
-                          <Field label="模型动作" hint="导入模型自带的 Action">
-                            <Select<string>
-                              value={a.action}
-                              onChange={(v) => updateActor(i, { action: v })}
-                              options={[
-                                { value: '', label: '（不播放动作）' },
-                                ...(assetActions[a.assetRel] ?? []).map((x) => ({
-                                  value: x.name,
-                                  label: `${x.name} (${x.durationFrames}f)`,
-                                })),
-                              ]}
-                            />
-                          </Field>
-                        ) : null}
-                      </div>
-                    </div>
-                  ))}
-                  <Button onClick={addActor}>＋ 加一个角色</Button>
-                </div>
-              ) : null}
-            </Panel>
-
-            {/* 控制视频 —— H3 Fun ControlNet Union
-                与「参考视频」的区别：参考视频只是让模型"参考"运镜，
-                控制视频是逐帧约束结构（深度/姿态/边缘），会真的跟着走。
-                实测见 docs/probes/h3-controlnet-2026-11-14/ */}
-            <Panel title="控制视频（结构约束）">
-              <Field label="控制视频" hint="留空=不启用。选中素材库里的视频，通常由 Blender/预演导出的 depth/pose 序列">
-                <Select<string>
-                  value={controlRel}
-                  onChange={setControlRel}
-                  options={[
-                    { value: '', label: '（不启用）' },
-                    ...assets
-                      .filter((a) => /\.(mp4|webm|mov)$/i.test(a.rel ?? ''))
-                      .map((a) => ({ value: a.rel ?? '', label: a.name })),
-                  ]}
-                />
-              </Field>
-
-              {/* 用 Blender 现渲一路控制序列。
-                  为什么放在这里：用户的心智是"给我一个控制视频"，
-                  而不是"先去另一个页面渲染，再回来选文件"。 */}
-              <div className="jz-row" style={{ gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
-                <span className="jz-xs jz-muted">用 Blender 现渲：</span>
-                {['depth', 'pose', 'canny', 'gray'].map((m) => (
-                  <Button
-                    key={m}
-                    disabled={Boolean(blenderBusy)}
-                    onClick={() => void renderWithBlender(m)}
-                  >
-                    {blenderBusy === m ? '渲染中…' : m}
-                  </Button>
-                ))}
-              </div>
-              {blenderMsg ? <div className="jz-xs jz-muted" style={{ marginTop: 4 }}>{blenderMsg}</div> : null}
-
-              {controlRel ? (
-                <>
-                  <Field label="控制强度" hint="1.0 起调；画面发僵往下调，控制不住往上调">
-                    <Input value={controlStrength} onChange={(e) => setControlStrength(e.target.value)} mono />
-                  </Field>
-                  <Field label="生效区间（去噪百分比）" hint="0—0.8 = 前 80% 受控，尾部留给模型补细节">
-                    <div className="jz-row" style={{ gap: 6 }}>
-                      <Input value={controlStart} onChange={(e) => setControlStart(e.target.value)} mono />
-                      <span className="jz-muted">→</span>
-                      <Input value={controlEnd} onChange={(e) => setControlEnd(e.target.value)} mono />
-                    </div>
-                  </Field>
-                  <div className="jz-xs jz-muted">
-                    控制视频会逐帧约束结构与运动；提示词请描述**画面里真实存在的东西**
-                    （人数、主要道具、机位方向），否则前几秒会被提示词抢走。
-                  </div>
-                </>
-              ) : null}
-            </Panel>
-
-            <Panel title="预算">
-              {budget ? (
-                <KeyValue rows={[
-                  { key: '角色卡', value: `${budget.cardsWithImage} 张有图` },
-                  { key: '参考图合计', value: `${budget.total} / ${budget.limit}` },
-                  { key: '剩余名额', value: String(budget.remaining) },
-                  {
-                    key: '保真档位',
-                    value: plan?.refImageSizeDowngraded
-                      ? `已降级（请求 ${plan.refImageSizeRequested}）`
-                      : (plan?.refImageSize ?? 'match'),
-                  },
-                  ...(budget.cardsWithoutImage ? [{ key: '无图角色', value: String(budget.cardsWithoutImage) }] : []),
-                ]} />
-              ) : <div className="jz-sm jz-muted">—</div>}
-            </Panel>
-          </div>
-        </div>
-
-        {/* ---------------- 底部：提示词编辑器 ---------------- */}
-        <Panel title={`提示词 ${compiled ? `（${compiled.chars} 字）` : ''}`}>
-          <div className="jz-row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
-            <div className="jz-row" style={{ gap: 8 }}>
-              <Badge tone="ok">{compiled?.mode ?? mode}</Badge>
-              {(compiled?.warnings ?? []).length ? <Badge tone="warn">{compiled?.warnings.length} 条警告</Badge> : null}
-            </div>
-            <Button onClick={() => setEditorOpen((v) => !v)}>
-              {editorOpen ? '收起' : '展开编辑'}
-            </Button>
-          </div>
-
-          {editorOpen ? (
-            <div className="jz-col" style={{ gap: 8 }}>
-              <div className="jz-row" style={{ gap: 8, flexWrap: 'wrap' }}>
-                <Button onClick={() => setUseManualPrompt(false)}>用自动编译</Button>
-                <Button onClick={() => { setManualPrompt(compiled?.prompt ?? ''); setUseManualPrompt(true); }}>
-                  改为手工编辑
-                </Button>
-                {/* 提示词模板：原来只在「工具箱」里存着，没人消费。这里接上。
-                    模板是"写作指导"，套用时插到光标处/末尾，不是覆盖全部。 */}
-                <Select<string>
-                  value=""
-                  onChange={(id) => {
-                    const tpl = templates.find((t) => t.id === id);
-                    if (!tpl) return;
-                    const cur = useManualPrompt ? manualPrompt : (compiled?.prompt ?? '');
-                    setManualPrompt(`${cur}\n\n${tpl.content}`.trim());
-                    setUseManualPrompt(true);
-                  }}
-                  options={[
-                    { value: '', label: `套用模板…（${templates.length}）` },
-                    ...templates.map((t) => ({ value: t.id, label: `${t.category} · ${t.name}` })),
-                  ]}
-                />
-              </div>
-              <Textarea
-                value={useManualPrompt ? manualPrompt : (compiled?.prompt ?? '')}
-                onChange={(e) => { setManualPrompt(e.target.value); setUseManualPrompt(true); }}
-                rows={16}
-              />
-              <div className="jz-xs jz-muted">
-                自动编译已把角色卡的文字设定填进 subject_definitions，
-                并用真实编号引用 &lt;Picture N&gt;。手工修改会覆盖这些。
-              </div>
-            </div>
-          ) : (
-            <pre className="jz-mono jz-xs" style={{
-              whiteSpace: 'pre-wrap', maxHeight: 220, overflow: 'auto',
-              background: 'var(--jz-bg-sunken)', padding: 10, borderRadius: 6, lineHeight: 1.7,
-            }}>{compiled?.prompt ?? '（编译中…）'}</pre>
-          )}
-
-          {(compiled?.warnings ?? []).length ? (
-            <div style={{ marginTop: 8 }}>
-              {compiled?.warnings.map((w, i) => <div key={i} className="jz-xs" style={{ color: 'var(--jz-warn-text)' }}>· {w}</div>)}
-            </div>
-          ) : null}
-        </Panel>
-      </div>
-      )}
-    </Page>
-  );
-}
-
-/* ========================================================================== */
-/* 成片合成 —— 把多条已生成的分段视频拼成一条                        */
-/* ========================================================================== */
-
-/**
- * 原来挂在「H3 工坊」页里的一个 tab。
- * 它做的是 ffmpeg concat + 可选字幕烧录，属于**后处理**，
- * 和"写提示词→渲染"不是一回事，但下游就在渲染之后，放同一页最顺手。
- */
-function FilmComposer() {
-  const toast = useToast();
-  const projects = useProjectStore((s) => s.projects);
-  const currentProjectId = useProjectStore((s) => s.currentProjectId);
-  const selectProject = useProjectStore((s) => s.selectProject);
-  const loadProjects = useProjectStore((s) => s.loadProjects);
-
-  const [status, setStatus] = useState<{ status: string; progress: number; message: string; ffmpeg: string; output?: string } | null>(null);
-  const [inputs, setInputs] = useState('');
-  const [output, setOutput] = useState('');
-  const [subtitle, setSubtitle] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState('');
-
-  /* 素材来源：项目已完成任务的视频产物（自动归档后可直接用） */
-  const [candidates, setCandidates] = useState<Array<{ rel: string; name: string; at: number }>>([]);
-  const [picked, setPicked] = useState<string[]>([]);
-  const [loadingCand, setLoadingCand] = useState(false);
-
-  useEffect(() => {
-    void api.h3FilmStatus()
-      .then((s) => setStatus(s as never))
-      .catch(() => setStatus(null));
-    if (!projects.length) void loadProjects();
-  }, [loadProjects, projects.length]);
-
-  /** 拉取本项目的视频产物 + 素材库里的视频 */
-  useEffect(() => {
-    if (!currentProjectId) { setCandidates([]); return; }
-    setLoadingCand(true);
-    void (async () => {
-      try {
-        const [jobs, assets] = await Promise.all([
-          api.listJobs(),
-          api.listAssets({ projectId: currentProjectId }),
-        ]);
-        const out: Array<{ rel: string; name: string; at: number }> = [];
-        // 1) 本项目任务产物
-        for (const j of (jobs as Array<{ projectId?: string; status?: string; updatedAt?: number; outputs?: { rel?: string; role?: string }[] }>)) {
-          if (j.projectId !== currentProjectId) continue;
-          if (j.status !== 'completed') continue;
-          for (const o of (j.outputs ?? [])) {
-            if (o?.rel && (o.role === 'video' || /\.(mp4|webm|mov)$/i.test(o.rel))) {
-              out.push({ rel: o.rel, name: o.rel.split('/').pop() ?? o.rel, at: j.updatedAt ?? 0 });
-            }
-          }
-        }
-        // 2) 素材库里的视频
-        for (const a of (assets as Array<{ rel?: string; name?: string; kind?: string }>)) {
-          if (a.kind === 'video' && a.rel && !out.some((x) => x.rel === a.rel)) {
-            out.push({ rel: a.rel, name: a.name ?? a.rel, at: 0 });
-          }
-        }
-        out.sort((x, y) => x.at - y.at);
-        setCandidates(out);
-      } catch { /* ignore */ } finally { setLoadingCand(false); }
-    })();
-  }, [currentProjectId]);
-
-  /* 手工填的路径（保留，用于外部文件） */
-  const manualList = inputs.split('\n').map((s) => s.trim()).filter(Boolean);
-
-  async function run() {
-    setErr('');
-    // 勾选的按顺序 + 手工填的（绝对路径）
-    const list = [
-      ...picked,
-      ...manualList,
-    ];
-    if (!list.length) { setErr('至少勾选或填写一个视频'); return; }
-    setBusy(true);
-    try {
-      const r = await api.h3FilmRender({
-        inputs: list,
-        ...(output.trim() ? { output: output.trim() } : {}),
-        ...(subtitle.trim() ? { subtitleFile: subtitle.trim() } : {}),
-      }) as { message?: string };
-      toast.ok(r.message || '已提交');
-      const s = await api.h3FilmStatus();
-      setStatus(s as never);
-    } catch (e) {
-      setErr(describeError(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function move(idx: number, dir: -1 | 1) {
-    const next = [...picked];
-    const to = idx + dir;
-    if (to < 0 || to >= next.length) return;
-    [next[idx], next[to]] = [next[to], next[idx]];
-    setPicked(next);
-  }
-
-  return (
-    <div className="jz-split">
-      <div className="jz-col" style={{ gap: 'var(--jz-sp-4)' }}>
-        <Panel title="选择片段">
+      {/* 顶栏 */}
+      <Panel flush tight>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'end', flexWrap: 'wrap', padding: 12 }}>
           <Field label="项目">
-            <Select<string>
+            <Select
               value={currentProjectId ?? ''}
-              onChange={(v) => { void selectProject(v); setPicked([]); }}
+              onChange={(v) => selectProject(v || null)}
               options={[
-                { value: '', label: projects.length ? '请选择…' : '（还没有项目）' },
-                ...projects.map((p) => ({ value: p.id, label: p.name })),
+                { value: '', label: '（未选择）' },
+                ...projects.map((p) => ({ value: p.id, label: p.name ?? p.id })),
               ]}
             />
           </Field>
-
-          <div className="jz-xs jz-muted" style={{ margin: '8px 0' }}>
-            可用片段（项目已完成任务的视频 + 素材库视频）。
-            {loadingCand ? ' 载入中…' : ` 共 ${candidates.length} 段。`}
-          </div>
-
-          <div className="jz-col" style={{ gap: 4, maxHeight: 220, overflow: 'auto' }}>
-            {candidates.map((c) => {
-              const on = picked.includes(c.rel);
-              return (
-                <button
-                  key={c.rel}
-                  type="button"
-                  onClick={() => setPicked((p) => (on ? p.filter((x) => x !== c.rel) : [...p, c.rel]))}
-                  className="jz-card"
-                  style={{
-                    padding: '5px 8px', textAlign: 'left', cursor: 'pointer',
-                    borderColor: on ? 'var(--jz-accent)' : undefined,
-                    borderWidth: on ? 2 : 1,
-                  }}
-                >
-                  <span className="jz-xs jz-truncate">{c.name}</span>
-                </button>
-              );
-            })}
-            {!candidates.length && !loadingCand ? (
-              <div className="jz-sm jz-muted">这个项目还没有已完成的视频。</div>
-            ) : null}
-          </div>
-
-          {picked.length ? (
-            <div style={{ marginTop: 10 }}>
-              <div className="jz-xs jz-muted" style={{ marginBottom: 4 }}>拼接顺序：</div>
-              {picked.map((rel, i) => (
-                <div key={rel} className="jz-row" style={{ gap: 6, justifyContent: 'space-between' }}>
-                  <span className="jz-xs jz-truncate" style={{ flex: 1 }}>{i + 1}. {rel.split('/').pop()}</span>
-                  <button type="button" onClick={() => move(i, -1)} disabled={i === 0}>↑</button>
-                  <button type="button" onClick={() => move(i, 1)} disabled={i === picked.length - 1}>↓</button>
-                  <button type="button" onClick={() => setPicked((p) => p.filter((x) => x !== rel))}>×</button>
-                </div>
-              ))}
-            </div>
-          ) : null}
-
-          <Field label="额外文件（可选，每行一个绝对路径）">
-            <Textarea value={inputs} onChange={(e) => setInputs(e.target.value)} mono rows={3}
-              placeholder={'F:\\…\\外部片段.mp4'} />
+          <Field label="预设">
+            <Select
+              value={presetId}
+              onChange={setPresetId}
+              options={presets.map((p) => ({ value: p.id, label: p.label }))}
+            />
           </Field>
-        </Panel>
-      </div>
-
-      <div className="jz-col" style={{ gap: 'var(--jz-sp-4)' }}>
-        <Panel title="输出">
-          <Field label="输出文件名">
-            <Input value={output} onChange={(e) => setOutput(e.target.value)} placeholder="film.mp4" />
+          <Field label="模式">
+            <Select value={mode} onChange={setMode} options={MODES.map((m) => ({ value: m.id, label: m.label }))} />
           </Field>
-          <Field label="字幕文件（.srt，可选）">
-            <Input value={subtitle} onChange={(e) => setSubtitle(e.target.value)} mono />
+          <Field label="画风">
+            <Select
+              value={styleId}
+              onChange={setStyleId}
+              options={styles.map((s) => ({ value: s.id, label: `${s.name}（${s.category}）` }))}
+            />
           </Field>
-          {err ? <Alert tone="danger">{err}</Alert> : null}
-          <Button variant="primary" block loading={busy} onClick={() => void run()} disabled={busy}>
-            {busy ? '合成中…' : `合成 ${picked.length + manualList.length} 段`}
-          </Button>
-        </Panel>
-
-        <Panel title="状态">
-          {status ? (
-            <KeyValue rows={[
-              { key: 'ffmpeg', value: status.ffmpeg === 'ready' ? '就绪' : '缺失' },
-              { key: '状态', value: status.status },
-              { key: '进度', value: `${status.progress}%` },
-              ...(status.message ? [{ key: '消息', value: status.message }] : []),
-              ...(status.output ? [{ key: '输出', value: status.output }] : []),
-            ]} />
-          ) : <div className="jz-sm jz-muted">—</div>}
-        </Panel>
-      </div>
-    </div>
-  );
-}
-
-/* ========================================================================== */
-/* 参考视频 / 音频选择器                                                       */
-/* ========================================================================== */
-
-/**
- * 从素材库勾选参考视频与音频。
- *
- * H3 的参考输入有四类（见 docs/H3参考输入契约.md）：
- *   ref_images / ref_videos / ref_video_audios / ref_audios
- *
- * 这里的"视频自带音轨"开关很重要：开了它，这段视频的音轨会占用一个
- * `<Audio>` 编号，后面独立音频的编号会顺延。关掉则不占用。
- */
-function MediaPicker({
-  assets, videos, audios, onVideos, onAudios,
-}: {
-  assets: AssetItem[];
-  videos: MediaPick[];
-  audios: MediaPick[];
-  onVideos: (v: MediaPick[]) => void;
-  onAudios: (v: MediaPick[]) => void;
-}) {
-  const videoAssets = assets.filter((a) => a.kind === 'video');
-  const audioAssets = assets.filter((a) => a.kind === 'audio');
-
-  const toggle = (list: MediaPick[], set: (v: MediaPick[]) => void, a: AssetItem) => {
-    const rel = a.rel ?? '';
-    if (!rel) return;
-    if (list.some((x) => x.rel === rel)) set(list.filter((x) => x.rel !== rel));
-    else if (list.length >= 3) return;   // H3 上限 3
-    else set([...list, { rel, name: a.name, hasAudio: true }]);
-  };
-
-  return (
-    <>
-      <Panel title={`参考视频（${videos.length}/3）`}>
-        {videoAssets.length === 0 ? (
-          <div className="jz-sm jz-muted">素材库里没有视频。先用「素材库」上传，或从画布/渲染页生成后自动归档。</div>
-        ) : (
-          <div className="jz-col" style={{ gap: 6 }}>
-            {videoAssets.map((a) => {
-              const hit = videos.find((v) => v.rel === a.rel);
-              const on = Boolean(hit);
-              return (
-                <div key={a.id} className="jz-col" style={{ gap: 3 }}>
-                  <button
-                    type="button"
-                    onClick={() => toggle(videos, onVideos, a)}
-                    className="jz-card"
-                    style={{
-                      padding: '6px 8px', textAlign: 'left', cursor: 'pointer',
-                      borderColor: on ? 'var(--jz-accent)' : undefined,
-                      borderWidth: on ? 2 : 1,
-                    }}
-                  >
-                    <div className="jz-row" style={{ justifyContent: 'space-between', gap: 6 }}>
-                      <b className="jz-xs jz-truncate">{a.name}</b>
-                      {on ? <Badge tone="ok">V{videos.findIndex((v) => v.rel === a.rel) + 1}</Badge> : null}
-                    </div>
-                  </button>
-                  {on ? (
-                    <label className="jz-xs jz-muted" style={{ marginLeft: 8 }}>
-                      <input
-                        type="checkbox"
-                        checked={hit?.hasAudio !== false}
-                        onChange={(e) => onVideos(videos.map((v) => (
-                          v.rel === a.rel ? { ...v, hasAudio: e.target.checked } : v
-                        )))}
-                      />{' '}
-                      带上音轨（会占用一个 &lt;Audio&gt; 编号）
-                    </label>
-                  ) : null}
-                </div>
-              );
-            })}
+          <Field label="打光（光比）">
+            <Select
+              value={lightingId}
+              onChange={setLightingId}
+              options={lightings.map((l) => ({
+                value: l.id,
+                label: l.ratio ? `${l.name} · ${l.ratio}` : l.name,
+              }))}
+            />
+          </Field>
+          <Field label="加速">
+            <Select
+              value={accelPlanId}
+              onChange={setAccelPlanId}
+              options={accelPlans.map((p) => ({
+                value: p.id,
+                label: p.lora ? `${p.label} · ${p.steps}步` : p.label,
+              }))}
+            />
+          </Field>
+          <Field label="时长（秒）">
+            <Input
+              type="number"
+              value={durationSec}
+              onChange={(e) => setDurationSec(e.target.value)}
+              mono
+            />
+          </Field>
+          <Field label="种子（留空随机）">
+            <Input value={seed} onChange={(e) => setSeed(e.target.value)} mono />
+          </Field>
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+            <Badge tone={eventsConnected() ? 'ok' : 'default'}>
+              {eventsConnected() ? '实时同步' : '离线'}
+            </Badge>
+            {changedTotal > 0 ? <Badge tone="accent">已改 {changedTotal} 项</Badge> : null}
+            <Button onClick={() => void handleRender()} disabled={submitting}>
+              {submitting ? '提交中…' : '开始渲染'}
+            </Button>
           </div>
-        )}
-      </Panel>
-
-      <Panel title={`参考音频（${audios.length}/3）`}>
-        {audioAssets.length === 0 ? (
-          <div className="jz-sm jz-muted">素材库里没有音频。</div>
-        ) : (
-          <div className="jz-col" style={{ gap: 6 }}>
-            {audioAssets.map((a) => {
-              const on = audios.some((x) => x.rel === a.rel);
-              return (
-                <button
-                  key={a.id}
-                  type="button"
-                  onClick={() => toggle(audios, onAudios, a)}
-                  className="jz-card"
-                  style={{
-                    padding: '6px 8px', textAlign: 'left', cursor: 'pointer',
-                    borderColor: on ? 'var(--jz-accent)' : undefined,
-                    borderWidth: on ? 2 : 1,
-                  }}
-                >
-                  <div className="jz-row" style={{ justifyContent: 'space-between', gap: 6 }}>
-                    <b className="jz-xs jz-truncate">{a.name}</b>
-                    {on ? <Badge tone="ok">已选</Badge> : null}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        )}
-        <div className="jz-xs jz-muted" style={{ marginTop: 6 }}>
-          音频用于音色/氛围参考。注意：视频音轨会先占 &lt;Audio&gt; 编号，独立音频顺延。
         </div>
       </Panel>
-    </>
+
+      {/* 三栏 */}
+      <div style={{ display: 'grid', gridTemplateColumns: '240px 1fr 420px', gap: 12 }}>
+        {/* 左：素材 */}
+        <div style={{ display: 'grid', gap: 12, alignContent: 'start' }}>
+          <Panel title="镜头" tight>
+            <div style={{ display: 'grid', gap: 8 }}>
+              <Select
+                value={shotId}
+                onChange={setShotId}
+                options={[
+                  { value: '', label: '（新建镜头）' },
+                  ...shots.map((s) => ({
+                    value: s.id,
+                    label: s.title || s.id,
+                  })),
+                ]}
+              />
+              <div className="jz-xs jz-muted">共 {shots.length} 个镜头</div>
+            </div>
+          </Panel>
+
+          <AssetPicker
+            assets={assets}
+            images={images}
+            videos={videos}
+            audios={audios}
+            onImages={setImages}
+            onVideos={setVideos}
+            onAudios={setAudios}
+            onRefresh={() => void loadAssets()}
+          />
+        </div>
+
+        {/* 中：提示词 */}
+        <div style={{ display: 'grid', gap: 12, alignContent: 'start' }}>
+          <Panel title="提示词">
+            <textarea
+              className="jz-input"
+              rows={14}
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder={'[Shot 1] 00:00.000，[景别] [主体]，[动作]。The camera [运镜]…'}
+              style={{ width: '100%', resize: 'vertical', fontFamily: 'inherit' }}
+            />
+          </Panel>
+
+          <Panel title="将提交的参数" tight>
+            <div className="jz-xs jz-muted" style={{ lineHeight: 1.8 }}>
+              预设：<b>{presets.find((p) => p.id === presetId)?.label ?? presetId}</b>
+              <br />
+              画风：<b>{styles.find((s) => s.id === styleId)?.name ?? styleId}</b>
+              {' · '}
+              打光：<b>{lightings.find((l) => l.id === lightingId)?.name ?? '不指定'}</b>
+              <br />
+              加速：<b>{accelPlans.find((p) => p.id === accelPlanId)?.label ?? accelPlanId}</b>
+              {(() => {
+                const a = accelPlans.find((p) => p.id === accelPlanId);
+                if (!a) return null;
+                return a.lora
+                  ? `（${a.steps} 步 · ${a.lora.replace(/\.safetensors$/, '')}）`
+                  : `（${a.steps} 步 · 无 LoRA）`;
+              })()}
+              <br />
+              二采：
+              <b>{effectiveValues['启用H3潜空间放大二采'] ? '开' : '关'}</b>
+              {effectiveValues['启用H3潜空间放大二采']
+                ? `（${String(effectiveValues['H3一采步数'])}步 → ${String(effectiveValues['H3潜空间目标百万像素'])}MP → ${String(effectiveValues['H3二采步数'])}步）`
+                : ''}
+              <br />
+              采样：{String(effectiveValues['采样器'])} + {String(effectiveValues['调度器'])} ·{' '}
+              {String(effectiveValues['采样步数'])} 步
+              <br />
+              画布：{String(effectiveValues['百万像素'])} MP · {String(effectiveValues['画面比例'])}
+            </div>
+          </Panel>
+
+          <ContinuationPanel
+            projectId={currentProjectId}
+            shots={shots}
+            onSubmitted={() => void loadShots(currentProjectId ?? '')}
+          />
+
+          {inertCount > 0 ? (
+            <Panel title="参数说明" tight>
+              <div className="jz-xs jz-muted" style={{ lineHeight: 1.7 }}>
+                南风 V15 的 217 个参数里，有 <b>{inertCount}</b> 个在本版本上
+                <b>不产生任何效果</b>或<b>缺少依赖会直接报错</b>（已在上游源码核实）。
+                它们默认折叠，可在右侧面板勾选「显示无效参数」查看。
+                <br />
+                典型代表：<code>启用高清二采</code>（上游硬编码 False）、
+                <code>启用双采样</code>（分支写死）、
+                <code>启用H3 SLA</code> / <code>启用RTX视频超分</code> / <code>启用TRT视频VAE</code>
+                （本机缺插件）。
+                <br />
+                真正管画质的是 <b>H3 潜空间放大二采</b>（一采 → 潜空间放大 → 二采）。
+              </div>
+            </Panel>
+          ) : null}
+        </div>
+
+        {/* 右：参数面板 */}
+        <div style={{ display: 'grid', gap: 8, alignContent: 'start' }}>
+          <Panel tight>
+            <div style={{ display: 'grid', gap: 8 }}>
+              <Input
+                placeholder="搜索参数名 / 说明，例如「二采」「注意力」「LoRA」"
+                value={paramFilter}
+                onChange={(e) => setParamFilter(e.target.value)}
+              />
+              <div style={{ display: 'flex', gap: 8 }}>
+                <Button
+                  variant="ghost"
+                  onClick={() => setShowReference((v) => !v)}
+                >
+                  {showReference ? '收起参数速查' : '参数速查表'}
+                </Button>
+                {paramFilter ? (
+                  <Button variant="ghost" onClick={() => setParamFilter('')}>清空搜索</Button>
+                ) : null}
+              </div>
+            </div>
+          </Panel>
+
+          {showReference && schema ? (
+            <Panel title="参数速查表" tight>
+              <ParamReference params={schema.params} groups={schema.groups} />
+            </Panel>
+          ) : null}
+
+          {schema ? (
+            <NanfengParams
+              params={schema.params}
+              groups={schema.groups}
+              values={effectiveValues}
+              onChange={setParam}
+              filter={paramFilter}
+            />
+          ) : null}
+        </div>
+      </div>
+    </Page>
   );
 }
 

@@ -39,12 +39,10 @@ const MODEL_DEFAULTS = Object.freeze({
   // H3 是音画同步模型：采样器输出的是 AV latent，音轨要从 audio VAE 解出来。
   // 早先工作流只接了视频 VAEDecode，音轨被整个丢弃（产物没有音轨）。
   AUDIO_VAE: 'minimax_h3_audio_vae_fp32.safetensors',
-  LORA_REF: 'minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors',
-  LORA_FL2V: 'minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors',
-  // Fun ControlNet Union 2.0（int8 剪枝版）。未安装时控制视频通道自动关闭，
-  // 生成退回纯 Ref2VA（不报错、不影响其它功能）。
-  // 实测：4.22 GB，12GB 显存可跑，单镜 +83% 耗时。
-  CONTROL_PATCH: 'minimax_h3_fun_controlnet_union_2.0_pruned_int8_convrot.safetensors',
+  // LoRA 由加速方案（accel-plan.js）给出，这里只是 ComfyUI 列表探测用的默认名。
+  // 实际用哪个见 planForShot() 的返回；这两项保留是为了 resolveModelNames 的键完整。
+  LORA_REF: 'dmad_minimax_h3_8step_full_critic_comfyui.safetensors',
+  LORA_FL2V: 'dmad_minimax_h3_8step_full_critic_comfyui.safetensors',
 });
 
 /** 量化偏好顺序（越靠前越优先）：显存友好 → 精度更高 */
@@ -99,10 +97,6 @@ const VAE_NAME = MODEL_DEFAULTS.VAE;
 const AUDIO_VAE_NAME = MODEL_DEFAULTS.AUDIO_VAE;
 const LORA_REF = MODEL_DEFAULTS.LORA_REF;
 const LORA_FL2V = MODEL_DEFAULTS.LORA_FL2V;
-
-/** 控制视频默认参数（实测起始值，见 docs/probes/h3-controlnet-2026-11-14/REPORT.md） */
-const CONTROL_DEFAULTS = Object.freeze({ strength: 1.0, startPercent: 0.0, endPercent: 0.8 });
-const CONTROL_PATCH_NAME = MODEL_DEFAULTS.CONTROL_PATCH;
 
 /**
  * 解析镜头的参考图绝对路径（**提交顺序即提示词里的 <Picture N> 顺序**）。
@@ -217,7 +211,7 @@ export function resolveRefImages(shot, cfg = loadConfig(), opts = {}) {
   return out;
 }
 
-/** 从镜头卡 previz 绑定解析首尾帧/控制视频 */
+/** 从镜头卡 previz 绑定解析首尾帧 */
 export function resolvePrevizArtifacts(shot, cfg = loadConfig()) {
   const out = {};
   const p = shot?.previz;
@@ -231,38 +225,7 @@ export function resolvePrevizArtifacts(shot, cfg = loadConfig()) {
   };
   if (p.firstFramePath) out['{{FIRST_FRAME}}'] = abs(p.firstFramePath);
   if (p.lastFramePath) out['{{LAST_FRAME}}'] = abs(p.lastFramePath);
-  if (p.controlVideoPath) out['{{CONTROL_VIDEO}}'] = abs(p.controlVideoPath);
   return out;
-}
-
-/**
- * 解析镜头卡上的控制视频配置。
- *
- * 支持两处写法（后者优先）：
- *   1. `shot.control`  —— 新字段，结构化
- *   2. `shot.previz.controlVideoPath` —— 历史写法，只有路径
- *
- * 返回 null 表示不启用控制视频通道。**这是唯一判定入口**，
- * generator 里不要再各自判断一遍，避免"预览说有控制、实际没接"的漂移。
- */
-export function resolveControl(shot) {
-  const c = shot?.control;
-  const legacyPath = shot?.previz?.controlVideoPath;
-  const rel = (c && typeof c.videoRel === 'string' && c.videoRel) || legacyPath || '';
-  if (!rel) return null;
-  const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
-  const clamp01 = (v) => Math.min(1, Math.max(0, v));
-  const start = clamp01(num(c?.startPercent, CONTROL_DEFAULTS.startPercent));
-  const end = clamp01(num(c?.endPercent, CONTROL_DEFAULTS.endPercent));
-  return {
-    videoRel: rel,
-    // 实测：<1 时控制偏弱；画面发僵就往下调，漂移就往上调
-    strength: Math.min(10, Math.max(0, num(c?.strength, CONTROL_DEFAULTS.strength))),
-    startPercent: Math.min(start, end),
-    endPercent: Math.max(start, end),
-    // 仅用于展示/提示词，不参与引擎分派（Union 模型不区分类型）
-    type: typeof c?.type === 'string' ? c.type : '',
-  };
 }
 
 /**
@@ -362,18 +325,6 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
 
   const refList = resolveRefImages(shot, cfg);
   const previz = resolvePrevizArtifacts(shot, cfg);
-  const control = resolveControl(shot);
-  // 控制视频路径 → 绝对路径（不存在就当没配，不炸整镜）
-  const controlAbs = control
-    ? (() => {
-      try {
-        const a = path.isAbsolute(control.videoRel)
-          ? control.videoRel
-          : safeJoin(cfg.dataDir, control.videoRel);
-        return fs.existsSync(a) ? a : '';
-      } catch { return ''; }
-    })()
-    : '';
 
   // 角色卡的文字设定注入提示词。
   // 关键：把"这张卡是第几张参考图"算准，模型才知道该看哪张。
@@ -395,7 +346,6 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
   const toStage = {
     ...Object.fromEntries(refList.map((r) => [r.key, r.abs])),
     ...previz,
-    ...(control ? { '{{CONTROL_VIDEO}}': controlAbs } : {}),
     ...Object.fromEntries(videoEntries.map((v) => [v.key, v.abs])),
     ...Object.fromEntries(audioEntries.map((a) => [a.key, a.abs])),
   };
@@ -405,8 +355,6 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
     || videoEntries.length > 0
     || audioEntries.length > 0;
   const useFirstLast = Boolean(staged['{{FIRST_FRAME}}'] || staged['{{LAST_FRAME}}']);   // 供日志/计划展示
-  // 控制视频必须真的 stage 成功才接线；否则模板里的 60/61/62/63 会被下面的清理删掉
-  const useControl = Boolean(control && staged['{{CONTROL_VIDEO}}']);
 
   // 模型名：优先用 ComfyUI 实际可用的文件（用户可能装的是 int8 而非 fp8）。
   const modelFiles = await comfy.listModelFiles(cfg).catch(() => ({ ok: false }));
@@ -419,7 +367,6 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
     AUDIO_VAE: available.vae,
     LORA_REF: available.loras,
     LORA_FL2V: available.loras,
-    CONTROL_PATCH: available.model_patches,
   });
 
   /* ============================================================ 加速方案
@@ -428,14 +375,14 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
    * 两个方案族的技术差异、以及"DMAD 不改变任何输入约束"的实测结论）。
    *
    * 优先级：job 显式指定 > 镜头卡 > 配置默认 > 内置默认。
-   * 这样单镜可以覆盖（比如某镜要最锐就用 lightx2v），
+   * 这样单镜可以覆盖（比如某镜要快就用 dmad4），
    * 同时全局默认由 config.accelPlan 决定。
    */
   const accelId = job.params?.accelPlan
     ?? shot.accelPlan
     ?? cfg.accelPlan
     ?? DEFAULT_ACCEL_PLAN;
-  const accel = planForShot(accelId, useRef);
+  const accel = planForShot(accelId);
 
   // 步数：job 传了就以 job 为准（但要校验并记录警告），否则用方案的训练步数
   const wantSteps = job.params?.steps;
@@ -463,35 +410,6 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
     shiftAudio: accel.shiftAudio,
   };
 
-  // 控制模型可用性判定。
-  //
-  // ⚠️ 三态而不是二态（历史缺陷）：
-  //    旧写法 `!available.model_patches?.length` 把"**探测失败**"（ComfyUI
-  //    不可达 → 空对象）和"**确实没装**"混为一谈，都当成"视为 OK"，
-  //    于是硬提交一个不存在的模型名 → ComfyUI 报 Value not in list。
-  //    正确语义：
-  //      · 探测成功 + 列表里有该文件   → 启用
-  //      · 探测成功 + 列表里没有       → 静默关闭（并记录原因）
-  //      · 探测**失败**（无法确认）   → 关闭并记录"无法确认"，不要瞎猜
-  const probeOk = modelFiles?.ok === true;
-  const patchList = Array.isArray(available.model_patches) ? available.model_patches : [];
-  let controlPatchOk = false;
-  let controlSkipReason = '';
-  if (!useControl) {
-    controlPatchOk = true;                       // 没启用，无所谓
-  } else if (!probeOk) {
-    controlPatchOk = false;
-    controlSkipReason = '无法确认控制模型是否已安装（ComfyUI 未返回模型列表）';
-  } else if (!patchList.length) {
-    controlPatchOk = false;
-    controlSkipReason = `控制模型目录里没有任何文件（需要 ${NAMES.CONTROL_PATCH}）`;
-  } else if (!patchList.includes(NAMES.CONTROL_PATCH)) {
-    controlPatchOk = false;
-    controlSkipReason = `缺少控制模型 ${NAMES.CONTROL_PATCH}（已装 ${patchList.length} 个其它补丁）`;
-  } else {
-    controlPatchOk = true;
-  }
-
   const map = {
     '{{PROMPT}}': finalPrompt,
     '{{WIDTH}}': res.width,
@@ -516,7 +434,6 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
      * LoRA：由加速方案决定，不再按 ref/fl2v 硬编码。
      *
      * · dmad 家族 — 一个通用 LoRA，ref 和 fl2v 都用它
-     * · lightx2v — ref / fl2v 各一个专用 LoRA（planForShot 已按 useRef 选好）
      * · none     — 空字符串，下面的装配会把 LoRA 节点整个优化掉
      */
     '{{LORA_NAME}}': accel.lora,
@@ -527,20 +444,7 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
     '{{SCHEDULER}}': accel.scheduler,
     '{{SHIFT_VIDEO}}': accel.shiftVideo ?? 12,
     '{{SHIFT_AUDIO}}': accel.shiftAudio ?? 3,
-    // 控制视频通道（Fun ControlNet Union）。未启用时这些占位符不会被引用，
-    // 对应节点在下面被整体删除。
-    '{{CONTROL_VIDEO}}': useControl ? staged['{{CONTROL_VIDEO}}'] : '',
-    '{{CONTROL_PATCH_NAME}}': NAMES.CONTROL_PATCH,
-    '{{CONTROL_STRENGTH}}': control?.strength ?? CONTROL_DEFAULTS.strength,
-    '{{CONTROL_START}}': control?.startPercent ?? CONTROL_DEFAULTS.startPercent,
-    '{{CONTROL_END}}': control?.endPercent ?? CONTROL_DEFAULTS.endPercent,
   };
-  // 控制模型不可用 → 关掉控制通道（否则工作流提交时报 Value not in list）。
-  // 原因写进 job.params，前端/工具能原样展示，不再"静默降级"。
-  if (!controlPatchOk) {
-    job.params = { ...(job.params ?? {}), controlSkipped: controlSkipReason || '控制通道未启用' };
-    if (useControl) job.warnings = [...(job.warnings ?? []), `控制视频已跳过：${controlSkipReason}`];
-  }
 
   const names = refList.map((r) => staged[r.key]).filter(Boolean);
 
@@ -670,23 +574,16 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
     }
   }
 
-  // ---- 控制视频通道 ----
-  //
-  // 模板里带 60/61/62/63（LoadVideo / GetVideoComponents / ModelPatchLoader /
   // ======================================================== 模型链路重接
   //
-  // 采样链路现在是四段：
+  // 采样链路现在是三段：
   //
-  //     1 UNETLoader → 4 LoRA → 103 SigmaShift → 63 FunControlNet → 7/8 采样
+  //     1 UNETLoader → 4 LoRA → 103 SigmaShift → 7/8 采样
   //
   // 为什么 SigmaShift 必须在 LoRA **之后**：
   //   LoRA 改的是权重，SigmaShift 改的是 `model_sampling`（sigma 网格）与
   //   transformer_options 里的 shift 值。两者作用对象不同，但顺序上官方
-  //   DMAD 工作流与 LightX2V 工作流都是 LoRA → shift，照抄即可。
-  //
-  // 为什么 ControlNet 必须在 SigmaShift **之后**：
-  //   FunControlNetApply 输出的是新的 model patcher，它要包住最终用于采样的
-  //   model。反过来接会让 shift 补丁被控制分支覆盖掉。
+  //   DMAD 工作流就是 LoRA → shift，照抄即可。
   const shiftNodeOk = accel.needShiftNode;
   const baseModelRef = shiftNodeOk ? ['103', 0] : (accel.lora ? ['4', 0] : ['1', 0]);
 
@@ -702,22 +599,6 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
     const n = graph.get(id);
     if (n) graph.set(id, { ...n, inputs: { ...n.inputs, model: baseModelRef } });
   }
-
-  // 控制视频通道（FunControlNetApply）。启用时要把 BasicScheduler(7) 和
-  // BasicGuider(8) 的 model 从 103 改指向 63 —— 控制分支必须包在采样链路
-  // **上游**才生效，只挂一个孤立节点是没有用的。
-  const controlReady = useControl && controlPatchOk;
-  if (controlReady) {
-    for (const id of ['7', '8']) {
-      const n = graph.get(id);
-      if (n) graph.set(id, { ...n, inputs: { ...n.inputs, model: ['63', 0] } });
-    }
-    // ControlNet 的 model 输入也要接到 shift 的出口，否则它会绕过 shift
-    const cn = graph.get('63');
-    if (cn) graph.set('63', { ...cn, inputs: { ...cn.inputs, model: baseModelRef } });
-  }
-  // 未启用时不需要手工删 60..63：它们没有下游消费者，
-  // 交给下面的 pruneUnreachable 统一处理（与模板占位符走同一条规则）。
 
   // shift 节点在 `none` 方案下不需要（shiftVideo == null）：此时 7/8 直接
   // 指向 LoRA(4)，103 没有下游消费者，pruneUnreachable 会把它删掉。
@@ -777,4 +658,309 @@ export async function runH3ImageLocal({ workflow, job, prompt, shot, cfg = loadC
 /** 判断一个 job 是图像还是视频任务 */
 export function jobKind(job) {
   return job?.kind === 'image' || job?.params?.kind === 'image' ? 'image' : 'video';
+}
+
+/* ====================================================== 南风 V15 生成路径 */
+
+/**
+ * 用南风 V15 节点执行一次 H3 视频生成。
+ *
+ * ============================================================================
+ * 与 runH3Local 的区别
+ * ============================================================================
+ *
+ *   runH3Local（旧）  ：加载 data/workflows/h3.json 模板 → {{占位符}} 替换 → 提交
+ *   runH3Nanfeng（新）：镜头卡 → 217 参数 → 南风节点内部 GraphBuilder 展开 → 提交
+ *
+ * 南风节点把所有模型加载、条件编码、采样、放大、解码都封在节点内部，
+ * 我们的后端只负责：① 选预设 ② 传参 ③ 接输出节点 ④ 轮询结果。
+ *
+ * ============================================================================
+ * 必须先 stage 素材
+ * ============================================================================
+ *
+ * 南风的素材槽位（图片1-9 / 视频1-3 / 音频1-3）接受的是 **ComfyUI input 目录
+ * 内的文件名**，不是绝对路径。所以和旧实现一样，先把文件复制进 input。
+ *
+ * @param {object} opts
+ * @param {object} opts.job
+ * @param {object} opts.shot
+ * @param {string} opts.prompt            编译后的提示词
+ * @param {object} [opts.cfg]
+ * @param {'ref2va'|'t2va'|'i2va'|'fl2va'} [opts.mode]
+ * @param {string|object} [opts.preset]   预设 id 或 { inherit, overrides }
+ * @param {Record<string, unknown>} [opts.extraParams]
+ * @param {string} [opts.continuationTask] 续写任务 JSON
+ * @param {Function} [opts.onSubmitted]
+ */
+export async function runH3Nanfeng({
+  job,
+  shot,
+  prompt,
+  cfg = loadConfig(),
+  mode,
+  preset,
+  extraParams,
+  continuationTask,
+  outputsDir,
+  onSubmitted,
+}) {
+  const nanfeng = await import('./nanfeng/index.js');
+
+  /* ==================================================================
+   * 1) 加速方案（DMAD）—— 映射到南风参数
+   * ==================================================================
+   *
+   * ⚠️ 历史缺陷：这一段**完全缺失**。
+   *    `runH3Local` 有完整的 accel-plan 接线，但 `runH3Nanfeng` 是从它复制来的，
+   *    复制时漏了这一段（连同 previz 消费端 —— 同一处漏了两个）。
+   *
+   * 后果很严重但不报错：所有预设都是 `采样器: lcm` + 4-10 步，
+   * 却**不挂 DMAD LoRA** —— 等于用 LCM 采样器跑未蒸馏的 50 步原模型再硬压到 4 步。
+   * 这正是 accel-plan.js 注释反复警告的「分布外」，也是出片质量差的主因。
+   * 实测佐证：历史请求 _baseline-request.json / _final.json / _e2e-seg1.json
+   * 全部是 `启用LoRA=False, LoRA1=未选择, 采样器=lcm`。
+   *
+   * ⚠️ 南风 V15 的 LoRA 是**独立槽位**语义（h3_generator.py:1438-1439
+   *    `individual_lora_slots=True, strict_lora_opt_in=True`）：
+   *      · `启用LoRA` 总开关**无效**（:2063 的早退只对 individual=False 生效）
+   *      · 真正生效的是 `LoRA{n}启用` + `LoRA{n}` + `LoRA{n}强度`
+   *    所以必须同时写 `启用LoRA`（语义一致，便于排查）和 `LoRA1启用=true`（真正生效）。
+   *
+   * 优先级与 runH3Local 一致：job 显式 > 镜头卡 > 配置默认 > 内置默认。
+   */
+  const accelId = job.params?.accelPlan
+    ?? shot.accelPlan
+    ?? cfg.accelPlan
+    ?? DEFAULT_ACCEL_PLAN;
+  const accel = planForShot(accelId);
+
+  const wantSteps = job.params?.steps;
+  const stepCheck = wantSteps ? checkSteps(accelId, wantSteps) : { ok: true, warning: '' };
+  const steps = stepCheck.ok && Number.isFinite(Number(wantSteps))
+    ? Number(wantSteps)
+    : accel.steps;
+
+  if (accel.warnings.length) {
+    job.warnings = [...(job.warnings ?? []), ...accel.warnings];
+  }
+  if (stepCheck.warning) {
+    job.warnings = [...(job.warnings ?? []), stepCheck.warning];
+  }
+
+  /**
+   * 把加速方案翻译成南风参数覆盖。
+   *
+   * 注意 `shiftVideo/shiftAudio` **没有对应参数** —— 南风 V15 的
+   * `视频西格玛偏移` / `音频西格玛偏移` 全部挂在 `sigma_requested` 恒 False
+   * 的分支下（h3_generator.py:1687/1706），改了没反应。
+   * 这是上游限制，不是本插件能修的；在这里记录一条警告让用户知道。
+   */
+  function accelOverrides() {
+    const out = {};
+    if (accel.lora) {
+      out['启用LoRA'] = true;
+      out['LoRA1'] = accel.lora;
+      out['LoRA1启用'] = true;
+      // 蒸馏学生在 strength=1.0 是满血；降下来会让低步数去噪不足
+      out['LoRA1强度'] = 1.0;
+    } else {
+      // none 方案：显式关闭，避免沿用镜头上残留的 LoRA
+      out['启用LoRA'] = false;
+      out['LoRA1'] = '未选择';
+      out['LoRA1启用'] = false;
+    }
+    out['采样器'] = accel.sampler;
+    out['调度器'] = accel.scheduler;
+    out['采样步数'] = steps;
+    return out;
+  }
+
+  const accelParams = accelOverrides();
+
+  // shift 无法设置时明确告知（不静默）
+  if (accel.needShiftNode) {
+    job.warnings = [...(job.warnings ?? []), 
+      `加速方案 ${accel.plan.label} 要求 shift ${accel.shiftVideo}/${accel.shiftAudio}，`
+      + '但南风 V15 的 SigmaShift 分支被上游硬编码关闭，实际会用模型自带的 12/3。'
+      + 'LoRA 本身仍然生效；这是已知上游限制。',
+    ];
+  }
+
+  job.params = {
+    ...(job.params ?? {}),
+    accelPlan: accel.plan.id,
+    accelLabel: accel.plan.label,
+    accelFamily: accel.plan.family,
+    sampler: accel.sampler,
+    scheduler: accel.scheduler,
+    steps,
+    lora: accel.lora || null,
+    // 记录"shift 设不了"这个事实，前端可据此提示
+    shiftApplied: false,
+  };
+
+  // ---------- 2) 解析参考素材并 stage ----------
+  const refList = resolveRefImages(shot, cfg);
+  const previz = resolvePrevizArtifacts(shot, cfg);
+
+  const videoEntries = (Array.isArray(shot.videos) ? shot.videos : []).map((v, i) => ({
+    ...v,
+    key: v.key ?? `{{REF_VIDEO_${i + 1}}}`,
+  }));
+  const audioEntries = (Array.isArray(shot.audios) ? shot.audios : []).map((a, i) => ({
+    ...a,
+    key: a.key ?? `{{REF_AUDIO_${i + 1}}}`,
+  }));
+
+  const toStage = {
+    ...Object.fromEntries(refList.map((r) => [r.key, r.abs])),
+    ...previz,
+    ...Object.fromEntries(videoEntries.map((v) => [v.key, v.abs])),
+    ...Object.fromEntries(audioEntries.map((a) => [a.key, a.abs])),
+  };
+  const staged = await comfy.stageToComfyInput(cfg, toStage, job.id);
+
+  // ---------- 2) 把 staged 的文件名回填进镜头卡副本 ----------
+  //
+  // stagedMap: 占位符 key → ComfyUI input 内的文件名
+  // 我们要把它翻译成南风的「图片N / 视频N / 音频N」
+  const stagedImages = refList.map((r) => staged[r.key]).filter(Boolean);
+  const stagedVideos = videoEntries.map((v) => staged[v.key]).filter(Boolean);
+  const stagedAudios = audioEntries.map((a) => staged[a.key]).filter(Boolean);
+
+  /**
+   * 首尾帧在**南风路径**上的接线。
+   *
+   * ⚠️ 这是一个必须单独处理的坑：
+   *    南风节点 `NanFengH3MultiReferenceGeneratorV15` **没有** first_frame /
+   *    last_frame 输入口 —— 它的首尾帧就是 `图片1` 和 `图片2` 本身。
+   *    见 vendor/nanfeng/h3_generator.py:1378-1381 的硬校验：
+   *      图生视频：image_count 必须 == 1
+   *      首尾帧  ：image_count 必须 == 2（图片1=首帧，图片2=尾帧）
+   *
+   *    旧实现从 runH3Local 复制而来，把 previz 首尾帧 stage 进了
+   *    `{{FIRST_FRAME}}` / `{{LAST_FRAME}}` 两个占位符，但**没有任何消费者**
+   *    （那套消费逻辑只在 runH3Local 里）。结果是：
+   *      · 文件白传一趟 ComfyUI input
+   *      · 图片1/图片2 被角色卡/参考图占满
+   *      · 南风报"图生视频模式必须上传1张图片"或"首尾帧模式必须上传2张图片"
+   *
+   *    正确做法：按 mode 把 staged 的首尾帧直接塞进 图片1 / 图片2，
+   *    并且**参考图不得占用这两个槽位**。
+   */
+  function frameSlotOverrides(m) {
+    const first = staged['{{FIRST_FRAME}}'] ?? '';
+    const last = staged['{{LAST_FRAME}}'] ?? '';
+    const out = {};
+    if (m === 'i2va') {
+      if (first) out['图片1'] = first;
+    } else if (m === 'fl2va') {
+      if (first) out['图片1'] = first;
+      if (last) out['图片2'] = last;
+    }
+    return out;
+  }
+
+  const shotForNanfeng = {
+    ...shot,
+    // 用 staged 文件名覆盖原始 rel 路径
+    refs: {
+      ...(shot.refs ?? {}),
+      images: stagedImages,
+      videos: stagedVideos.map((n) => ({ rel: n })),
+      audios: stagedAudios.map((n) => ({ rel: n })),
+    },
+  };
+
+  // ---------- 3) 组装 workflow ----------
+  //
+  // 能力探测：先问 ComfyUI 实际注册了哪些节点，再据此关闭缺依赖的加速项。
+  // 没有这一步时，用户勾上「启用H3 SLA」会在 GraphBuilder 展开阶段抛
+  // "node H3SLAAttention not found"，整单失败且错误信息极难懂。
+  // 探测失败（ComfyUI 不可达）时返回 null，退回纯静态修正。
+  let availableNodes = null;
+  try {
+    const comfyMod = await import('./comfy-client.js');
+    availableNodes = await nanfeng.fetchAvailableNodes(cfg, comfyMod.resolveComfyUrl);
+  } catch { /* 探测失败不影响主流程 */ }
+
+  const built = nanfeng.buildShotWorkflow({
+    shot: shotForNanfeng,
+    mode,
+    preset,
+    extraParams: {
+      ...(extraParams ?? {}),
+      // 编译后的提示词优先于镜头卡里的 prompt
+      ...(prompt ? { 提示词: injectCardDefinitions(prompt, refList, shot) } : {}),
+      // 首尾帧占用 图片1/图片2，优先级最高（必须在参考图槽位之后合并）
+      ...frameSlotOverrides(mode ?? shot.mode),
+      /**
+       * ⚠️ 加速方案必须放在**最后**。
+       *
+       * buildShotWorkflow 的 extraParams 是最高优先级层，而预设里写着
+       * `采样器: lcm` —— 如果加速方案先合并，就会被预设覆盖回 lcm + 步数错配。
+       * LoRA 槽位同理：镜头上可能残留旧值。
+       */
+      ...accelParams,
+    },
+    jobId: job.id,
+    continuationTask,
+    frameRate: 24,
+    saveVideo: true,
+    availableNodes,
+  });
+
+  // ---------- 4) 记录参数快照（前端/工具要展示） ----------
+  job.params = {
+    ...(job.params ?? {}),
+    backend: 'h3-nanfeng',
+    presetIds: built.presetIds,
+    nanfengParams: summariseParams(built.params),
+  };
+  if (built.warnings.length) {
+    job.warnings = [...(job.warnings ?? []), ...built.warnings];
+  }
+
+  // ---------- 5) 提交并轮询 ----------
+  //
+  // ⚠️ 归档目录必须给真实路径。传 null 时 comfy.runWorkflow 里的
+  //    `fs.mkdirSync(outputsDir)` 会抛
+  //    "The \"path\" argument must be of type string or ... Received null"
+  //    —— 视频其实已经生成好了，但归档阶段崩溃，整单被标记 failed。
+  const destDir = outputsDir ?? path.join(cfg.dataDir, 'outputs');
+
+  return comfy.runWorkflow({
+    cfg,
+    workflow: built.workflow,
+    map: {},                       // 南风路径不做占位符替换
+    job,
+    outputsDir: destDir,
+    onSubmitted,
+  });
+}
+
+/**
+ * 只保留「非默认值」的参数，避免把 217 个字段全塞进 job.params。
+ *
+ * @param {Record<string, unknown>} params
+ * @returns {Record<string, unknown>}
+ */
+function summariseParams(params) {
+  const schema = params; // 已是完整快照
+  const out = {};
+  // 动态导入太啰嗦，这里直接内联几个关键项 + 所有非空素材
+  for (const key of [
+    '百万像素', '采样步数', '采样器', '调度器', '降噪强度',
+    '启用H3潜空间放大二采', 'H3一采步数', 'H3二采步数',
+    'H3潜空间目标百万像素', '启用潜空间续写', 'context_length',
+    '启用锁音频', '启用实时预览',
+  ]) {
+    if (key in schema) out[key] = schema[key];
+  }
+  // 素材槽位只记非空的
+  for (const [k, v] of Object.entries(schema)) {
+    if (/^(图片|视频|音频)\d+$/.test(k) && v && v !== '未选择') out[k] = v;
+  }
+  return out;
 }

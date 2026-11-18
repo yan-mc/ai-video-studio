@@ -5,31 +5,28 @@
  * 前缀刻意与 DSH 自己的 /api 区分，绝不与 /api/* 冲突（审查实证 401 vs 200）。
  */
 import path from 'node:path';
+import { handleSse, emit, clientCount } from './events.js';
 import fs from 'node:fs';
 import { loadConfig, saveConfig, maskConfig, sanitizeConfigPatch, resetConfigCache } from '../config.js';
 import { guard, safeId, safeJoin, resolveUserPath, getWriteToken, isSameOrigin as _isSameOrigin, isLoopbackHost as _isLoopbackHost } from '../security.js';
-import { dirs, projects, newProject, newShot, validateShot, PROFILES, resolutionFor, h3Length, H3_MODEL_SLOTS, NODE_TYPES, NODE_LABELS, ASSET_TYPES, ASSET_TYPE_LABELS, PROJECT_CATEGORY_LABELS, normalizeMode, normalizeControl, normalizeActors, normalizeProps, normalizeCamera3d, listActionCatalog } from '../store/models.js';
+import { dirs, projects, newProject, newShot, validateShot, PROFILES, resolutionFor, h3Length, H3_MODEL_SLOTS, NODE_TYPES, NODE_LABELS, ASSET_TYPES, ASSET_TYPE_LABELS, PROJECT_CATEGORY_LABELS, normalizeMode, normalizeActors, normalizeProps, normalizeCamera3d, listActionCatalog } from '../store/models.js';
 import * as comfy from '../services/comfy-client.js';
 import * as mockBackend from '../services/mock-backend.js';
-import { runJob, cancelJob, runtimeStats, markCancelled, withLocalSlot, CancelledError } from '../services/job-runner.js';
+import { runJob, cancelJob, runtimeStats, CancelledError } from '../services/job-runner.js';
 import { newJob, jobs as jobsStore, isLocalBackendOf } from '../services/job-store.js';
-import { runH3Local, runH3ImageLocal, jobKind } from '../services/generator.js';
+import { runH3Local, runH3Nanfeng, runH3ImageLocal, jobKind } from '../services/generator.js';
 import { ACCEL_PLANS, ACCEL_PLAN_IDS, DEFAULT_ACCEL_PLAN } from '../services/accel-plan.js';
 import { packGraph, unpackGraph, IMG_REF_PREFIX } from '../store/image-pool.js';
-import { SCRIPT_GENRES, SCRIPT_STAGES, checkConsistency } from '../services/script-service.js';
-import { COMIC_TEMPLATES, COMIC_STATIONS } from '../services/comic-service.js';
-import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, H3_MODES, H3_LIMITS } from '../services/h3-prompt.js';
+import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, LIGHTING_PRESETS, H3_MODES, H3_LIMITS } from '../services/h3-prompt.js';
 import { H3_IMAGE_MODELS, H3_IMAGE_SIZES, IMAGE_VAE, IMAGE_CLIP, IMAGE_SAMPLING, checkImageModels } from '../services/h3-image.js';
 import { BREAKDOWN_LEVELS, BREAKDOWN_SIZES, buildBreakdownPrompt, breakdownLevel, breakdownSize } from '../services/breakdown.js';
 import {
-  CARD_IMAGE_SLOTS, CARD_REF_MODES, H3_MAX_REF_IMAGES,
   readProjectCards, writeProjectCards,
 } from '../services/character-vault.js';
 import { buildRenderPlan, subjectsForPrompt, buildMediaNotes } from '../services/render-plan.js';
 import { probeMedia } from '../services/media-probe.js';
-import { blenderStatus, buildSceneSpec, renderControl, BLENDER_MODES, listModelAssets, listAssetActions, openInBlender, prunePrevizRuns } from '../services/blender-service.js';
-import { resolveFfmpeg } from '../services/ffmpeg-tools.js';
-import { createCanvasAgent, getCanvasPermissions, setCanvasPermissions, loadCanvasPermissions } from '../services/canvas-agent.js';
+import { blenderStatus, buildSceneSpec, renderControl, listModelAssets, listAssetActions, openInBlender, prunePrevizRuns } from '../services/blender-service.js';
+import { getCanvasPermissions, setCanvasPermissions, loadCanvasPermissions } from '../services/canvas-agent.js';
 import { getRuntime } from '../runtime.js';
 // 工作流模板定位 —— 单一真源（模板随插件分发，不跟随 dataDir）
 import { readWorkflowCached, workflowDiagnostics } from '../services/workflow-paths.js';
@@ -41,7 +38,7 @@ import {
 /* ------------------------------------------------------------- 工具函数 */
 
 /** 合法后端枚举 —— 单一真源，路由与执行器共用 */
-export const VALID_BACKENDS = new Set(['h3-local', 'h3-image', 'mock']);
+export const VALID_BACKENDS = new Set(['h3-nanfeng', 'h3-local', 'h3-image', 'mock']);
 
 async function readJsonBody(req, limit = 4 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
@@ -74,7 +71,7 @@ function sendJson(res, code, value) {
  * 加速方案的对外投影（供前端下拉与排障展示）。
  *
  * 只暴露"用户需要知道的"：id / 标签 / 步数 / 采样器 / shift / 提示语。
- * 内部字段（loraKind、strictSteps）不外泄，避免前端依赖实现细节。
+ * 内部字段（strictSteps）不外泄，避免前端依赖实现细节。
  */
 function accelPlanList() {
   return ACCEL_PLAN_IDS.map((id) => {
@@ -86,10 +83,9 @@ function accelPlanList() {
       steps: p.steps,
       sampler: p.sampler,
       scheduler: p.scheduler,
-      // lightx2v 的 shift 分 ref/fl2v 两套，这里给出两套便于用户理解
-      shift: p.loraKind === 'split'
-        ? { ref: `${p.shiftVideoRef}/${p.shiftAudioRef}`, fl2v: `${p.shiftVideoFl2v}/${p.shiftAudioFl2v}` }
-        : (p.shiftVideo != null ? { ref: `${p.shiftVideo}/${p.shiftAudio}`, fl2v: `${p.shiftVideo}/${p.shiftAudio}` } : null),
+      shift: p.shiftVideo != null
+        ? { video: `${p.shiftVideo}/${p.shiftAudio}` }
+        : null,
       hint: p.hint,
       isDefault: id === DEFAULT_ACCEL_PLAN,
     };
@@ -265,8 +261,453 @@ export async function handleApi(req, res) {
         projectCategories: PROJECT_CATEGORY_LABELS,
         defaultBackend: cfg.defaultBackend,
         defaultProfile: cfg.defaultProfile,
+        backends: [...VALID_BACKENDS],
       });
     }
+
+    /**
+     * SSE 事件流 —— 让「DSH 改了参数」在网页上立即看到。
+     *
+     * 这条路由必须放在 guard 之后（同源校验），但**不走 sendJson**：
+     * 它保持长连接，持续写 `data: <json>\n\n`。
+     */
+    if (req.method === 'GET' && route === '/events') {
+      return handleSse(req, res);
+    }
+
+    /* ---------------- 南风 V15 参数与预设 ---------------- */
+
+    /**
+     * 参数定义。前端据此自动生成表单，DSH Agent 据此了解可调项。
+     * 只返回元信息（名/组/类型/默认值/选项），不含当前值。
+     */
+    if (req.method === 'GET' && route === '/nanfeng/schema') {
+      const m = await import('../services/nanfeng/schema.js');
+      /**
+       * 用 enrichSchema() 而不是直接吐 PARAMS / GROUPS：
+       * 参数的中文说明、调参建议、以及「死参数/禁用参数」标记都在
+       * services/nanfeng/param-docs.js 里，前端要靠这些字段渲染说明面板。
+       *
+       * PARAMS 本身保持纯净（机读约束），graph.js 的类型强制依赖它。
+       */
+      const enriched = typeof m.enrichSchema === 'function'
+        ? m.enrichSchema()
+        : { paramCount: m.PARAM_COUNT, groups: m.GROUPS, params: m.PARAMS };
+      return sendJson(res, 200, {
+        ...enriched,
+        // 前端「无效参数」提示条要用
+        inert: typeof m.inertParams === 'function' ? m.inertParams() : [],
+      });
+    }
+
+    /** 内置预设列表 */
+    if (req.method === 'GET' && route === '/nanfeng/presets') {
+      const m = await import('../services/nanfeng/presets.js');
+      return sendJson(res, 200, {
+        default: m.DEFAULT_PRESET,
+        presets: m.listBuiltinPresets(),
+        /**
+         * V8.1 完整 Sigma 序列预设。
+         *
+         * `H3完整Sigma序列` 是 D 组的有效参数（别和 F 组的死参数 `手动西格玛` 搞混）。
+         * 开潜空间二采时值的个数必须 = 一采步数 + 二采步数 + 1。
+         */
+        sigmas: Object.entries(m.SIGMA_PRESETS).map(([id, p]) => ({
+          id, label: p.label, value: p.value,
+          requiredSteps: p.requiredSteps ?? null,
+          warning: p.warning ?? null,
+        })),
+        /** 加速方案（DMAD 等）—— 本轮的接线让它在南风路径上真正生效 */
+        accelPlans: ACCEL_PLAN_IDS.map((id) => {
+          const p = ACCEL_PLANS[id];
+          return {
+            id, label: p.label, family: p.family, steps: p.steps,
+            sampler: p.sampler, scheduler: p.scheduler, lora: p.lora || null,
+            hint: p.hint,
+            shift: p.shiftVideo != null ? `${p.shiftVideo}/${p.shiftAudio}` : null,
+            isDefault: id === DEFAULT_ACCEL_PLAN,
+          };
+        }),
+      });
+    }
+
+    /** 取某预设合并后的完整参数（供前端"预览将提交什么"） */
+    if (req.method === 'GET' && route.startsWith('/nanfeng/presets/')) {
+      const id = safeId(decodeURIComponent(route.slice('/nanfeng/presets/'.length)));
+      const p = await import('../services/nanfeng/presets.js');
+      const g = await import('../services/nanfeng/graph.js');
+      const { params, meta } = p.builtinPreset(id);
+      if (!meta) return sendJson(res, 404, { error: 'PRESET_NOT_FOUND', id });
+      const merged = g.mergeParams(params);
+      const coerced = g.coerceTypes(merged);
+      return sendJson(res, 200, { ...meta, params: coerced });
+    }
+
+    /* ---------------- 南风续写批次 ---------------- */
+
+    /**
+     * 续写批次 CRUD。
+     *
+     * 南风的续写靠「每段采样后把 AV latent 存进 ComfyUI/output/nanfeng_v15_context/
+     * <sha256>/clip_<index>.safetensors，下一段再读上一段」实现跨镜头连续。
+     * 批次状态由我们（而不是 ComfyUI 前端）管理，落盘在 <dataDir>/runs/。
+     */
+
+    /** 建批次 */
+    if (req.method === 'POST' && route === '/nanfeng/continuation/batches') {
+      const body = await readJsonBody(req);
+      const pid = safeId(body.projectId);
+      const cont = await import('../services/nanfeng/continuation.js');
+      try {
+        const batch = cont.createBatch({
+          projectId: pid,
+          shotIds: Array.isArray(body.shotIds) ? body.shotIds : [],
+          preset: body.preset ?? 'continuation',
+          contextLength: body.contextLength ?? '22',
+          audioContextLength: body.audioContextLength ?? 24,
+          trimFrames: body.trimFrames ?? null,
+        });
+        cont.saveBatch(cfg.dataDir, batch);
+        return sendJson(res, 201, batch);
+      } catch (e) {
+        return sendJson(res, 400, { error: 'BATCH_INVALID', detail: String(e?.message || e) });
+      }
+    }
+
+    /** 列批次 */
+    if (req.method === 'GET' && route === '/nanfeng/continuation/batches') {
+      const q = url.searchParams.get('projectId');
+      const cont = await import('../services/nanfeng/continuation.js');
+      const list = cont.listBatches(cfg.dataDir, q ? safeId(q) : null);
+      return sendJson(res, 200, list);
+    }
+
+    /** 取单个批次 */
+    if (req.method === 'GET' && route.startsWith('/nanfeng/continuation/batches/')) {
+      const rest = route.slice('/nanfeng/continuation/batches/'.length);
+      const cont = await import('../services/nanfeng/continuation.js');
+      // /batches/<id>/next → 取下一段的任务 JSON
+      if (rest.endsWith('/next')) {
+        const id = safeId(rest.slice(0, -'/next'.length));
+        const b = cont.loadBatch(cfg.dataDir, id);
+        if (!b) return sendJson(res, 404, { error: 'BATCH_NOT_FOUND', id });
+        const idx = cont.nextPendingIndex(b);
+        if (idx == null) return sendJson(res, 200, { done: true, batch: b });
+        return sendJson(res, 200, {
+          done: false,
+          index: idx,
+          shotId: b.shots.find((s) => s.index === idx)?.shotId ?? null,
+          task: cont.taskFor(b, idx),
+          contextFolder: b.contextFolder,
+        });
+      }
+      const id = safeId(rest);
+      const b = cont.loadBatch(cfg.dataDir, id);
+      if (!b) return sendJson(res, 404, { error: 'BATCH_NOT_FOUND', id });
+      return sendJson(res, 200, b);
+    }
+
+    /** 更新某段状态 */
+    if (req.method === 'POST' && route === '/nanfeng/continuation/segment') {
+      const body = await readJsonBody(req);
+      const cont = await import('../services/nanfeng/continuation.js');
+      const b = cont.loadBatch(cfg.dataDir, safeId(body.batchId));
+      if (!b) return sendJson(res, 404, { error: 'BATCH_NOT_FOUND' });
+      const seg = b.shots.find((s) => s.index === Number(body.index));
+      if (!seg) return sendJson(res, 404, { error: 'SEGMENT_NOT_FOUND' });
+      for (const k of ['status', 'jobId', 'outputRel', 'frames', 'error']) {
+        if (body[k] !== undefined) seg[k] = body[k];
+      }
+      cont.advanceStatus(b);
+      cont.saveBatch(cfg.dataDir, b);
+      // 广播批次进度：批量续写在跑时，前端要实时看到第几段
+      emit({
+        type: 'batch-progress',
+        batchId: b.batchId,
+        current: b.shots.filter((s) => s.status === 'completed').length,
+        total: b.shots.length,
+        status: b.status,
+      });
+      return sendJson(res, 200, b);
+    }
+
+    /* ---------------- 续写批次：服务端编排 ---------------- */
+
+    /**
+     * 规划分段：从目标总时长反推每段请求时长。
+     *
+     * 为什么是后端算而不是前端：帧数必须落在 17k+5 网格上，
+     * 而 `context_length` 会吃掉固定帧数 —— 前端自己算必然对不上。
+     */
+    if (req.method === 'POST' && route === '/nanfeng/continuation/plan') {
+      const body = await readJsonBody(req);
+      const cont = await import('../services/nanfeng/continuation.js');
+      try {
+        const plan = cont.planSegments({
+          targetSeconds: body.targetSeconds ?? 45,
+          segments: body.segments ?? 9,
+          contextLength: body.contextLength ?? '22',
+        });
+        return sendJson(res, 200, plan);
+      } catch (e) {
+        return sendJson(res, 400, { error: String(e?.message || e) });
+      }
+    }
+
+    /**
+     * 一键跑完整个续写批次。
+     *
+     * 立即返回（编排在后台跑），进度通过 SSE `batch-progress` 推送。
+     * 断点续跑：已完成段会跳过，只跑未完成的。
+     */
+    if (req.method === 'POST' && route === '/nanfeng/continuation/batches/run') {
+      const body = await readJsonBody(req);
+      const cont = await import('../services/nanfeng/continuation.js');
+      const batchId = safeId(body.batchId);
+      const b0 = cont.loadBatch(cfg.dataDir, batchId);
+      if (!b0) return sendJson(res, 404, { error: 'BATCH_NOT_FOUND' });
+      if (b0.status === 'running') {
+        return sendJson(res, 409, { error: 'BATCH_ALREADY_RUNNING', batchId });
+      }
+
+      // 允许显式重置失败段后重跑
+      if (body.resetFailed) {
+        cont.resetFromFailure(b0);
+        cont.saveBatch(cfg.dataDir, b0);
+      }
+
+      const projectShots = listShots(b0.projectId);
+      const seed = Number.isFinite(Number(body.seed)) ? Number(body.seed) : undefined;
+
+      // 后台跑，不阻塞 HTTP
+      (async () => {
+        try {
+          await cont.runBatch({
+            dataDir: cfg.dataDir,
+            batchId,
+            onProgress: (e) => emit({ type: 'batch-progress', ...e }),
+            runOne: async (seg, taskJson, index) => {
+              const shot = projectShots.find((s) => s.id === seg.shotId);
+              if (!shot) throw new Error(`第 ${index} 段的镜头 ${seg.shotId} 不存在`);
+
+              // 段 1 不开续写（没有前一段）；段 2+ 才带 continuationTask
+              /**
+               * 续写任务：**段 1 也必须带**（index=1）。
+               *
+               * ⚠️ 直觉上"段 1 没有上一段不该带"，但南风 V15 把读/写 latent
+               *    都挂在同一个 `if continuation:` 下（h3_generator.py:1620/2043）。
+               *    段 1 不带 → 不保存 latent → 段 2 Load clip_1 直接报
+               *    "is neither a file nor a folder"。
+               *
+               * 官方设计就是首段 Load 0 / Save 1：
+               *    Load clip_index=0 不读文件、条件透传、trim_frames=0（不裁）
+               *    Save clip_index=1 把本段 AV latent 存成 clip_1
+               */
+              const job = newJob({
+                projectId: b0.projectId,
+                shotId: seg.shotId,
+                backendId: 'h3-nanfeng',
+                prompt: '',
+                params: {
+                  nanfengPreset: b0.preset,
+                  nanfengMode: shot.mode,
+                  continuationTask: taskJson,
+                  ...(seed !== undefined ? { seed } : {}),
+                  batchId,
+                  batchIndex: index,
+                },
+                mode: shot.mode,
+              });
+              await jobsStore().upsert(job);
+              emit({ type: 'batch-progress', batchId, index, status: 'segment-submitted', jobId: job.id });
+
+              /**
+               * ⚠️ **必须真正启动执行**，不能只 upsert 就等。
+               *
+               * 历史 bug（本轮引入并当场抓到）：这里只建了 job + 轮询，
+               * 忘了调 runAndArchive —— 任务永远停在 `queued`，
+               * 批次永远卡在第 1 段，前端看起来像"卡死"。
+               *
+               * 执行入口必须是 `executeBackend`（与 REST/工具共用同一实现），
+               * 并包 runAndArchive 以做产物归档。
+               * 注意**不要 await** 这个 Promise —— 它要跑几分钟，我们靠下面的
+               * 轮询等待终态，await 会与轮询形成双重等待。
+               */
+              runAndArchive(
+                job,
+                (running, hooks) => executeBackend(running, shot, ctx, cfg, hooks),
+                ctx,
+              ).catch((e) => {
+                ctx.logger?.warn?.(
+                  `[jiuzhang] 续写批次 ${batchId} 第 ${index} 段执行失败：${String(e?.message || e)}`,
+                );
+              });
+
+              // 等待这一段真正跑完（runBatch 是串行的，这里必须等）
+              await new Promise((resolve, reject) => {
+                const t0 = Date.now();
+                const timer = setInterval(async () => {
+                  let cur;
+                  try {
+                    cur = await jobsStore().get(job.id);
+                  } catch { return; /* 读盘抖动，下一轮再试 */ }
+                  const st = cur?.status;
+                  if (st === 'completed') {
+                    clearInterval(timer);
+                    seg.outputRel = cur.outputs?.[0]?.rel ?? null;
+                    seg.frames = cur.outputs?.[0]?.frames ?? null;
+                    resolve();
+                  } else if (st === 'failed' || st === 'cancelled') {
+                    clearInterval(timer);
+                    const e = new Error(cur?.error || `第 ${index} 段${st}`);
+                    e.jobId = job.id;
+                    reject(e);
+                  } else if (Date.now() - t0 > 60 * 60 * 1000) {
+                    clearInterval(timer);
+                    reject(new Error(`第 ${index} 段超时（>1h）`));
+                  }
+                }, 2000);
+              });
+
+              return { jobId: job.id, outputRel: seg.outputRel, frames: seg.frames };
+            },
+          });
+        } catch (e) {
+          ctx.logger?.warn?.(
+            `[jiuzhang] 续写批次 ${batchId} 编排失败：${String(e?.message || e)}`,
+          );
+          emit({ type: 'batch-progress', batchId, status: 'failed', error: String(e?.message || e) });
+        }
+      })();
+
+      return sendJson(res, 202, { ok: true, batchId, status: 'starting' });
+    }
+
+    /** 重置失败段（供重跑） */
+    if (req.method === 'POST' && route === '/nanfeng/continuation/batches/reset') {
+      const body = await readJsonBody(req);
+      const cont = await import('../services/nanfeng/continuation.js');
+      const b = cont.loadBatch(cfg.dataDir, safeId(body.batchId));
+      if (!b) return sendJson(res, 404, { error: 'BATCH_NOT_FOUND' });
+      const r = cont.resetFromFailure(b);
+      cont.saveBatch(cfg.dataDir, b);
+      return sendJson(res, 200, { ...r, batch: b });
+    }
+
+    /* ---------------- 智能分镜（DSH 内部 LLM） ---------------- */
+
+    /** 分镜能力状态 */
+    if (req.method === 'GET' && route === '/nanfeng/storyboard/meta') {
+      const sb = await import('../services/nanfeng/storyboard.js');
+      const llm = await import('../services/nanfeng/dsh-llm.js');
+      const m = await import('../services/nanfeng/schema.js').catch(() => null);
+      return sendJson(res, 200, {
+        modes: sb.STORYBOARD_MODES,
+        skills: Object.entries(sb.SKILLS).map(([id, s]) => ({ id, label: s.label, desc: s.desc })),
+        llm: llm.llmStatus(ctx, cfg),
+        _schemaUnused: Boolean(m),
+      });
+    }
+
+    /**
+     * 生成分镜。
+     *
+     * 流程：逐图视觉分析 → 文本模型写分镜 → 解析成 segments。
+     * 全程走 DSH 内部 LLM，不需要任何 API Key。
+     */
+    if (req.method === 'POST' && route === '/nanfeng/storyboard/generate') {
+      const body = await readJsonBody(req);
+      const sb = await import('../services/nanfeng/storyboard.js');
+      const llm = await import('../services/nanfeng/dsh-llm.js');
+
+      const count = Math.max(1, Math.min(12, Number(body.count) || 1));
+      const mode = String(body.mode || 'ref2va');
+      if (!sb.STORYBOARD_MODES[mode]) {
+        return sendJson(res, 400, { error: 'UNKNOWN_MODE', mode, valid: Object.keys(sb.STORYBOARD_MODES) });
+      }
+      if (!llm.llmStatus(ctx, cfg).available) {
+        return sendJson(res, 503, {
+          error: 'LLM_UNAVAILABLE',
+          detail: llm.llmStatus(ctx, cfg).reason,
+        });
+      }
+
+      // 图片：把 dataDir 相对路径解析成绝对路径
+      //
+      // ⚠️ 不要静默吞异常：路径写错时调用方只会看到 images:0，
+      //    完全不知道是哪张图、为什么没进来。收集到 badRels 一起返回。
+      //
+      // ⚠️ resolveUserPath 的签名是**对象参数** ({ root, input, allowSubdirs, mustExist })。
+      //    历史 bug：这里曾写成 `resolveUserPath(cfg, rel)`，于是 `root` 收到整个 cfg
+      //    对象、`input` 是 undefined → 内部 `String(input ?? '').trim()` 拿不到值，
+      //    每次都在 catch 里被记成 badRels。表现是"传了图但 images:0，且不报错"，
+      //    智能分镜的看图能力实际上完全不可用。
+      const images = [];
+      const badRels = [];
+      for (const rel of (Array.isArray(body.imageRels) ? body.imageRels : [])) {
+        try {
+          const abs = resolveUserPath({
+            root: cfg.dataDir, input: rel, mustExist: true,
+          });
+          images.push({ index: images.length + 1, absPath: abs, name: path.basename(abs) });
+        } catch (e) {
+          badRels.push(`${rel}（${String(e?.message || e)}）`);
+        }
+      }
+
+      try {
+        // 1) 逐图分析（有图才做）
+        let analysis = '';
+        if (images.length) {
+          const parts = [];
+          for (const img of images) {
+            const text = await llm.callVision(ctx, cfg, {
+              prompt: sb.visionPrompt(img.index),
+              images: [img],
+            });
+            const clean = text.replace(/^\s*@图片\d+\s*[:：]\s*/, '').trim();
+            parts.push(`@图片${img.index}：${clean}`);
+          }
+          analysis = parts.join('\n\n');
+        }
+
+        // 2) 生成分镜
+        const messages = sb.buildStoryboardMessages({
+          idea: body.idea,
+          count,
+          mode,
+          // ⚠️ 必须透传 —— 以前漏了，导致 ns_storyboard（海螺版）永远不可达
+          skillId: body.skillId ?? 'regular_storyboard',
+          images,
+          analysis,
+          durationSeconds: Number(body.durationSec) || 5,
+          contextLength: body.contextLength != null ? Number(body.contextLength) : undefined,
+        });
+        const outText = await llm.callText(ctx, cfg, {
+          system: messages[0].content,
+          user: messages[1].content,
+          maxTokens: sb.outputBudget(count),
+        });
+
+        // 3) 解析
+        const parsed = sb.parseStoryboard(outText, count);
+        return sendJson(res, 200, {
+          mode,
+          count,
+          global: parsed.global,
+          segments: parsed.segments,
+          analysis,
+          raw: parsed.raw,
+          ...(badRels.length ? { badRels } : {}),
+        });
+      } catch (e) {
+        return sendJson(res, 400, {
+          error: 'STORYBOARD_FAILED',
+          detail: String(e?.message || e),
+        });
+      }
+    }
+
     if (req.method === 'GET' && route === '/health') {
       const h3 = await comfy.health(cfg);
       // 工作流模板是否就位 —— 首装最容易踩的坑，直接在健康检查里暴露
@@ -286,6 +727,8 @@ export async function handleApi(req, res) {
           image: { exists: wfImg.exists, dir: wfImg.dir },
           ok: wfH3.exists && wfImg.exists,
         },
+        /** SSE 长连接数（前端据此判断"是否有人在看"） */
+        events: { clients: clientCount() },
       });
     }
     // 加速方案列表（含每个方案的实际参数，便于前端展示与排障）
@@ -308,7 +751,21 @@ export async function handleApi(req, res) {
     if (req.method === 'GET' && route === '/config') return sendJson(res, 200, maskConfig(cfg));
     if (req.method === 'POST' && route === '/config') {
       const body = await readJsonBody(req);
-      const patch = sanitizeConfigPatch(body);
+      /**
+       * sanitizeConfigPatch 会对 comfyUrl 做 SSRF 校验（只允许本机 http(s)），
+       * 不合法时抛 INVALID_COMFY_URL。这里接住并返回 400 + 明确原因 ——
+       * 否则会被顶层 catch 归成 500，用户只看到一串错误码。
+       */
+      let patch;
+      try {
+        patch = sanitizeConfigPatch(body);
+      } catch (e) {
+        const msg = String(e?.message || e);
+        if (msg.startsWith('INVALID_COMFY_URL')) {
+          return sendJson(res, 400, { error: 'INVALID_COMFY_URL', detail: msg });
+        }
+        throw e;
+      }
       resetConfigCache();
       saveConfig(patch);
       return sendJson(res, 200, maskConfig(loadConfig()));
@@ -478,211 +935,9 @@ export async function handleApi(req, res) {
       return sendJson(res, 200, await ctx.h3.filmRender(body));
     }
 
-    /* ---------------- 剧本创作 ---------------- */
-    if (req.method === 'GET' && route === '/script/meta') {
-      return sendJson(res, 200, { genres: SCRIPT_GENRES, stages: SCRIPT_STAGES });
-    }
-    if (req.method === 'GET' && route === '/script') {
-      const pid = safeId(url.searchParams.get('projectId') || '');
-      return sendJson(res, 200, ctx.script.load(pid));
-    }
-    if (req.method === 'POST' && route === '/script/stage') {
-      const body = await readJsonBody(req);
-      const pid = safeId(body.projectId || '');
-      const stage = String(body.stage || '');
-      return sendJson(res, 200, await ctx.script.runStage(pid, stage, body));
-    }
-    if (req.method === 'POST' && route === '/script/runAll') {
-      const body = await readJsonBody(req);
-      const pid = safeId(body.projectId || '');
-      return sendJson(res, 200, await ctx.script.runAll(pid, body));
-    }
-    if (req.method === 'POST' && route === '/script/check') {
-      const body = await readJsonBody(req);
-      const pid = safeId(body.projectId || '');
-      const doc = ctx.script.load(pid) ?? {};
-      return sendJson(res, 200, checkConsistency(doc, { limit: body.limit ?? 10 }));
-    }
-    if (req.method === 'POST' && route === '/script/save') {
-      const body = await readJsonBody(req);
-      const pid = safeId(body.projectId || '');
-      return sendJson(res, 200, ctx.script.save(pid, body.doc ?? {}));
-    }
-
-    /* ---------------- 漫画工作台 ---------------- */
-    if (req.method === 'GET' && route === '/comic/meta') {
-      return sendJson(res, 200, { templates: COMIC_TEMPLATES, stations: COMIC_STATIONS });
-    }
-    if (req.method === 'GET' && route === '/comic') {
-      const pid = safeId(url.searchParams.get('projectId') || '');
-      return sendJson(res, 200, ctx.comic.load(pid));
-    }
-    if (req.method === 'POST' && route === '/comic/extract') {
-      const body = await readJsonBody(req);
-      const pid = safeId(body.projectId || '');
-      return sendJson(res, 200, await ctx.comic.extract(pid, body));
-    }
-    if (req.method === 'POST' && route === '/comic/relayout') {
-      const body = await readJsonBody(req);
-      const pid = safeId(body.projectId || '');
-      return sendJson(res, 200, await ctx.comic.relayoutPage(pid, Number(body.pageIndex) || 1, String(body.template)));
-    }
-    if (req.method === 'POST' && route === '/comic/preflight') {
-      const body = await readJsonBody(req);
-      const pid = safeId(body.projectId || '');
-      return sendJson(res, 200, ctx.comic.runPreflight(pid));
-    }
-    if (req.method === 'POST' && route === '/comic/export/page') {
-      const body = await readJsonBody(req);
-      const pid = safeId(body.projectId || '');
-      const r = ctx.comic.exportPageSvg(pid, Number(body.pageIndex) || 1, body.options ?? {});
-      // 不把 SVG 正文塞进 JSON（可能很大），只回元信息 + 可通过 /file 取
-      return sendJson(res, 200, { ok: r.ok, path: r.path, rel: r.rel, bytes: r.bytes });
-    }
-    if (req.method === 'POST' && route === '/comic/export/all') {
-      const body = await readJsonBody(req);
-      const pid = safeId(body.projectId || '');
-      return sendJson(res, 200, ctx.comic.exportAllSvg(pid, body.options ?? {}));
-    }
-
+    /* 剧本 / 漫画 / 模特三个模块已整体删除（2.0.0）。原路由与空壳服务不再保留，
+       这里不写占位注释 —— 空标题会让人以为功能只是没接上。 */
     /* ---------------- 漫画出图 ---------------- */
-    if (req.method === 'POST' && route === '/comic/plan-prompts') {
-      const body = await readJsonBody(req);
-      const pid = safeId(body.projectId || '');
-      return sendJson(res, 200, await ctx.comic.planPrompts(pid, body));
-    }
-    if (req.method === 'GET' && route === '/comic/image-progress') {
-      const pid = safeId(url.searchParams.get('projectId') || '');
-      return sendJson(res, 200, ctx.comic.imageProgress(pid));
-    }
-    if (req.method === 'POST' && route === '/comic/render-panels') {
-      const body = await readJsonBody(req);
-      const pid = safeId(body.projectId || '');
-      const doc = ctx.comic.load(pid);
-      if (!doc) return sendJson(res, 404, { error: 'COMIC_NOT_FOUND' });
-      if (!doc.planParts?.length) {
-        return sendJson(res, 400, { error: 'PLAN_REQUIRED', detail: '请先执行「提示词计划」' });
-      }
-
-      const wf = loadImageWorkflow();
-      if (!wf) return sendJson(res, 500, { error: 'WORKFLOW_MISSING' });
-      const models = checkImageModels(cfg);
-      if (!models.ready) return sendJson(res, 400, { error: 'IMAGE_MODEL_MISSING', missing: models.missing });
-
-      // 只渲染指定页（默认全部）
-      const onlyPage = body.pageIndex ? Number(body.pageIndex) : null;
-      let targets = doc.planParts.filter((p) => !onlyPage || p.pageIndex === onlyPage);
-
-      /**
-       * 只渲染指定格。
-       *
-       * ⚠️ 以前只支持 `pageIndex`，`panelIndices` / `panelIndex` 一律被忽略 ——
-       *    调用方想"只重出一格"，实际会把整页全渲一遍（12GB 卡上一格 75 秒，
-       *    白白多花几分钟）。这是文档里写了、代码里没有的一类偏差。
-       */
-      const wantedPanels = Array.isArray(body.panelIndices)
-        ? body.panelIndices.map(Number).filter((n) => Number.isFinite(n))
-        : (Number.isFinite(Number(body.panelIndex)) ? [Number(body.panelIndex)] : []);
-      if (wantedPanels.length) {
-        const set = new Set(wantedPanels);
-        targets = targets.filter((p) => set.has(Number(p.panelIndex)));
-      }
-      if (!targets.length) {
-        return sendJson(res, 400, {
-          error: 'NO_TARGET_PANELS',
-          detail: `没有匹配的格：pageIndex=${onlyPage ?? '(全部)'} `
-            + `panelIndices=${wantedPanels.length ? wantedPanels.join(',') : '(全部)'}`,
-        });
-      }
-
-      const limit = Math.max(1, Math.min(50, Number(body.limit) || targets.length));
-      const todo = targets.slice(0, limit);
-
-      // 异步跑
-      void (async () => {
-        for (const plan of todo) {
-          try {
-            const j = newJob({
-              projectId: pid,
-              shotId: null,
-              backendId: 'h3-image',
-              prompt: plan.prompt,
-              params: {
-                kind: 'image',
-                imageSizeId: body.sizeId ?? 'sq-2048',
-                seed: body.seed ?? Math.floor(Math.random() * 2147483647),
-              },
-              mode: 't2i',
-            });
-            j.kind = 'image';
-            await jobsStore().upsert(j);
-
-            // ⚠️ 必须借并发槽位：批量出图原先直接调 runH3ImageLocal，
-            //    绕过了 job-runner 的 acquireSlot。用户同时在渲染页点生成时，
-            //    视频+图像会一起上 12GB 卡 → OOM。
-            const r = await withLocalSlot('h3-image', () => runH3ImageLocal({
-              workflow: wf,
-              job: j,
-              prompt: plan.prompt,
-              // 角色参考图必须真的传进去：漫画要保证多格之间角色一致，
-              // 旧实现硬编码 images: [] → 每格都是纯文生图，角色必然漂移。
-              shot: {
-                refs: { images: body.refImages ?? doc.refImages ?? [] },
-                characterRefs: body.characterRefs ?? doc.characterRefs ?? [],
-                imageSizeId: body.sizeId ?? cfg.imageSizeId ?? 'sq-2048',
-              },
-              cfg,
-            }));
-            const out = r.outputs?.[0];
-            if (out?.path) {
-              // 复制到 assets 目录，便于 SVG 内嵌引用
-              const rel = `comic/panels/${pid}_p${plan.pageIndex}_${plan.panelIndex}.png`;
-              const abs = path.join(cfg.dataDir, rel);
-              fs.mkdirSync(path.dirname(abs), { recursive: true });
-              try { fs.copyFileSync(out.path, abs); } catch { /* ignore */ }
-              ctx.comic.setPanelImage(pid, plan.pageIndex, plan.panelIndex, {
-                rel, path: abs, bytes: out.bytes,
-              });
-            }
-            // 同时登记进素材库 —— 否则漫画产物只存在于 comic/panels/，
-            // 渲染页、角色卡仓库都引用不到。
-            const archived = await archiveBatchOutput(ctx, cfg, out, {
-              type: 'general',
-              name: `漫画_${pid}_p${plan.pageIndex}_${plan.panelIndex}`,
-              projectId: pid,
-              note: String(plan.prompt ?? '').slice(0, 200),
-            });
-            const outputsWithArchive = archived
-              ? [{ ...out, assetId: archived.id, archivedRel: archived.rel }]
-              : (r.outputs ?? []);
-            await jobsStore().upsert({ ...j, status: 'completed', outputs: outputsWithArchive, finishedAt: Date.now() });
-          } catch (e) {
-            /**
-             * 单格失败不中断整批 —— 但**必须把这一格标成 failed**。
-             *
-             * ⚠️ 历史缺陷：这里只写了一条日志，任务记录永远停在 `queued`。
-             *    后果：任务列表里永远有一个"排队中"的幽灵任务，
-             *    用户既看不到失败原因，又没法重试；`monitor` 的
-             *    `queued` 计数也永远归不了零。
-             *    实测复现：一次 OOM 之后，任务卡在 queued 十几分钟，
-             *    而 ComfyUI 队列早已为空。
-             */
-            const msg = String(e?.message ?? e);
-            ctx.extras?.appendLog?.({ level: 'error', msg: `漫画出图失败 p${plan.pageIndex}-${plan.panelIndex}: ${msg}` });
-            try {
-              await jobsStore().upsert({
-                ...j,
-                status: 'failed',
-                error: msg,
-                finishedAt: Date.now(),
-              });
-            } catch { /* 回写失败也不阻断其它格 */ }
-          }
-        }
-      })();
-
-      return sendJson(res, 200, { ok: true, queued: todo.length, total: targets.length });
-    }
 
     /* ---------------- Blender 预演渲染 ---------------- */
     //
@@ -735,7 +990,7 @@ export async function handleApi(req, res) {
 
     if (req.method === 'POST' && route === '/blender/render') {
       const body = await readJsonBody(req);
-      const mode = String(body.mode || 'depth');
+      const mode = String(body.mode || 'blockout');
       const pid = body.projectId ? safeId(body.projectId) : '';
       const shot = body.shot ?? (pid && body.shotId
         ? listShots(pid).find((s) => s.id === body.shotId)
@@ -959,10 +1214,12 @@ export async function handleApi(req, res) {
     if (req.method === 'POST' && route === '/breakdown/preview') {
       const body = await readJsonBody(req);
       const lv = breakdownLevel(body.level ?? 'standard');
+      // 只构建一次：以前 preview 和 chars 各调一次，纯性能浪费
+      const prompt = buildBreakdownPrompt(body, lv.id);
       return sendJson(res, 200, {
         level: lv.id,
-        prompt: buildBreakdownPrompt(body, lv.id),
-        chars: buildBreakdownPrompt(body, lv.id).length,
+        prompt,
+        chars: prompt.length,
       });
     }
     if (req.method === 'POST' && route === '/breakdown/generate') {
@@ -975,15 +1232,52 @@ export async function handleApi(req, res) {
       const size = breakdownSize(body.sizeId ?? 'square');
       const prompt = buildBreakdownPrompt(body, lv.id);
 
-      // 参考图：绝对路径或 dataDir 相对路径
+      /**
+       * 参考图：绝对路径或 dataDir 相对路径。
+       *
+       * ⚠️ 以前这里三种失败（空路径 / 不存在 / 越界）**全部静默跳过**，
+       *    于是一个空输入也会照常提交 t2i 任务 —— 而提示词正文里还写着
+       *    "参考图是《X》的立绘，据此绘制设定卡"。模型收到"指代一张不存在
+       *    的图"的指令，产出随机角色，任务却是 completed，用户以为成功。
+       *
+       *    现在：一张都没解析出来直接 400；部分失败把原因回传给调用方。
+       */
       const refAbs = [];
-      for (const r of (body.refImages ?? [])) {
-        if (!r) continue;
-        if (path.isAbsolute(r) && fs.existsSync(r)) { refAbs.push(r); continue; }
+      const badRels = [];
+      for (const r of (Array.isArray(body.refImages) ? body.refImages : [])) {
+        const raw = String(r ?? '').trim();
+        if (!raw) { badRels.push('（空路径）'); continue; }
+        if (path.isAbsolute(raw)) {
+          if (fs.existsSync(raw)) refAbs.push(raw);
+          else badRels.push(`${raw}（文件不存在）`);
+          continue;
+        }
         try {
-          const a = safeJoin(cfg.dataDir, String(r));
+          const a = safeJoin(cfg.dataDir, raw);
           if (fs.existsSync(a)) refAbs.push(a);
-        } catch { /* ignore */ }
+          else badRels.push(`${raw}（文件不存在）`);
+        } catch (e) {
+          badRels.push(`${raw}（${String(e?.message || e)}）`);
+        }
+      }
+      if (!refAbs.length) {
+        return sendJson(res, 400, {
+          error: 'REF_IMAGE_REQUIRED',
+          detail: '立绘拆解必须提供至少一张参考图（原立绘或设定图）。'
+            + '没有参考图时模型会凭空造一个角色，产出不可用。',
+          badRels,
+        });
+      }
+
+      // 尺寸超限在**请求期**就挡住，而不是等任务跑起来才在异步里炸
+      const mp = (size.w * size.h) / 1e6;
+      const maxMp = Number(cfg.imageMaxMP) || 4.3;
+      if (mp > maxMp) {
+        return sendJson(res, 400, {
+          error: 'IMAGE_SIZE_TOO_LARGE',
+          detail: `${size.w}×${size.h} ≈ ${mp.toFixed(2)}MP，超过上限 ${maxMp}MP。`,
+          sizes: BREAKDOWN_SIZES,
+        });
       }
 
       const job = newJob({
@@ -1014,7 +1308,9 @@ export async function handleApi(req, res) {
         cfg,
       }), ctx).catch(() => {});
 
-      return sendJson(res, 200, { ...job, refCount: refAbs.length, level: lv.id });
+      return sendJson(res, 200, {
+        ...job, refCount: refAbs.length, level: lv.id, badRels,
+      });
     }
 
     /* ---------------- 图像生成（H3-Image） ---------------- */
@@ -1068,6 +1364,15 @@ export async function handleApi(req, res) {
     if (req.method === 'GET' && route === '/prompt/meta') {
       return sendJson(res, 200, {
         styles: STYLE_PRESETS,
+        /**
+         * 打光通道（光比预设）。
+         *
+         * 南风 217 参数里**没有任何打光参数** —— H3 是纯提示词驱动的扩散模型，
+         * 打光只能靠 detailed_description 的文字。这里把「4:1 / 8:1 打光」
+         * 这种摄影术语翻译成模型能执行的视觉描述（光比、档数、阴影硬度）。
+         * 与画风正交，可任意组合。
+         */
+        lightings: LIGHTING_PRESETS,
         modes: H3_MODES,
         limits: H3_LIMITS,
       });
@@ -1314,151 +1619,6 @@ export async function handleApi(req, res) {
       return sendJson(res, 200, await ctx.canvasAgent.exec(name, body.arguments ?? {}, enriched));
     }
 
-    /* ---------------- 模特工作台 ---------------- */
-    if (req.method === 'GET' && route === '/mw/meta') {
-      return sendJson(res, 200, ctx.mw.meta());
-    }
-    if (req.method === 'GET' && route === '/mw/jobs') {
-      return sendJson(res, 200, ctx.mw.listJobs());
-    }
-    if (req.method === 'POST' && route === '/mw/jobs') {
-      const body = await readJsonBody(req);
-      return sendJson(res, 200, ctx.mw.createJob(body));
-    }
-    if (req.method === 'POST' && route === '/mw/job/update') {
-      const body = await readJsonBody(req);
-      return sendJson(res, 200, ctx.mw.updateJob(String(body.id), body.patch ?? {}));
-    }
-    if (req.method === 'POST' && route === '/mw/job/replan') {
-      const body = await readJsonBody(req);
-      return sendJson(res, 200, ctx.mw.replanJob(String(body.id)));
-    }
-    if (req.method === 'POST' && route === '/mw/job/generate') {
-      const body = await readJsonBody(req);
-      const jobId = String(body.id || '');
-      const job = ctx.mw.listJobs().find((j) => j.id === jobId);
-      if (!job) return sendJson(res, 404, { error: 'MW_JOB_NOT_FOUND' });
-
-      const wf = loadImageWorkflow();
-      if (!wf) return sendJson(res, 500, { error: 'WORKFLOW_MISSING' });
-      const models = checkImageModels(cfg);
-      if (!models.ready) {
-        return sendJson(res, 400, { error: 'IMAGE_MODEL_MISSING', missing: models.missing });
-      }
-
-      // 尺寸：优先用作业里用户选的，没选才按用途兜底。
-      //
-      // ⚠️ 以前硬编码 `job.mode === 'film' ? 'p-2x3-film' : 'ecom-sq'`，
-      //    `job.sizeId`（用户在页面上选的 ecom-45 / film-916 / film-21）
-      //    被完全忽略 —— 用户改尺寸没反应，且不报错。
-      const hasSize = ctx.mw.sizes().some((s) => s.id === job.sizeId);
-      const sizeId = hasSize
-        ? job.sizeId
-        : (job.mode === 'film' ? 'p-2x3-film' : 'ecom-sq');
-      const seed = body.seed ?? Math.floor(Math.random() * 2147483647);
-
-      // 异步跑，立即返回
-      void (async () => {
-        try {
-          await ctx.mw.runGeneration(jobId, async (planItem) => {
-            const j = newJob({
-              projectId: job.projectId ?? null,
-              shotId: null,
-              backendId: 'h3-image',
-              prompt: planItem.prompt,
-              params: {
-                kind: 'image',
-                imageSizeId: sizeId,
-                seed: seed + planItem.index,
-              },
-              mode: 't2i',
-            });
-            j.kind = 'image';
-            await jobsStore().upsert(j);
-
-            try {
-              const r = await withLocalSlot('h3-image', () => runH3ImageLocal({
-                workflow: wf,
-                job: j,
-                prompt: planItem.prompt,
-                // 参考图必须真的传进去：模特/服装的一致性全靠它。
-                // 旧实现硬编码 images: [] → 每套图都是纯文生图，形象库完全没用上。
-                shot: {
-                  refs: { images: body.refImages ?? job.refImages ?? [] },
-                  characterRefs: body.characterRefs ?? job.characterRefs ?? resolveMwFigureRefs(ctx, job),
-                  imageSizeId: sizeId,
-                },
-                cfg,
-              }));
-              // 登记进素材库，否则模特套图只落在 outputs/，渲染页引用不到
-              const archived = await archiveBatchOutput(ctx, cfg, r.outputs?.[0], {
-                type: 'general',
-                name: `模特_${job.name ?? jobId}_${planItem.index}`,
-                projectId: job.projectId ?? null,
-                note: String(planItem.prompt ?? '').slice(0, 200),
-              });
-              const outs = archived
-                ? [{ ...(r.outputs?.[0] ?? {}), assetId: archived.id, archivedRel: archived.rel }]
-                : (r.outputs ?? []);
-              // 记进 jobs 表以便前端查询（upsert 会合并同 id）
-              await jobsStore().upsert({
-                ...j,
-                status: 'completed',
-                outputs: outs,
-                finishedAt: Date.now(),
-              });
-              return outs[0] ?? r;
-            } catch (e) {
-              /**
-               * ⚠️ 单镜失败必须把这条 job 记录标成 failed。
-               *    以前只在 runGeneration 内部记了 shot.status，而 jobs 表里
-               *    这条记录永远停在 queued —— 任务列表出现"永远排队中"的幽灵，
-               *    monitor 的 queued 计数也归不了零。
-               */
-              try {
-                await jobsStore().upsert({
-                  ...j, status: 'failed', error: String(e?.message ?? e), finishedAt: Date.now(),
-                });
-              } catch { /* ignore */ }
-              throw e;      // 交给 runGeneration 记 shot.status 并做重试判断
-            }
-          });
-        } catch { /* runGeneration 内部已记录失败 */ }
-      })();
-
-      return sendJson(res, 200, { ok: true, jobId, total: job.count, message: '已开始出图' });
-    }
-    if (req.method === 'POST' && route === '/mw/job/delete') {
-      const body = await readJsonBody(req);
-      return sendJson(res, 200, ctx.mw.deleteJobs(body.ids ?? []));
-    }
-    if (req.method === 'GET' && route === '/mw/plans') {
-      return sendJson(res, 200, ctx.mw.listPlans());
-    }
-    if (req.method === 'POST' && route === '/mw/plan/save') {
-      const body = await readJsonBody(req);
-      return sendJson(res, 200, ctx.mw.savePlan(String(body.jobId), body.name));
-    }
-    if (req.method === 'POST' && route === '/mw/plan/apply') {
-      const body = await readJsonBody(req);
-      return sendJson(res, 200, ctx.mw.applyPlan(String(body.jobId), String(body.planId)));
-    }
-    if (req.method === 'POST' && route === '/mw/plan/delete') {
-      const body = await readJsonBody(req);
-      return sendJson(res, 200, ctx.mw.deletePlan(String(body.id)));
-    }
-    if (req.method === 'GET' && route === '/mw/figures') {
-      return sendJson(res, 200, ctx.mw.listFigureItems());
-    }
-    if (req.method === 'POST' && route === '/mw/figure/upsert') {
-      const body = await readJsonBody(req);
-      return sendJson(res, 200, ctx.mw.upsertFigure(body.figure ?? body));
-    }
-    if (req.method === 'POST' && route === '/mw/figure/delete') {
-      const body = await readJsonBody(req);
-      return sendJson(res, 200, ctx.mw.deleteFigure(String(body.id)));
-    }
-
     /* ---------------- 资产 ---------------- */
     if (req.method === 'GET' && route === '/assets') {
       const type = url.searchParams.get('type') || undefined;
@@ -1684,31 +1844,6 @@ export async function handleApi(req, res) {
 /* ------------------------------------------------------------ 辅助实现 */
 
 /**
- * 批量出图（漫画逐格 / 模特套图）的产物归档。
- *
- * 这两条链路不走 `runJob`（在循环里直接调 runH3ImageLocal），所以
- * `runAndArchive` 覆盖不到。抽一个共用函数，两处复用。
- *
- * 失败不抛：产物已经生成，归档只是"让它进素材库"，属于可接受的降级。
- *
- * @returns {object|null} 归档后的素材项；失败返回 null
- */
-async function archiveBatchOutput(ctx, cfg, output, opts = {}) {
-  if (!output?.path) return null;
-  try {
-    return await ctx.assets.archiveFile(output.path, {
-      type: opts.type ?? 'general',
-      name: opts.name ?? path.basename(output.path),
-      projectId: opts.projectId ?? null,
-      tag: opts.tag ?? 'auto-archived',
-      note: opts.note ?? '',
-    });
-  } catch {
-    return null;
-  }
-}
-
-/**
  * 跑一个任务，成功后把产物**自动归档进素材库**。
  *
  * 为什么需要：生成产物落在 `data/outputs/`（临时区），画布产物写回节点后
@@ -1930,38 +2065,60 @@ export function upsertShot(projectId, shot) {
   // mode 归一化统一放在**落盘口**：
   //   REST 可以直接传 body.shot（绕过 newShot），工具也走这里，
   //   只在 newShot 里归一化覆盖不到这些路径。
+  //
+  // ⚠️ 只归一化**传了的字段**。以前无条件对 actors/props/camera3d 做
+  //    normalize，部分保存（只改 nanfeng/description）会把这些字段
+  //    重置成空数组/null，把镜头卡写坏。
   const next = {
     ...shot,
-    mode: normalizeMode(shot.mode, { hasRefImages: (shot.refs?.images?.length ?? 0) > 0 }),
-    // 控制视频配置统一在落盘口收敛（REST 可直接传 body.shot，绕过 newShot）
-    control: normalizeControl(shot.control),
+    ...(shot.mode !== undefined
+      ? { mode: normalizeMode(shot.mode, { hasRefImages: (shot.refs?.images?.length ?? 0) > 0 }) }
+      : {}),
     // 3D 预演结构化数据同样在落盘口收敛 —— 这三个字段决定 Blender 渲什么，
     // 形状错了整镜渲不出来（且错误信息会很难懂）。
-    actors: normalizeActors(shot.actors),
-    props: normalizeProps(shot.props),
-    camera3d: normalizeCamera3d(shot.camera3d),
+    ...(shot.actors !== undefined ? { actors: normalizeActors(shot.actors) } : {}),
+    ...(shot.props !== undefined ? { props: normalizeProps(shot.props) } : {}),
+    ...(shot.camera3d !== undefined ? { camera3d: normalizeCamera3d(shot.camera3d) } : {}),
     updatedAt: Date.now(),
   };
   if (!next.id) next.id = newShot().id;
 
-  // ⚠️ validateShot 以前只被 import 从未调用 —— 镜头卡保存不做任何校验，
-  //    9 张参考图上限、时长 1-15s、模式与图数匹配全都不生效。
-  //    这里做**两件事**：把硬约束夹到合法区间（避免下游跑炸），并把警告挂到返回体。
-  const raw = Number(next.durationSec);
-  if (Number.isFinite(raw)) next.durationSec = Math.min(15, Math.max(1, raw));
-  if (Array.isArray(next.refs?.images) && next.refs.images.length > 9) {
-    next.refs = { ...next.refs, images: next.refs.images.slice(0, 9) };
-  }
-  const check = validateShot(next);
-  next.validation = check;
-
   const idx = list.findIndex((s) => s.id === next.id);
-  if (idx >= 0) list[idx] = { ...list[idx], ...next };
-  else list.push(next);
+  /**
+   * 先合并出**完整记录**，再校验。
+   *
+   * ⚠️ 顺序很重要：
+   *    1) 部分保存时 next 只有几个字段，直接校验必然报"时长缺失"等假错
+   *    2) 校验和夹取要作用在合并后的完整记录上，写盘后才是合法的镜头卡
+   *
+   * 合并语义：显式传 null 表示"清空"，不传（undefined）表示"保持不变"。
+   * 直接 `{ ...old, ...next }` 会用 undefined 覆盖旧值 —— 只改 nanfeng
+   * 的部分保存会把 durationSec/ratio/refs 全清掉，把镜头卡写坏。
+   */
+  const merged = idx >= 0 ? { ...list[idx] } : {};
+  for (const [k, v] of Object.entries(next)) {
+    if (v !== undefined) merged[k] = v;
+  }
+
+  // 落到合法区间（避免下游跑炸），警告挂到记录上
+  const raw = Number(merged.durationSec);
+  if (Number.isFinite(raw)) merged.durationSec = Math.min(15, Math.max(1, raw));
+  if (Array.isArray(merged.refs?.images) && merged.refs.images.length > 9) {
+    merged.refs = { ...merged.refs, images: merged.refs.images.slice(0, 9) };
+  }
+  merged.validation = validateShot(merged);
+
+  if (idx >= 0) list[idx] = merged;
+  else list.push(merged);
   const tmp = `${f}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(list, null, 2), 'utf8');
   fs.renameSync(tmp, f);
-  return next;
+
+  // 广播给浏览器：DSH Agent 改了镜头卡 → 网页表单立即可见
+  emit({ type: 'shot-updated', projectId, shotId: merged.id });
+
+  // 返回落盘后的完整记录，而不是只含本次改动字段的 next
+  return merged;
 }
 
 /**
@@ -2017,6 +2174,16 @@ export function compilePrompt(shot) {
         subjects,
         scenes: shot.scenes ?? undefined,
         seed: shot.seed,
+        /**
+         * 续写上下文透传。
+         *
+         * `continuationTask` 存在 job.params 上（见 executeBackend 的 runH3Nanfeng 调用），
+         * 但 compilePrompt 只拿到 shot —— 所以调用方需要先把它挂到 shot 上。
+         * 见 executeBackend 里的 `shotForCompile`。
+         */
+        continuationTask: shot.continuationTask ?? null,
+        continuationIndex: shot.continuationIndex ?? null,
+        contextLength: shot.nanfeng?.overrides?.context_length ?? '22',
       });
       // 兼容旧字段：description/camera/style 已在 toShotInputPackage 里映射。
       //
@@ -2034,12 +2201,24 @@ export function compilePrompt(shot) {
       if (shot.sound) pkg.overall_soundscape = shot.sound;
       if (shot.music) pkg.non_diegetic_music = shot.music;
 
+      // ⚠️ 参考视频/音频的**用途说明**必须走 buildMediaNotes。
+      //
+      // 历史缺陷：buildMediaNotes 只挂在 /render/compile 上，而那是个
+      // 没人调用的死端点。真实生成路径（本函数）不产 mediaNotes，
+      // 于是 compileRef2VA 只能退化到内置默认句 —— 所有参考视频都被写成
+      // `transfer motion only`，"续篇 / 节奏 / 氛围"这三类用途永远表达不出来，
+      // 参考音频也拿不到"谁的音色"绑定。
+      try {
+        const plan = buildRenderPlan(shot, cfg);
+        const notes = buildMediaNotes(plan);
+        if (Array.isArray(notes) && notes.length) pkg.mediaNotes = notes;
+      } catch { /* 构建计划失败不影响编译 */ }
+
       const r = compileH3Prompt(pkg);
       if (r.prompt && r.prompt.length > 40) return r.prompt.slice(0, 7000);
     } catch {
       // 结构化编译失败 → 退回简单拼接，不让生成中断
-    }
-  }
+    }  }
   // ==========================================================================
   // 兜底：结构化编译抛错时的极简组装
   // ==========================================================================
@@ -2070,8 +2249,12 @@ export function compilePrompt(shot) {
 /**
  * 从镜头卡推断 subjects（参考图 → 角色）。
  * 没有显式 subjects 时用这个兜底，让结构化编译器也能工作。
+ *
+ * ⚠️ 已导出：`host/tools.js` 的 `studio_prompt(fromShot)` 必须用同一份逻辑，
+ *    否则"Agent 编译的提示词"与"REST 预览 / 真实生成"会漂移。
+ *    任何新的预览入口都应调用这里，不要自己再写一份。
  */
-function deriveSubjectsFromShot(shot) {
+export function deriveSubjectsFromShot(shot) {
   const imgs = shot.refs?.images ?? [];
   if (!imgs.length) return [];
   return imgs.map((_, i) => ({
@@ -2113,10 +2296,51 @@ function diskFree(dir) {
 
 
 async function executeBackend(job, shot, ctx, cfg, hooks) {
-  const prompt = job.prompt || compilePrompt(shot);
+  /**
+   * 把续写上下文挂到 shot 上再编译提示词。
+   *
+   * ⚠️ 为什么必须在这里挂：`compilePrompt(shot)` 只接收 shot，
+   *    而续写任务存在 `job.params.continuationTask` 里（由继续批次编排写入）。
+   *    不挂的话，续写段的提示词**顶部不会有开关句** ——
+   *    模型就按文字重新推导姿态，导致接缝断裂（这是续写失败最常见的根因）。
+   */
+  const shotForCompile = job.params?.continuationTask
+    ? {
+      ...shot,
+      continuationTask: job.params.continuationTask,
+      continuationIndex: job.params?.batchIndex ?? null,
+    }
+    : shot;
+
+  const prompt = job.prompt || compilePrompt(shotForCompile);
   const outputsDir = path.join(cfg.dataDir, 'outputs');
   // 提交回调：把 remoteId 尽早落盘，否则"已提交未完成"期间取消无法通知远端
   const onSubmitted = hooks?.onSubmitted;
+
+  /**
+   * 南风 V15 后端 —— **默认视频路径**。
+   *
+   * 南风节点把所有模型加载、条件编码、二次采样、解码封装在节点内部，
+   * 由 ComfyUI 的 GraphBuilder 展开。我们的后端只负责选预设、传参、接输出。
+   *
+   * 相对旧的 h3-local（模板替换）：
+   *   · 支持潜空间放大二采（旧路径没有）
+   *   · 支持跨镜头续写（旧路径没有）
+   *   · 参数体系 217 个，由 nanfeng/schema.js 统一定义
+   */
+  if (job.backendId === 'h3-nanfeng') {
+    return runH3Nanfeng({
+      job,
+      shot,
+      prompt,
+      cfg,
+      onSubmitted,
+      mode: job.params?.nanfengMode || shot.mode,
+      preset: job.params?.nanfengPreset ?? shot?.nanfeng?.presets,
+      extraParams: job.params?.nanfengExtra,
+      continuationTask: job.params?.continuationTask,
+    });
+  }
 
   if (job.backendId === 'h3-local') {
     // 统一走 services/generator.js（与 Agent 工具共用同一实现）
@@ -2160,36 +2384,6 @@ function loadImageWorkflow(cfg = loadConfig()) {
   return readWorkflowCached('image', cfg);
 }
 
-/**
- * 模特工作台 → 参考图。
- *
- * 形象库（figures.json）里的形象带封面图片，job 通过 figure/role/model 引用它。
- * 旧实现从不读这些字段，形象库等于死数据；这里把它接进 characterRefs。
- *
- * ⚠️ 必须显式接收 ctx。
- *    上一版写成了 `resolveMwFigureRefs(job)` 然后在体内用 `ctx.mw`，
- *    但这是**模块级函数**，`ctx` 是 handleApi 里的局部变量 ——
- *    于是 `ReferenceError: ctx is not defined`，被下面的 catch 吞成 `[]`。
- *    表现：形象库选了也没用，出图不带任何形象参考，且不报错。
- */
-function resolveMwFigureRefs(ctx, job) {
-  try {
-    const key = job?.figure ?? job?.role ?? job?.model ?? null;
-    if (!key) return [];
-    const figures = ctx?.mw?.listFigureItems?.() ?? [];
-    const hit = figures.find((f) => f.id === key || f.name === key);
-    if (!hit) return [];
-    const imgs = [];
-    if (hit.rel) imgs.push(hit.rel);
-    if (hit.imageRel) imgs.push(hit.imageRel);
-    if (Array.isArray(hit.images)) imgs.push(...hit.images.filter(Boolean));
-    return imgs;
-  } catch (e) {
-    // 不再无声失败：至少留一条日志，方便定位形象库为什么没生效
-    try { ctx?.extras?.appendLog?.({ level: 'warn', msg: `形象库参考图解析失败：${String(e?.message ?? e)}` }); } catch { /* ignore */ }
-    return [];
-  }
-}
 
 
 

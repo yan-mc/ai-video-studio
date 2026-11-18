@@ -332,10 +332,6 @@ export function newProject({ name, category = 'uncategorized', rootPath = '', de
     nodes: [],
     edges: [],
     viewport: null,
-    scriptProjectName: null,
-    scriptProjectDir: null,
-    comicProjectName: null,
-    comicProjectDir: null,
   };
 }
 
@@ -356,36 +352,62 @@ export function newShot({ title = '', episodeIndex = 1, shotIndex = 1, ...rest }
     /**
      * 加速方案（可选，覆盖全局 config.accelPlan）。
      *
-     * 留空 = 跟随全局默认。允许单镜指定，是为了"这一镜要最锐就用
-     * lightx2v、那一镜要理解准就用 dmad8"这种混合工作流。
+     * 留空 = 跟随全局默认。允许单镜指定，便于个别镜头换 4 步草稿。
      * 取值合法性由 services/accel-plan.js 校验（未知值回退默认并告警）。
      */
     accelPlan: typeof rest.accelPlan === 'string' ? rest.accelPlan : '',
-    backend: rest.backend || 'h3-local',
+    // 南风 V15 是默认视频后端；h3-local 为旧的模板替换路径，保留作回退
+    backend: rest.backend || 'h3-nanfeng',
     style: rest.style || '',
+    styleId: typeof rest.styleId === 'string' ? rest.styleId : '',
+    /**
+     * 打光通道（光比预设 id）。
+     *
+     * 南风 217 参数里没有打光参数，光比只能靠提示词表达。
+     * 取值见 services/h3-prompt.js 的 LIGHTING_PRESETS：
+     *   none / high-key-2-1 / classic-3-1 / dramatic-4-1 / noir-8-1 / rim-backlit
+     */
+    lightingId: typeof rest.lightingId === 'string' ? rest.lightingId : '',
     description: rest.description || '',
     camera: rest.camera || '',
     dialogue: rest.dialogue || '',
     sound: rest.sound || '',
     music: rest.music || '',
     prompt: rest.prompt || '',
-    refs: { images: [], videos: [], audios: [] },
+    /**
+     * 参考素材。
+     *
+     * ⚠️ 必须继承 `rest.refs`，不能写死空数组 —— 否则 REST / studio_shot
+     *    传进来的参考图、参考视频、参考音频全部丢失，
+     *    生成时 Ref2VA 拿不到任何素材。
+     */
+    refs: {
+      images: Array.isArray(rest.refs?.images) ? rest.refs.images.slice(0, 9) : [],
+      videos: Array.isArray(rest.refs?.videos) ? rest.refs.videos.slice(0, 3) : [],
+      audios: Array.isArray(rest.refs?.audios) ? rest.refs.audios.slice(0, 3) : [],
+    },
     characterRefs: [], sceneRefs: [], itemRefs: [], materialRefs: [],
     // 角色卡仓库选中的卡（id 列表）
     cardIds: [],
     // 参考图缩放：match（快）| max（高保真但慢）
     refImageSize: rest.refImageSize === 'max' ? 'max' : 'match',
     previz: null,
-    // 控制视频（H3 Fun ControlNet Union）—— 锁空间结构与时间推进。
-    // 未配置时为 null；配置后由 generator.resolveControl 统一解析并接线。
-    //   { type, videoRel, strength, startPercent, endPercent }
-    control: normalizeControl(rest.control),
     // ---- 3D 预演结构化数据（Blender 渲染的输入）----
     // 没有这些字段时，Blender 只能渲"默认两人对峙"，等于没用。
     // 见 docs/3D预演与导演台-结构拆解.md 与 blender-previz REPORT §8。
     actors: normalizeActors(rest.actors ?? rest.staging?.actors),
     props: normalizeProps(rest.props ?? rest.staging?.props),
     camera3d: normalizeCamera3d(rest.camera3d ?? rest.staging?.camera3d),
+    /**
+     * 南风 V15 参数覆盖。
+     *
+     * 结构：{ presets: 'quality' | { inherit, overrides }, overrides: { '参数名': 值 } }
+     *
+     * ⚠️ 这个字段以前被 newShot 的白名单构造丢弃，导致：
+     *    网页/Agent 设的预设和参数覆盖存不进镜头卡，
+     *    下次读取时全变回默认值。必须显式保留。
+     */
+    ...(rest.nanfeng && typeof rest.nanfeng === 'object' ? { nanfeng: rest.nanfeng } : {}),
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -604,35 +626,6 @@ export function normalizeCamera3d(input) {
       .sort((a, b) => a.frame - b.frame);
   }
   return out;
-}
-
-/**
- * 规范化控制视频配置。
- *
- * 只做形状与范围收敛，不做存在性校验 —— 文件是否真的存在由 generator 在
- * staging 阶段判断（不存在就当没配，不让整镜失败）。
- *
- * 默认值来自实测（docs/probes/h3-controlnet-2026-11-14/REPORT.md）：
- * strength 1.0 / 0—0.8 区间是「控制明显生效、尾部仍保留生成自由度」的起点。
- */
-export function normalizeControl(input) {
-  if (!input || typeof input !== 'object') return null;
-  const rel = typeof input.videoRel === 'string' ? input.videoRel.trim() : '';
-  if (!rel) return null;
-  const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
-  const clamp01 = (v) => Math.min(1, Math.max(0, v));
-  const start = clamp01(num(input.startPercent, 0));
-  const end = clamp01(num(input.endPercent, 0.8));
-  return {
-    // Union 模型不区分类型，这里只作展示与提示词提示
-    type: ['depth', 'pose', 'canny', 'hed', 'mlsd', 'gray', 'layout', 'scribble'].includes(input.type)
-      ? input.type
-      : '',
-    videoRel: rel,
-    strength: Math.min(10, Math.max(0, num(input.strength, 1))),
-    startPercent: Math.min(start, end),
-    endPercent: Math.max(start, end),
-  };
 }
 
 /**

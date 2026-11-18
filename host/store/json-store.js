@@ -137,8 +137,3 @@ export function collectionStore(file, { idField = 'id', prefix = 'item' } = {}) 
   };
 }
 
-/** 测试用：等待所有队列落定 */
-export async function drainQueues() {
-  await Promise.all([...queues.values()]);
-  queues.clear();
-}

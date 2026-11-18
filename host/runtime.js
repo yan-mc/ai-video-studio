@@ -5,12 +5,17 @@
  * 走 Service 子类对本地插件是过度设计，且 provide 声明需要 Cordis 的装饰器注册路径。
  * 这里改用模块级单例：插件激活时 init()，停用时 dispose()。
  * 工具/API 都从这里取控制器，避免 ctx 属性注入。
+ *
+ * ⚠️ Host 服务（llm / agentDefaultModel）也要挂进来：
+ *    工具和 API 拿到的是这个 runtime 对象（`getRuntime()`），不是 Cordis ctx。
+ *    以前只挂控制器，导致 `z.llm` 恒为 undefined ——
+ *    智能分镜永远报"DSH 未挂载 llm 服务"，即使插件 inject 了 llm。
  */
 
 let state = null;
 
-export function initRuntime({ root, cfg, webServer }) {
-  state = { root, cfg, webServer, startedAt: Date.now() };
+export function initRuntime({ root, cfg, webServer, llm, agentDefaultModel, attachments }) {
+  state = { root, cfg, webServer, llm, agentDefaultModel, attachments, startedAt: Date.now() };
   return state;
 }
 

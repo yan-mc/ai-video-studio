@@ -1,4 +1,8 @@
 # 运行时数据（首次启动自动创建，不入库）
+#
+# ⚠️ 这里的规则必须覆盖"用户会往里面塞东西"的所有目录。
+#    历史上 data/prompts/ 和 data/runs/ 被漏掉了，结果别人的提示词和
+#    job 历史被提交进仓库 —— 克隆下来会看到一堆不属于自己的产物。
 data/config.json
 data/*.json
 data/outputs/
@@ -6,20 +10,21 @@ data/previz/
 data/post/
 data/assets/
 data/shots/
-data/comic/
-data/mw/
-data/script/
+data/runs/
 data/extras/
 data/previz-shots/
-data/selftest-*/
-data/tmp-inline/
 data/inputs/
 data/vault/
+data/prompts/
 
 # 仓库里只保留工作流模板
 !data/workflows/
 
 # 前端依赖与构建中间产物
+#
+# 注意：app-dist/ **不**忽略 —— 它是随插件分发的构建产物，
+# 用户从 GitHub 拿到后不需要装 node 就能直接用。
+# 只忽略构建中间产物和依赖。
 app-src/node_modules/
 app-src/dist/
 
@@ -31,4 +36,8 @@ Thumbs.db
 
 # 本地备份
 *.broken
+*.stage3-backup/
+*.stage3bak
+*.stage4bak
+*.reinstall-backup-*
 __pycache__/

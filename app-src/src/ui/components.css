@@ -464,6 +464,26 @@
     background var(--jz-dur-fast) var(--jz-ease);
 }
 
+/*
+ * 多行输入框不能用单行控件的高度。
+ *
+ * 历史缺陷：`<textarea className="jz-input rows={14}>` 只匹配到上面这条规则里
+ * 的 `.jz-input`，被 `height: var(--jz-control-h)`（32px）压成一条单行条，
+ * `rows` 被 CSS height 覆盖，提示词编辑器几乎无法使用。
+ * `.jz-textarea` 在后面重置了 height:auto，所以只有"裸 textarea + jz-input"
+ * 这一种写法中招 —— 渲染页 / 智能分镜页 / 参数面板三处都是这种写法。
+ *
+ * 用元素选择器统一兜住，任何 textarea 都不再继承单行高度。
+ */
+textarea.jz-input,
+textarea.jz-select {
+  height: auto;
+  min-height: 96px;
+  padding: var(--jz-sp-2) var(--jz-sp-3);
+  line-height: var(--jz-lh-normal);
+  resize: vertical;
+}
+
 .jz-input::placeholder,
 .jz-textarea::placeholder {
   color: var(--jz-text-faint);
@@ -997,4 +1017,162 @@
   to {
     transform: rotate(360deg);
   }
+}
+/* ==========================================================================
+ * 南风参数面板 —— 释义 / 建议 / 无效参数标记
+ * ==========================================================================
+ * 只用主题令牌，深浅两套主题自动适配（见 ui/tokens.css）。
+ */
+
+/* 面板顶部工具条：隐藏无效参数开关 */
+.jz-nf-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--jz-sp-3);
+  padding: 6px var(--jz-sp-3);
+  font-size: 11.5px;
+}
+
+.jz-nf-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--jz-text-secondary);
+  user-select: none;
+}
+
+.jz-nf-toggle input {
+  accent-color: var(--jz-accent);
+  cursor: pointer;
+}
+
+/* 分组级说明 */
+.jz-nf-groupdoc {
+  font-size: 11.5px;
+  line-height: 1.65;
+  color: var(--jz-text-secondary);
+  background: var(--jz-bg-layer-2);
+  border-left: 2px solid var(--jz-accent-line);
+  border-radius: 0 6px 6px 0;
+  padding: 6px 10px;
+}
+
+/* 单个参数条目 */
+.jz-nf-item {
+  display: grid;
+  gap: 3px;
+  padding-bottom: var(--jz-sp-3);
+  border-bottom: 1px dashed var(--jz-border);
+}
+
+.jz-nf-item:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+/* 无效参数：降低视觉权重但保持可读 */
+.jz-nf-item--inert {
+  opacity: 0.62;
+}
+
+.jz-nf-name {
+  font-family: var(--jz-font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  color: var(--jz-text-primary);
+  background: var(--jz-bg-layer-2);
+  border: 1px solid var(--jz-border);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+/* 一句话说明 */
+.jz-nf-doc {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--jz-text-secondary);
+}
+
+/* 调参建议：默认折叠，避免面板过长 */
+.jz-nf-hint {
+  font-size: 11px;
+  color: var(--jz-text-muted);
+}
+
+.jz-nf-hint > summary {
+  cursor: pointer;
+  color: var(--jz-accent-text);
+  list-style: none;
+  user-select: none;
+}
+
+.jz-nf-hint > summary::-webkit-details-marker {
+  display: none;
+}
+
+.jz-nf-hint > summary::before {
+  content: '💡 ';
+}
+
+.jz-nf-hint[open] > summary {
+  margin-bottom: 3px;
+}
+
+.jz-nf-hint > div {
+  line-height: 1.65;
+  padding-left: 2px;
+}
+
+/* 参数速查表 */
+.jz-nf-table {
+  display: grid;
+  gap: var(--jz-sp-2);
+  max-height: 62vh;
+  overflow: auto;
+}
+
+.jz-nf-row {
+  display: grid;
+  gap: 3px;
+  padding: var(--jz-sp-2) 0;
+  border-bottom: 1px dashed var(--jz-border);
+}
+
+.jz-nf-row:last-child {
+  border-bottom: none;
+}
+
+.jz-nf-row__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.jz-nf-row__head code {
+  font-family: var(--jz-font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--jz-text-primary);
+}
+
+.jz-nf-row__zh {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--jz-text-secondary);
+}
+
+.jz-nf-row__hint {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--jz-text-muted);
+}
+
+.jz-nf-row__def {
+  font-size: 10.5px;
+  color: var(--jz-text-faint);
+}
+
+.jz-nf-row__def code {
+  font-family: var(--jz-font-mono, ui-monospace, monospace);
 }

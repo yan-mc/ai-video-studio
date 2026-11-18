@@ -1097,8 +1097,8 @@ function CanvasInner() {
       if (!node) return;
       const type = node.type ?? '';
       const label = displayTitle(node);
-      // 3D 类节点（导演台/白模预演/姿势台/全景）→ 打开预演导演台页面
-      // 预演引擎已就绪（services/previz + 5 条 API 路由），SPA 只需一个宿主页
+      // 3D 类节点（白模预演/姿势台/全景）→ 跳转到预演页统一处理。
+      // 该页现在只做 Blender 灰模参考视频渲染，不再有浏览器内 3D 引擎。
       const STUDIO_TYPES = new Set([
         'blueprintNode', 'previzNode', 'poseStudioNode',
         'vr360PanoramaNode', 'panoramaViewerBNode', 'panoramaNode',

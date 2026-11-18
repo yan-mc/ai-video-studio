@@ -48,15 +48,14 @@ export const zh = {
   /* -------------------------------- 导航 -------------------------------- */
   nav: {
     render: '渲染',
+    storyboard: '智能分镜',
+    workshop: 'H3 工坊',
     canvas: '画布',
     assets: '素材库',
     projects: '项目',
     settings: '设置',
     jobs: '任务',
     previz: '3D 预演',
-    script: '剧本',
-    comic: '漫画',
-    mw: '模特',
     image: '图像',
     breakdown: '立绘拆解',
     vault: '角色卡',

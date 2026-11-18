@@ -411,7 +411,6 @@ const DEFS: NodeDefinition[] = [
     fields: [
       { kind: 'select', key: 'resultKind', label: '结果类型', default: 'videoGeneratorOutput', options: RESULT_KIND_OPTIONS },
       { kind: 'switch', key: 'keepLastFrame', label: '保留尾帧（供下一镜继承）', default: true },
-      { kind: 'switch', key: 'openInDirector', label: '完成后在总导演台打开', default: false },
     ],
   },
 
@@ -801,15 +800,14 @@ const DEFS: NodeDefinition[] = [
   {
     type: 'blueprintNode',
     label: NODE_LABELS.blueprintNode,
-    shortLabel: '导演台',
+    shortLabel: '3D 走位',
     icon: 'cube',
     category: 'studio',
-    description: '内嵌 3D 站位 / 机位 / 灯光（BlueprintScene）',
+    description: '配置人物站位与机位，交给后端 Blender 渲成灰模参考视频',
     size: { width: 320, height: 340 },
     tone: 'info',
     capabilities: { preview: true, needsBackend: true },
     fields: [
-      { kind: 'input', key: 'sceneId', label: '场景 ID', mono: true, placeholder: '例如：sc-1' },
       {
         kind: 'select',
         key: 'camera',
@@ -844,7 +842,7 @@ const DEFS: NodeDefinition[] = [
     shortLabel: '白模预演',
     icon: 'play',
     category: 'studio',
-    description: '场景 JSON → 6 种模式导出（导演台/场记/关键帧/站位/宫格/接缝），mp4 需 WebCodecs',
+    description: '把镜头卡交给后端 Blender 渲一段灰模参考视频（blockout），喂给 Ref2VA',
     size: { width: 300, height: 356 },
     tone: 'info',
     capabilities: { preview: true, needsBackend: true },
@@ -852,18 +850,13 @@ const DEFS: NodeDefinition[] = [
       {
         kind: 'select',
         key: 'mode',
-        label: '导出模式',
-        default: 'director',
+        label: '输出通道',
+        default: 'blockout',
         options: [
-          { value: 'director', label: '导演台' },
-          { value: 'script', label: '场记' },
-          { value: 'keyframe', label: '关键帧' },
-          { value: 'blocking', label: '站位' },
-          { value: 'grid', label: '宫格' },
-          { value: 'seam', label: '接缝' },
+          { value: 'blockout', label: '灰模参考视频' },
+          { value: 'preview', label: '彩色预览（仅人看）' },
         ],
       },
-      { kind: 'textarea', key: 'sceneJson', label: '场景 JSON', rows: 3, mono: true, placeholder: '{ "scenes": [...] }' },
       { kind: 'number', key: 'fps', label: '帧率', min: 1, max: 60, step: 1, default: 24, suffix: 'fps' },
       {
         kind: 'select',
@@ -876,7 +869,7 @@ const DEFS: NodeDefinition[] = [
           { value: '1280x720', label: '1280 × 720' },
         ],
       },
-      { kind: 'switch', key: 'exportVideo', label: '导出 mp4（需 WebCodecs）', default: false },
+      { kind: 'switch', key: 'exportVideo', label: '导出 mp4', default: true },
     ],
   },
   {
@@ -885,7 +878,7 @@ const DEFS: NodeDefinition[] = [
     shortLabel: '姿势台',
     icon: 'cube',
     category: 'studio',
-    description: 'iframe 载入 freepose 编辑器，postMessage 注入 pose-studio-load',
+    description: '给 Blender 人偶指定姿势名，渲染时驱动骨架',
     size: { width: 288, height: 300 },
     tone: 'info',
     capabilities: { preview: true, needsBackend: true },

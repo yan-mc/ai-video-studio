@@ -59,6 +59,8 @@ export type { MeterProps, MeterTone } from './Meter';
 
 export { Toaster, useToast } from './Toast';
 
+export { ErrorBoundary } from './ErrorBoundary';
+
 export { Icon } from './Icon';
 export type { IconName, IconProps } from './Icon';
 

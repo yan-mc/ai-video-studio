@@ -286,7 +286,7 @@ export function VaultPage() {
                   {(draft.images?.[slot.id] ?? []).map((rel) => (
                     <div key={rel} style={{ position: 'relative' }}>
                       <img src={assetThumb(imageAssets, rel)} alt={rel}
-                        style={{ width: 72, height: 72, objectFit: 'cover', borderRadius: 4, border: '1px solid var(--jz-line)' }} />
+                        style={{ width: 72, height: 72, objectFit: 'cover', borderRadius: 4, border: '1px solid var(--jz-border)' }} />
                       <button type="button" onClick={() => removeImage(slot.id, rel)}
                         style={{
                           position: 'absolute', top: -6, right: -6, width: 18, height: 18, borderRadius: 9,

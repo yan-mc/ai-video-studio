@@ -170,17 +170,3 @@ function failResult(error) {
   };
 }
 
-/** 批量探测（并发受限，避免一次拉起太多进程） */
-export async function probeMany(absPaths, cfg, concurrency = 4) {
-  const list = [...new Set((absPaths ?? []).filter(Boolean))];
-  const out = new Map();
-  for (let i = 0; i < list.length; i += concurrency) {
-    const batch = list.slice(i, i + concurrency);
-    const results = await Promise.all(batch.map((p) => probeMedia(p, cfg)));
-    batch.forEach((p, idx) => out.set(p, results[idx]));
-  }
-  return out;
-}
-
-/** 清缓存（测试用） */
-export function resetProbeCache() { cache.clear(); }

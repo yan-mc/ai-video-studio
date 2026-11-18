@@ -3,19 +3,17 @@
  *
  * 命名沿用 studio_（与旧插件兼容），但全部走新实现。
  */
-import fs from 'node:fs';
+import path from 'node:path';
 import { loadConfig, saveConfig, maskConfig, sanitizeConfigPatch, resetConfigCache } from './config.js';
-import { projects, assets, newProject, newShot, PROFILES, resolutionFor, h3Length, NODE_TYPES, NODE_LABELS, ASSET_TYPES, ASSET_TYPE_LABELS, PROJECT_CATEGORY_LABELS, H3_MODEL_SLOTS, dirs } from './store/models.js';
+import { projects, assets, newProject, newShot, PROFILES, resolutionFor, h3Length, NODE_TYPES, NODE_LABELS, ASSET_TYPES, ASSET_TYPE_LABELS, PROJECT_CATEGORY_LABELS, H3_MODEL_SLOTS } from './store/models.js';
 import { jobs as jobsStore, newJob, isLocalBackendOf } from './services/job-store.js';
 import { runJob, cancelJob, runtimeStats } from './services/job-runner.js';
-import { compilePrompt, listShots, upsertShot, writeShots, cleanupProjectArtifacts } from './api/index.js';
-import { withVaultCards } from './services/shot-context.js';
+import { compilePrompt, listShots, upsertShot, writeShots, cleanupProjectArtifacts, deriveSubjectsFromShot } from './api/index.js';
+import { withVaultCards, resolvePictureIndices } from './services/shot-context.js';
 import { readWorkflowCached } from './services/workflow-paths.js';
 import * as comfy from './services/comfy-client.js';
 import * as mockBackend from './services/mock-backend.js';
-import { extractAssets, segmentScript } from './services/h3-workshop.js';
-import { runH3Local } from './services/generator.js';
-import { SCRIPT_GENRES, SCRIPT_STAGES, checkConsistency } from './services/script-service.js';
+import { runH3Local, runH3Nanfeng } from './services/generator.js';
 import { blenderStatus, buildSceneSpec, renderControl, listModelAssets, listAssetActions } from './services/blender-service.js';
 import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, H3_MODES, H3_LIMITS } from './services/h3-prompt.js';
 import {
@@ -28,7 +26,7 @@ import {
 } from './services/h3-image.js';
 import { runH3ImageLocal } from './services/generator.js';
 import { getRuntime } from './runtime.js';
-import { safeId } from './security.js';
+import { safeId, safeJoin, resolveUserPath } from './security.js';
 
 function ok(value) {
   return { value, content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] };
@@ -99,17 +97,29 @@ export function registerTools(ctx) {
   /* ---------------------------------------------------------- 元信息 */
   disposers.push(reg(tool(
     'studio_meta',
-    '查看工作室元信息：生成档位、H3 模型槽位、26 种节点、14 类资产、项目分类、后端状态。',
+    '查看工作室元信息：生成档位、H3 模型槽位、26 种节点、14 类资产、项目分类、'
+    + '后端状态、南风参数分组与预设。',
     { type: 'object', properties: {}, additionalProperties: false },
-    async () => ({
-      profiles: PROFILES,
-      h3Slots: H3_MODEL_SLOTS,
-      nodeTypes: NODE_TYPES.map((t) => ({ type: t, label: NODE_LABELS[t] })),
-      assetTypes: ASSET_TYPES.map((t) => ({ type: t, label: ASSET_TYPE_LABELS[t] })),
-      projectCategories: PROJECT_CATEGORY_LABELS,
-      backends: { h3: await comfy.health(loadConfig()) },
-      runtime: runtimeStats(),
-    }),
+    async () => {
+      const nf = await import('./services/nanfeng/schema.js');
+      const nfPre = await import('./services/nanfeng/presets.js');
+      return {
+        profiles: PROFILES,
+        h3Slots: H3_MODEL_SLOTS,
+        nodeTypes: NODE_TYPES.map((t) => ({ type: t, label: NODE_LABELS[t] })),
+        assetTypes: ASSET_TYPES.map((t) => ({ type: t, label: ASSET_TYPE_LABELS[t] })),
+        projectCategories: PROJECT_CATEGORY_LABELS,
+        backends: { h3: await comfy.health(loadConfig()) },
+        runtime: runtimeStats(),
+        /** 南风 V15 参数体系 */
+        nanfeng: {
+          paramCount: nf.PARAM_COUNT,
+          groups: nf.GROUPS,
+          presets: nfPre.listBuiltinPresets(),
+          defaultPreset: nfPre.DEFAULT_PRESET,
+        },
+      };
+    },
   )));
 
   /* ---------------------------------------------------------- 配置 */
@@ -269,19 +279,39 @@ export function registerTools(ctx) {
       if (!a.projectId || !a.shotId) throw new Error('PROJECT_AND_SHOT_REQUIRED');
       const shot = listShots(a.projectId).find((s) => s.id === a.shotId);
       if (!shot) throw new Error('SHOT_NOT_FOUND');
-      const pkg = toShotInputPackage(shot, {
-        styleId: a.styleId ?? shot.styleId ?? null,
-        subjects: a.subjects,
+
+      /**
+       * ⚠️ 必须与 `/prompt/from-shot` 和 `studio_generate` 走**同一条入参准备**。
+       *
+       * 历史缺陷：REST 侧已经改成 `withVaultCards()` → `resolvePictureIndices()`
+       * （角色卡优先），但这条工具路径还是直接拿原始 shot 编译 ——
+       * 于是"页面预览的提示词"和"Agent 生成时用的提示词"在**绑定了角色卡**的
+       * 项目上不一致：预览里没有 `<Subject N>`，真实生成里却有。
+       * 这正是 api/index.js:1394-1404 那段注释痛陈过的"预览与实物不一致"，
+       * 当时只修了 REST，工具侧漏了。
+       */
+      const prepared = await withVaultCards(shot, a.projectId, getRuntime(), loadConfig());
+      const cardSubjects = Array.isArray(prepared.characterCards)
+        ? resolvePictureIndices(prepared, loadConfig())
+        : [];
+      const subjects = a.subjects
+        ?? (cardSubjects.length ? cardSubjects : deriveSubjectsFromShot(prepared));
+
+      const pkg = toShotInputPackage(prepared, {
+        styleId: a.styleId ?? prepared.styleId ?? null,
+        subjects,
         scenes: a.shots,
       });
       const compiled = compileH3Prompt(pkg);
       // 兼容旧返回：附上分辨率与帧数建议
       return {
         ...compiled,
-        prompt: compiled.prompt || compilePrompt(shot),
+        prompt: compiled.prompt || compilePrompt(prepared),
         resolution: resolutionFor(shot.profile, shot.ratio),
         h3Length: h3Length(shot.durationSec),
         package: pkg,
+        subjectCount: subjects.length,
+        fromVault: cardSubjects.length > 0,
       };
     },
   )));
@@ -289,14 +319,26 @@ export function registerTools(ctx) {
   /* ---------------------------------------------------------- 生成 */
   disposers.push(reg(tool(
     'studio_generate',
-    '提交生成任务。backend=h3-local|h3-image|mock。立即返回 job，异步执行。',
+    '提交视频/图像生成任务。立即返回 job，异步执行。'
+    + 'backend=h3-nanfeng（默认，支持二采/续写）|h3-local（旧模板路径）|h3-image|mock。'
+    + 'preset 可选：draft / standard / quality / quality-preview / continuation / '
+    + 'continuation-quality / low-vram。'
+    + 'params 用于覆盖预设里的单项参数（键名见 studio_meta 的 nanfeng.params）。',
     {
       type: 'object',
       properties: {
         projectId: { type: 'string' },
         shotId: { type: 'string' },
-        backend: { type: 'string', enum: ['h3-local', 'h3-image', 'mock'] },
+        backend: { type: 'string', enum: ['h3-nanfeng', 'h3-local', 'h3-image', 'mock'] },
         seed: { type: 'number' },
+        /** 预设 id */
+        preset: { type: 'string' },
+        /** 单个参数覆盖（南风 217 参数里的任意项） */
+        params: { type: 'object', description: '覆盖预设参数，键名同南风参数名' },
+        /** 生成模式（覆盖镜头卡的 mode） */
+        mode: { type: 'string', enum: ['ref2va', 't2va', 'i2va', 'fl2va'] },
+        /** 续写任务 JSON（由 studio_continuation 生成） */
+        continuationTask: { type: 'string' },
       },
       required: ['projectId', 'shotId'],
       additionalProperties: false,
@@ -312,7 +354,7 @@ export function registerTools(ctx) {
       //    旧实现不校验，任何拼错的名字（甚至 'h3-image'）都会掉进最后的
       //    runMock 分支 → 产出 ffmpeg 占位视频且状态 completed，
       //    用户拿到"假视频"还以为成了。REST /generate 有这道校验，工具没有。
-      const VALID = new Set(['h3-local', 'h3-image', 'mock']);
+      const VALID = new Set(['h3-nanfeng', 'h3-local', 'h3-image', 'mock']);
       if (!VALID.has(backendId)) {
         throw new Error(`UNKNOWN_BACKEND: ${JSON.stringify(backendId)} 不是有效后端。可选：${[...VALID].join(' / ')}`);
       }
@@ -329,13 +371,36 @@ export function registerTools(ctx) {
         shotId: shot.id,
         backendId,
         prompt: compilePrompt(shotWithCards),
-        params: { durationSec: shot.durationSec, ratio: shot.ratio, profile: shot.profile, seed: Number.isFinite(Number(args.seed)) ? Number(args.seed) : 1101 },
+        params: {
+          durationSec: shot.durationSec,
+          ratio: shot.ratio,
+          profile: shot.profile,
+          seed: Number.isFinite(Number(args.seed)) ? Number(args.seed) : 1101,
+          ...(args.preset ? { nanfengPreset: args.preset } : {}),
+          ...(args.params ? { nanfengExtra: args.params } : {}),
+          ...(args.mode ? { nanfengMode: args.mode } : {}),
+          ...(args.continuationTask ? { continuationTask: args.continuationTask } : {}),
+        },
         mode: shot.mode,
       });
       if (backendId === 'h3-image') job.kind = 'image';
       await jobsStore().upsert(job);
 
       runJob(job, async (running, hooks) => {
+        // ⭐ 南风后端：支持二采 / 续写 / 217 参数
+        if (backendId === 'h3-nanfeng') {
+          return runH3Nanfeng({
+            job: running,
+            shot: shotWithCards,
+            prompt: running.prompt,
+            cfg,
+            onSubmitted: hooks?.onSubmitted,
+            mode: running.params?.nanfengMode,
+            preset: running.params?.nanfengPreset,
+            extraParams: running.params?.nanfengExtra,
+            continuationTask: running.params?.continuationTask,
+          });
+        }
         if (backendId === 'h3-local') {
           // 统一走 services/generator.js —— 与 REST 路径共用同一实现，
           // 杜绝"工具漏填占位符"这类漂移（审查 G7）
@@ -357,7 +422,7 @@ export function registerTools(ctx) {
           onSubmitted: hooks?.onSubmitted,
         });
         // mock 是**测试占位后端**（services/mock-backend.js）：只出 ffmpeg 色卡，
-        // 不做推理。真实产出走 h3-local / h3-image。
+        // 不做推理。真实产出走 h3-nanfeng / h3-local / h3-image。
         return mockBackend.runMock({ cfg, job: running, shot: shotWithCards, prompt: running.prompt });
       }).catch(() => {});
 
@@ -431,15 +496,15 @@ export function registerTools(ctx) {
   /* ---------------------------------------------------------- 预演 */
   disposers.push(reg(tool(
     'studio_blender',
-    'Blender 预演渲染：从镜头卡渲出 H3 的控制序列（depth / pose / canny / gray），'
+    'Blender 预演渲染：从镜头卡渲一段灰模参考视频（blockout），喂给 Ref2VA 的参考视频输入；'
     + '并可列出 3D 资产与模型内置动作。'
     + 'action=health 查引擎；assets 列 3D 资产库；actions 读某模型的动作名；'
-    + 'spec 预览场景 JSON；render 渲染一路控制视频（返回 rel，可填 shot.control.videoRel）。',
+    + 'spec 预览场景 JSON；render 渲染参考视频（返回 rel，可填 shot.refs.videos）。',
     {
       type: 'object',
       properties: {
         action: { type: 'string', enum: ['health', 'assets', 'actions', 'render', 'spec'] },
-        mode: { type: 'string', enum: ['depth', 'pose', 'canny', 'gray'] },
+        mode: { type: 'string', enum: ['blockout', 'preview'] },
         assetRel: { type: 'string', description: 'action=actions 时的模型路径（dataDir 相对）' },
         projectId: { type: 'string' },
         shotId: { type: 'string' },
@@ -461,7 +526,7 @@ export function registerTools(ctx) {
       if (!shot) throw new Error('SHOT_NOT_FOUND');
       const spec = buildSceneSpec(shot, { frames: a.frames });
       if (a.action === 'spec') return spec;
-      return await renderControl({ mode: String(a.mode || 'depth'), spec, jobId: String(a.shotId || 'shot') });
+      return await renderControl({ mode: String(a.mode || 'blockout'), spec, jobId: String(a.shotId || 'shot') });
     },
   )));
 
@@ -492,91 +557,27 @@ export function registerTools(ctx) {
     },
     async (a) => {
       const { op, ...rest } = a;
+      /**
+       * ⚠️ 每个 op 的入参形状并不相同，不能统一 `z.post[op](rest)`。
+       *
+       * `qc(input)` 收的是**一个字符串**（媒体路径），其余 op 收的是
+       * 带 `input/width/height/...` 的**对象**。旧实现一股脑把 rest 对象
+       * 传给 qc，`resolveUserPath({ input: {input:'...'} })` 会把对象
+       * String() 成 "[object Object]" → 报 FILE_NOT_FOUND，
+       * 用户完全看不出是参数形状不对。
+       */
+      if (op === 'qc') {
+        const target = rest.input ?? rest.path;
+        if (!target) throw new Error('INPUT_REQUIRED: qc 需要 input（媒体文件路径）');
+        return await z.post.qc(target);
+      }
       return await z.post[op](rest);
     },
   )));
 
   /* ---------------------------------------------------------- 剧本 */
-  disposers.push(reg(tool(
-    'studio_script',
-    '剧本创作（5 阶段）：outline 大纲 / bios 人物小传 / chapters 章节目录 / body 章节正文 / storyboard 视觉分镜；也可 runAll 一键跑完。',
-    {
-      type: 'object',
-      properties: {
-        action: { type: 'string', enum: ['get', 'stage', 'runAll', 'check', 'meta'] },
-        projectId: { type: 'string' },
-        stage: { type: 'string', enum: ['outline', 'bios', 'chapters', 'body', 'storyboard'] },
-        title: { type: 'string' },
-        premise: { type: 'string', description: '一句话故事' },
-        genre: { type: 'string', description: '题材 id（见 meta）' },
-        episodes: { type: 'number', description: '集数（1-200）' },
-        episodeIndex: { type: 'number', description: 'body/storyboard 针对第几集' },
-        consistencyLimit: { type: 'number' },
-        characters: { type: 'array', items: { type: 'object' } },
-      },
-      required: ['action', 'projectId'],
-      additionalProperties: false,
-    },
-    async (a) => {
-      const { action, ...rest } = a;
-      const projectId = action === 'meta' ? '' : requireProjectId(a.projectId);
-      if (action === 'meta') return { genres: SCRIPT_GENRES, stages: SCRIPT_STAGES };
-      if (action === 'get') return z.script.load(projectId);
-      if (action === 'stage') return await z.script.runStage(projectId, rest.stage, rest);
-      if (action === 'runAll') return await z.script.runAll(projectId, rest);
-      if (action === 'check') {
-        const doc = z.script.load(projectId) ?? {};
-        return checkConsistency(doc, { limit: rest.consistencyLimit ?? 10 });
-      }
-      throw new Error('UNKNOWN_ACTION');
-    },
-  )));
 
   /* ---------------------------------------------------------- 模特工作台 */
-  disposers.push(reg(tool(
-    'studio_mw',
-    '模特工作台：电商拍摄 / 影视角色双模式。action=meta 取元信息；jobs 列表；create 建作业；replan 重算镜头；plans/savePlan/applyPlan 方案库；figures 形象库。',
-    {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          enum: ['meta', 'jobs', 'create', 'update', 'replan', 'delete', 'plans', 'savePlan', 'applyPlan', 'figures', 'upsertFigure'],
-        },
-        id: { type: 'string' },
-        ids: { type: 'array', items: { type: 'string' } },
-        name: { type: 'string' },
-        mode: { type: 'string', enum: ['ecom', 'film'] },
-        styleId: { type: 'string' },
-        customStyle: { type: 'string' },
-        sizeId: { type: 'string' },
-        count: { type: 'number' },
-        kind: { type: 'string', enum: ['person', 'beast'] },
-        jobId: { type: 'string' },
-        planId: { type: 'string' },
-        patch: { type: 'object' },
-        figure: { type: 'object' },
-      },
-      required: ['action'],
-      additionalProperties: false,
-    },
-    async (a) => {
-      switch (a.action) {
-        case 'meta': return z.mw.meta();
-        case 'jobs': return z.mw.listJobs();
-        case 'create': return z.mw.createJob(a);
-        case 'update': return z.mw.updateJob(String(a.id), a.patch ?? {});
-        case 'replan': return z.mw.replanJob(String(a.id));
-        case 'delete': return z.mw.deleteJobs(a.ids ?? []);
-        case 'plans': return z.mw.listPlans();
-        case 'savePlan': return z.mw.savePlan(String(a.jobId), a.name);
-        case 'applyPlan': return z.mw.applyPlan(String(a.jobId), String(a.planId));
-        case 'figures': return z.mw.listFigureItems();
-        case 'upsertFigure': return z.mw.upsertFigure(a.figure ?? {});
-        default: throw new Error('UNKNOWN_ACTION');
-      }
-    },
-  )));
 
   /* ---------------------------------------------------------- 3D 导演台 */
 
@@ -637,6 +638,17 @@ export function registerTools(ctx) {
           if (a.action === 'upsert') return e.appendLog(a.item ?? {});
           break;
         case 'batchProgress': {
+          /**
+           * batchProgress 是**只读**域：它只有一个查询动作。
+           *
+           * 旧实现完全不看 action —— 传 `delete` / `clean` 也会返回进度，
+           * 看起来"执行成功"。统一 schema 的 action 枚举有 6 个值，
+           * 每个域各自只支持其中几个，所以每个域都必须显式拒绝不属于它的动作，
+           * 否则模型会以为一个不存在的操作成功了。
+           */
+          if (a.action !== 'list') {
+            throw new Error(`UNKNOWN_ACTION: batchProgress 只支持 list，收到 ${JSON.stringify(a.action)}`);
+          }
           const jobs = await jobsStore().list();
           return e.batchProgress(jobs);
         }
@@ -715,6 +727,121 @@ export function registerTools(ctx) {
       })).catch(() => {});
 
       return { ok: true, jobId: job.id, status: job.status, note: '用 studio_jobs 查进度' };
+    },
+  )));
+
+  /* ------------------------------------------------------ 智能分镜 */
+
+  disposers.push(reg(tool(
+    'studio_storyboard',
+    '智能分镜：用 DSH 内部 LLM（无需 API Key）看图并写分镜提示词。'
+    + 'action=meta 查可用模式与 LLM 状态；'
+    + 'action=analyze 只做逐图分析；'
+    + 'action=generate 生成完整分镜（看图 + 写词 + 解析）。'
+    + 'mode 决定输出结构：ref2va / i2va / fl2va / t2va / '
+    + 'oneshot_continuation（一镜到底续写）/ continuation_cuts（可切镜续写）。',
+    {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['meta', 'analyze', 'generate'] },
+        projectId: { type: 'string' },
+        idea: { type: 'string', description: '用户对这段戏的想法' },
+        count: { type: 'number', description: '要几段，1-12' },
+        mode: { type: 'string', enum: ['ref2va', 'reference_i2va', 'i2va', 'fl2va', 't2va', 'oneshot_continuation', 'continuation_cuts'] },
+        skillId: { type: 'string', enum: ['regular_storyboard', 'ns_storyboard'] },
+        imageRels: { type: 'array', items: { type: 'string' }, description: '参考图（dataDir 相对路径）' },
+        durationSec: { type: 'number', description: '每段时长' },
+        contextLength: { type: 'number', description: '续写重叠帧数 5/22/39/56' },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+    async (args) => {
+      const sb = await import('./services/nanfeng/storyboard.js');
+      const llm = await import('./services/nanfeng/dsh-llm.js');
+      const cfg = loadConfig();
+
+      if (args.action === 'meta') {
+        return {
+          modes: sb.STORYBOARD_MODES,
+          skills: Object.entries(sb.SKILLS).map(([id, s]) => ({ id, label: s.label, desc: s.desc })),
+          llm: llm.llmStatus(z, cfg),
+        };
+      }
+
+      if (!llm.llmStatus(z, cfg).available) {
+        throw new Error(`LLM_UNAVAILABLE: ${llm.llmStatus(z, cfg).reason}`);
+      }
+
+      const count = Math.max(1, Math.min(12, Number(args.count) || 1));
+      const mode = String(args.mode || 'ref2va');
+
+      // 解析参考图
+      //
+      // ⚠️ 这里不能 `catch {}` 静默吞异常。曾经 tools.js 用了未导入的
+      //    `safeJoin`，ReferenceError 被吞掉 → images 恒为 0 →
+      //    视觉分析永远"跳过"，而且没有任何报错线索。
+      const images = [];
+      const badRels = [];
+      for (const rel of (Array.isArray(args.imageRels) ? args.imageRels : [])) {
+        try {
+          // ⚠️ 不能给绝对路径开绿灯。
+          //    旧写法 `path.isAbsolute(rel) ? rel : safeJoin(...)` 等于"绝对路径
+          //    完全放行" —— Agent（或被提示词注入的 Agent）传一个
+          //    C:/Users/.../.ssh/id_rsa 就能让后端把它读进视觉模型。
+          //    security.js 注释里明确记载过这个坑（"6 处各写各的，其中 5 处
+          //    漏掉绝对路径分支"），这里是漏改的第 6 处。
+          //    统一走 resolveUserPath：绝对路径也必须在 dataDir 内，且做 realpath 核对。
+          const abs = resolveUserPath({
+            root: cfg.dataDir, input: rel, mustExist: true,
+          });
+          images.push({ index: images.length + 1, absPath: abs, name: path.basename(abs) });
+        } catch (e) {
+          badRels.push(`${rel}（${String(e?.message || e)}）`);
+        }
+      }
+
+      // 逐图分析
+      let analysis = '';
+      if (images.length) {
+        const parts = [];
+        for (const img of images) {
+          const text = await llm.callVision(z, cfg, {
+            prompt: sb.visionPrompt(img.index),
+            images: [img],
+          });
+          parts.push(`@图片${img.index}：${text.replace(/^\s*@图片\d+\s*[:：]\s*/, '').trim()}`);
+        }
+        analysis = parts.join('\n\n');
+      }
+      // badRels 让调用方知道哪张图没进（以前静默跳过，排查无从下手）
+      if (args.action === 'analyze') return { analysis, images: images.length, ...(badRels.length ? { badRels } : {}) };
+
+      // 生成分镜
+      const messages = sb.buildStoryboardMessages({
+        idea: args.idea,
+        count,
+        mode,
+        // ⚠️ 必须透传 —— 以前漏了，导致 ns_storyboard（海螺版）永远不可达
+        skillId: args.skillId ?? 'regular_storyboard',
+        images,
+        analysis,
+        durationSeconds: Number(args.durationSec) || 5,
+        contextLength: args.contextLength != null ? Number(args.contextLength) : undefined,
+      });
+      const outText = await llm.callText(z, cfg, {
+        system: messages[0].content,
+        user: messages[1].content,
+        maxTokens: sb.outputBudget(count),
+      });
+      const parsed = sb.parseStoryboard(outText, count);
+      return {
+        mode,
+        count,
+        global: parsed.global,
+        segments: parsed.segments,
+        analysis,
+      };
     },
   )));
 

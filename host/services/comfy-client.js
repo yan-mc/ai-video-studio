@@ -15,18 +15,6 @@ const MAX_POLL = 600;
 const POLL_MS = 3000;
 
 /**
- * 测试钩子：装上之后 runWorkflow 只把装配好的工作流交出来，不提交、不轮询。
- *
- * 为什么需要：节点装配（尤其是首尾帧/参考图/控制视频的接线）是这套系统里
- * 最容易出错、又最难验证的一段 —— 历史实现的两个 P0 都出在这里。
- * 没有钩子就只能真的往 ComfyUI 提交一个几分钟的任务才能发现问题。
- */
-let workflowCapture = null;
-export function setWorkflowCaptureForTests(fn) {
-  workflowCapture = typeof fn === 'function' ? fn : null;
-}
-
-/**
  * 端口自动发现。
  *
  * 背景：Windows 的 Hyper-V / WSL / Docker 会**动态保留**大段 TCP 端口，
@@ -303,16 +291,6 @@ export async function stageToComfyInput(cfg, absPaths, jobId) {
   const entries = Object.entries(absPaths || {}).filter(([, abs]) => abs);
   if (!entries.length) return out;
 
-  // 测试钩子：只回文件名，不真的传输。
-  if (workflowCapture) {
-    for (const [key, abs] of entries) {
-      if (!fs.existsSync(abs)) continue;
-      const ext = path.extname(abs) || '.png';
-      out[key] = `jzpreviz_${jobId}_${safeStem(path.basename(abs, ext))}${ext}`;
-    }
-    return out;
-  }
-
   const url = await resolveComfyUrl(cfg);
   const dir = cfg.comfyInputDir;
   const tag = 'jzpreviz';
@@ -385,11 +363,6 @@ export function deepReplace(value, map) {
 /** 提交工作流并轮询，返回产物 */
 export async function runWorkflow({ cfg, workflow, map, job, outputsDir, onSubmitted }) {
   const wf = deepReplace(workflow, map);
-  // 测试钩子：交出装配结果后立即返回，不碰网络
-  if (workflowCapture) {
-    workflowCapture(wf, { job, map });
-    return { remoteId: null, outputs: [], captured: true };
-  }
   const url = await resolveComfyUrl(cfg);
   const submitted = await getJson(`${url}/prompt`, {
     method: 'POST',

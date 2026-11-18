@@ -276,9 +276,8 @@ export const api = {
 
   /* 预演 */
   /**
-   * Blender 预演渲染 —— 直出 H3 的控制通道（depth/pose/canny/gray）。
-   * 旧 three.js 预演引擎已下线；这条走 Blender，能出 ControlNet 真正需要的条件通道。
-   * 这条走 Blender，能出 ControlNet 真正需要的条件通道。
+   * Blender 预演渲染 —— 渲一段灰模参考视频（blockout），喂给 Ref2VA 的参考视频输入。
+   * 旧 three.js 预演引擎与控制塔路线均已下线。
    */
   blenderHealth: () => request<BlenderHealth>('GET', '/blender/health'),
   /** 3D 资产库（glb/gltf/fbx/obj） */
@@ -326,17 +325,6 @@ export const api = {
   },
 
   /* 剧本创作 */
-  scriptMeta: () => request<unknown>('GET', '/script/meta'),
-  getScript: (projectId: string) =>
-    request<unknown>('GET', `/script?projectId=${encodeURIComponent(projectId)}`),
-  runScriptStage: (input: Record<string, unknown>) =>
-    request<unknown>('POST', '/script/stage', input),
-  runScriptAll: (input: Record<string, unknown>) =>
-    request<unknown>('POST', '/script/runAll', input),
-  checkScript: (projectId: string, limit = 10) =>
-    request<unknown>('POST', '/script/check', { projectId, limit }),
-  saveScript: (projectId: string, doc: unknown) =>
-    request<unknown>('POST', '/script/save', { projectId, doc }),
 
   /* 图像工具 */
   postOp: (op: string, input: Record<string, unknown> = {}) =>
@@ -348,42 +336,13 @@ export const api = {
     request<{ ok: boolean; removed: string }>('POST', '/assets/delete', { id }),
 
   /* 漫画工作台 */
-  comicMeta: () => request<unknown>('GET', '/comic/meta'),
-  getComic: (projectId: string) =>
-    request<unknown>('GET', `/comic?projectId=${encodeURIComponent(projectId)}`),
-  comicExtract: (input: Record<string, unknown>) =>
-    request<unknown>('POST', '/comic/extract', input),
-  comicRelayout: (input: Record<string, unknown>) =>
-    request<unknown>('POST', '/comic/relayout', input),
-  comicPreflight: (projectId: string) =>
-    request<unknown>('POST', '/comic/preflight', { projectId }),
-  comicExportPage: (input: Record<string, unknown>) =>
-    request<unknown>('POST', '/comic/export/page', input),
-  comicExportAll: (input: Record<string, unknown>) =>
-    request<unknown>('POST', '/comic/export/all', input),
 
   /* 模特工作台 */
-  mwMeta: () => request<unknown>('GET', '/mw/meta'),
-  mwJobs: () => request<unknown>('GET', '/mw/jobs'),
-  mwCreateJob: (input: Record<string, unknown>) => request<unknown>('POST', '/mw/jobs', input),
-  mwUpdateJob: (id: string, patch: Record<string, unknown>) =>
-    request<unknown>('POST', '/mw/job/update', { id, patch }),
-  mwReplanJob: (id: string) => request<unknown>('POST', '/mw/job/replan', { id }),
-  mwDeleteJobs: (ids: string[]) => request<unknown>('POST', '/mw/job/delete', { ids }),
-  mwPlans: () => request<unknown>('GET', '/mw/plans'),
-  mwSavePlan: (input: Record<string, unknown>) => request<unknown>('POST', '/mw/plan/save', input),
-  mwApplyPlan: (input: Record<string, unknown>) => request<unknown>('POST', '/mw/plan/apply', input),
-  mwDeletePlan: (id: string) => request<unknown>('POST', '/mw/plan/delete', { id }),
-  mwFigures: () => request<unknown>('GET', '/mw/figures'),
-  mwUpsertFigure: (figure: Record<string, unknown>) =>
-    request<unknown>('POST', '/mw/figure/upsert', { figure }),
   /**
    * 删除形象。
    *
-   * ⚠️ 后端 `/mw/figure/delete` 一直存在，但前端从没定义过这个方法 ——
    *    形象库只能增、不能删，figures.json 只增不减。
    */
-  mwDeleteFigure: (id: string) => request<unknown>('POST', '/mw/figure/delete', { id }),
 
   /* H3 提示词编译 */
   promptMeta: () => request<unknown>('GET', '/prompt/meta'),
@@ -484,13 +443,114 @@ export const api = {
     request<unknown>('POST', '/render/plan', input),
   renderCompile: (input: Record<string, unknown>) =>
     request<unknown>('POST', '/render/compile', input),
-  mwGenerateJob: (input: Record<string, unknown>) => request<unknown>('POST', '/mw/job/generate', input),
+
+  /* ---------------------------- 南风 V15 ---------------------------- */
+
+  /** 217 个参数的定义（分组 / 类型 / 默认值 / 选项） */
+  nanfengSchema: () => request<{
+    paramCount: number;
+    /**
+     * 分组元信息。
+     * zh   分组级的中文说明（比 desc 更详细）
+     * dead 本组内「无效参数」个数（上游硬编码关闭 / 缺依赖）
+     */
+    groups: Record<string, {
+      id: string; name: string; desc: string; count: number;
+      zh?: string; dead?: number;
+    }>;
+    /**
+     * 每个参数的机读元信息 + 面向用户的说明。
+     * zh   一句话说明它做什么
+     * hint 调参建议
+     * flag dead = 上游硬编码关闭，调了完全没反应
+     *      banned = 缺依赖/被上游主动禁用，开了会报错
+     */
+    params: Record<string, {
+      group: string;
+      type: 'INT' | 'FLOAT' | 'BOOLEAN' | 'STRING' | 'COMBO';
+      default: unknown;
+      options?: Array<string | number>;
+      zh?: string;
+      hint?: string;
+      flag?: 'dead' | 'banned';
+    }>;
+    /** 全量无效参数清单（用于页面顶部的提示条） */
+    inert?: Array<{ name: string; flag: string; zh: string; hint: string }>;
+  }>('GET', '/nanfeng/schema'),
+
+  /** 内置预设列表 */
+  nanfengPresets: () => request<{
+    default: string;
+    presets: Array<{ id: string; label: string; desc: string; isDefault?: boolean }>;
+  }>('GET', '/nanfeng/presets'),
+
+  /** 某预设合并后的完整参数（用于"预览将提交什么"） */
+  nanfengPreset: (id: string) => request<{
+    id: string;
+    label: string;
+    desc: string;
+    params: Record<string, unknown>;
+  }>('GET', `/nanfeng/presets/${encodeURIComponent(id)}`),
+
+  /* ------------------------- 南风续写批次 ------------------------- */
+
+  continuationCreate: (input: {
+    projectId: string;
+    shotIds: string[];
+    preset?: string;
+    contextLength?: string;
+    audioContextLength?: number;
+  }) => request<unknown>('POST', '/nanfeng/continuation/batches', input),
+
+  continuationList: (projectId?: string) =>
+    request<unknown[]>('GET', `/nanfeng/continuation/batches${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
+
+  continuationGet: (batchId: string) =>
+    request<unknown>('GET', `/nanfeng/continuation/batches/${encodeURIComponent(batchId)}`),
+
+  /** 取下一段的任务 JSON */
+  continuationNext: (batchId: string) =>
+    request<{ done: boolean; index?: number; shotId?: string | null; task?: string; contextFolder?: string }>(
+      'GET',
+      `/nanfeng/continuation/batches/${encodeURIComponent(batchId)}/next`,
+    ),
+
+  continuationSegment: (input: {
+    batchId: string;
+    index: number;
+    status?: string;
+    jobId?: string;
+    outputRel?: string;
+    frames?: number;
+    error?: string;
+  }) => request<unknown>('POST', '/nanfeng/continuation/segment', input),
+
+  /* --------------------------- 智能分镜 --------------------------- */
+
+  storyboardMeta: () => request<{
+    modes: Record<string, string>;
+    skills: Array<{ id: string; label: string; desc: string }>;
+    llm: { available: boolean; text: unknown; vision: unknown; reason: string };
+  }>('GET', '/nanfeng/storyboard/meta'),
+
+  storyboardGenerate: (input: {
+    idea?: string;
+    count: number;
+    mode: string;
+    skillId?: string;
+    imageRels?: string[];
+    durationSec?: number;
+    contextLength?: number;
+  }) => request<{
+    mode: string;
+    count: number;
+    global: string;
+    segments: string[];
+    analysis: string;
+    raw: string;
+  }>('POST', '/nanfeng/storyboard/generate', input),
 
   /* 漫画出图 */
-  comicPlanPrompts: (input: Record<string, unknown>) => request<unknown>('POST', '/comic/plan-prompts', input),
-  comicImageProgress: (projectId: string) =>
-    request<unknown>('GET', `/comic/image-progress?projectId=${encodeURIComponent(projectId)}`),
-  comicRenderPanels: (input: Record<string, unknown>) => request<unknown>('POST', '/comic/render-panels', input),
 
   /* 后处理 */
   transcode: (input: TranscodeInput) => request<unknown>('POST', '/post/transcode', input),

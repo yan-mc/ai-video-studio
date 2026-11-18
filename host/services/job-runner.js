@@ -135,10 +135,22 @@ export async function cancelJob(jobId, onRemoteCancel) {
   };
 }
 
-/** 启动恢复：把残留 running/queued 标记为 interrupted（只标记不重跑） */
+/**
+ * 启动恢复：把残留的 running 标记为 interrupted（只标记不重跑）。
+ *
+ * ⚠️ `queued` **不能**标成 interrupted。
+ *
+ * 旧实现把 running 和 queued 一起标 interrupted。但 queued 意味着
+ * "已提交、还没轮到执行"——它从没开始过，把它标成"中断"会让用户以为
+ * 跑到一半断了，实际什么都没发生。更重要的是：那种任务本来就没有
+ * remoteId，也不需要任何清理，直接保留原状态即可（用户自己决定重试或删除）。
+ *
+ * 只有 `running` 才真的需要标记：它可能已经在 GPU 上跑、或者已经提交到
+ * ComfyUI 但没等到结果。标记成 interrupted 是为了让「重试」按钮有明确语义。
+ */
 export async function recoverInterruptedJobs() {
   const list = await jobStore().list();
-  const stale = list.filter((j) => j && (j.status === 'running' || j.status === 'queued'));
+  const stale = list.filter((j) => j && j.status === 'running');
   if (!stale.length) return { recovered: 0 };
   for (const j of stale) {
     await jobStore().upsert({ ...j, status: 'interrupted', error: INTERRUPTED_MSG, updatedAt: Date.now() });
@@ -217,6 +229,21 @@ export async function runJob(job, runner) {
       };
     }
     await jobStore().upsert(job);
+
+    /**
+     * 任务终结后按保留策略裁剪 jobs.json。
+     *
+     * 放在这里（终态落盘之后）而不是启动时：启动时裁会让"昨天的历史"
+     * 在用户还没看到时就消失；在这里裁只影响最老的终态记录，
+     * 且天然是低频操作（每完成一个任务一次）。
+     *
+     * ⚠️ 必须 catch：裁剪失败绝不能把已经成功的任务变成失败。
+     *    这是收尾逻辑，属于"尽力而为"。
+     */
+    try {
+      const { pruneJobs } = await import('./job-store.js');
+      await pruneJobs();
+    } catch { /* 保留策略失败不影响任务结果 */ }
   } finally {
     clearCancelled(job.id);
     if (local) releaseSlot(job.id);

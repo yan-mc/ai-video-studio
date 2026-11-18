@@ -21,14 +21,10 @@ Blender 预演渲染器 —— 把镜头场景 JSON 渲成 H3 能吃的控制序
   }
 
 输出模式：
-  depth  —— 灰度深度序列（近白远黑），对应 H3 Fun ControlNet 的 depth 条件
-  pose   —— 骨架火柴人序列，对应 pose 条件
-  canny  —— 硬边缘序列，对应 canny 条件
-  gray   —— 灰模整体渲染，对应 gray 条件
-  preview —— 给人看的彩色灰模（不走控制通道）
+  preview  —— 给人看的彩色灰模（不进 H3）
   blockout —— **灰模参考视频**（社区标准交付物，见下）
 
-关于 `blockout`（常规替代方案，推荐默认）
+关于 `blockout`（唯一喂模型的出口）
 --------------------------------------------------------------------------
 社区主流做法不是"渲四条控制通道喂进控制塔"，而是：
 
@@ -36,11 +32,9 @@ Blender 预演渲染器 —— 把镜头场景 JSON 渲成 H3 能吃的控制序
       → H3 `MiniMaxH3ReferenceToVideo.ref_videos.ref_video_1`
       → 六段式提示词里用 `<Video 1>` 声明"只取运镜/走位/节奏"
 
-区别：
-  · depth/pose/canny/gray 是**控制塔（Fun ControlNet）**的输入，
-    需要额外的 control patch 模型，且通道间会互相打架（skip 相加会过饱和）。
-  · blockout 是**参考视频**，不需要额外模型，直接吃 Ref2VA。
-    实测：180° 环绕用 blockout 参考 6/6 成功，纯文字 0/6 稳定。
+历史说明：曾经还有 depth/pose/canny/gray 四条「控制塔（Fun ControlNet）」
+通道，需要额外的 control patch 模型，且通道间会互相打架（skip 相加会过饱和）。
+该路线经测试后放弃，已整条移除。
 
 blockout 的渲染要求（与 preview 的差别，都是有理由的）：
   · **平光 + 无阴影 + 无 AO + 无轮廓线**：任何方向性光影都会被模型
@@ -51,7 +45,7 @@ blockout 的渲染要求（与 preview 的差别，都是有理由的）：
   · **不高光、无景深、无运动模糊**：这些是"成片特征"，会被参考视频带进输出。
   · 帧数必须等于目标模型的帧数（H3 是 17k+5，5 秒 = 124 帧）。
 
-产物写到 <outDir>/<mode>/f_%05d.png 与 <outDir>/<mode>/control.mp4（ffmpeg 由 JS 侧调）。
+产物写到 <outDir>/<mode>/f_%05d.png，mp4 由 JS 侧调 ffmpeg 生成。
 """
 import bpy
 import bmesh
@@ -201,8 +195,15 @@ def build_mannequin(name, height_m, color):
     torso.location = (0, 0, 0.13 * n)
 
     neck = joint("neck", spine, 0, 0, 0.245 * n)
-    blob("head", neck, 0.068 * n)
-    bpy.data.objects[f"{name}_head"].location = (0, 0, 0.075 * n)
+    # ⚠️ 用 blob() 的**返回值**，不要用名字回查。
+    #    Blender 会自动重命名重名对象（第二个 "A" → "A.001"），
+    #    于是 `bpy.data.objects["A_head"]` 拿到的是**第一个**演员的头，
+    #    把第二个演员的身高比例写到了第一个头上。
+    #    实测（A 身高1.50 / A 身高2.00，期望 0.1125 / 0.15）：
+    #      A_head     -> loc_z=0.15  ← 被写成第二个的值
+    #      A_head.001 -> loc_z=0.0   ← 从未被设置
+    head = blob("head", neck, 0.068 * n)
+    head.location = (0, 0, 0.075 * n)
 
     # 手臂
     for side, sign in (("L", -1), ("R", 1)):
@@ -218,8 +219,8 @@ def build_mannequin(name, height_m, color):
         limb(f"hip{side}", hp, 0.042 * n, 0.245 * n)
         kn = joint(f"knee{side}", hp, 0, 0, -0.245 * n)
         limb(f"knee{side}", kn, 0.036 * n, 0.235 * n)
-        # 踝关节：pose 骨架需要它（OpenPose 的 18 点里有脚踝）。
-        # 只是一个空物体锚点，不加网格，不影响 depth/preview 的观感。
+        # 踝关节：人偶骨架的一部分，供动作曲线末端定位。
+        # 只是一个空物体锚点，不加网格，不影响渲染观感。
         an = bpy.data.objects.new(f"{name}_ankle{side}", None)
         an.empty_display_size = 0.03
         an.parent = kn
@@ -404,6 +405,19 @@ def setup_camera(spec):
     bpy.context.scene.camera = cam
 
     c = spec.get("camera") or {}
+    # ⚠️ 必须显式锁 HORIZONTAL。
+    #
+    # Blender 的 sensor_fit 默认是 'AUTO'，此时 `camera.angle` 跟随**较长边**：
+    #   横屏 16:9 → angle 是水平 FOV（正确）
+    #   竖屏 9:16 → 较长边是高度，angle 变成**垂直** FOV
+    # 实测（camera.angle=45°）：
+    #   864×480 → 水平 45.00 / 垂直 30.87   ✅
+    #   480×864 → 水平 30.87 / 垂直 45.00   ❌ 反了
+    # 后果：ratio='9:16'（竖屏短剧最常用）时，镜头卡里填的 fov 实际只渲染出
+    # 水平 30.87°，画面比预期窄 30%，角色容易被裁出框。
+    # _fov_to_angle() 的注释声称"与 Blender 语义一致"，在竖屏下是错的。
+    # 锁 HORIZONTAL 后 angle 恒为水平 FOV，与分辨率无关（已实测）。
+    cam_data.sensor_fit = "HORIZONTAL"
     cam_data.angle = math.radians(_fov_to_angle(c.get("fov")))
 
     def place(pos, target, roll=0.0):
@@ -580,11 +594,11 @@ def apply_actor_actions(spec, actor_objs):
 
 def setup_preview(scene):
     """
-    预览模式 —— 给用户**看**的彩色灰模，不是控制信号。
+    预览模式 —— 给用户**看**的彩色灰模，不是喂模型的参考视频。
 
-    ⚠️ 与 depth/pose/canny 的区别：
-      那三个是喂给 H3 ControlNet 的通道，要求高对比、去纹理；
-      这个是给人眼看的，要有材质色、要有光照阴影，才看得出"摆得对不对"。
+    ⚠️ 与 blockout 的区别：
+      这个是给人眼看的，要有材质色、要有光照阴影，才看得出"摆得对不对"；
+      blockout 才是喂给模型的，要求平光、无阴影、无高光。
 
     用 Workbench 而不是 EEVEE：Workbench 在无头模式下不需要 GPU 编译着色器，
     124 帧只要几秒（EEVEE 要 20 秒+），预览就该快。
@@ -612,22 +626,8 @@ def setup_preview(scene):
     scene.view_settings.look = "None"
 
 
-# ----------------------------------------------------------------- 各通道输出
 
-def setup_workbench_gray():
-    sc = bpy.context.scene
-    sc.render.engine = "BLENDER_WORKBENCH"
-    sh = sc.display.shading
-    sh.light = "STUDIO"
-    sh.color_type = "SINGLE"
-    sh.single_color = (0.78, 0.78, 0.78)
-    sh.show_shadows = True
-    sh.show_cavity = True
-    sh.cavity_type = "BOTH"
-    sc.display.render_aa = "8"
-    sc.render.film_transparent = False
-    sc.world = bpy.data.worlds.new("W") if not sc.world else sc.world
-    sc.world.color = (0.05, 0.055, 0.06)
+
 
 
 def setup_blockout(scene, colored=True):
@@ -678,535 +678,6 @@ def setup_blockout(scene, colored=True):
     # 参考视频会被 H3 按 24fps 读取，帧率必须与目标模型一致
     scene.render.fps = int(SPEC.get("fps") or 24)
 
-
-def compute_depth_range(spec, dmin_allowed=0.05):
-    """按**场景内容的实际几何包络**算近/远平面。
-
-    ⚠️ 历史缺陷：near = dist*0.55 / far = dist*1.8，dist 是"相机到 target"。
-       这个值比主体本身还近，逆深度归一化后主体的动态范围被大量浪费：
-       实测某镜 near=2.34 far=7.67，人物只落在 93/255 的中灰里。
-
-    正确做法：拿 actors / props 的包围盒投影到相机朝向，取实测 z 范围再留余量。
-    地面在 depth 通道里单独处理（见 setup_depth），所以不会被"铺到 14 米"拉爆。
-
-    返回 (near, far)。
-    """
-    cam = spec.get("camera") or {}
-    cpos = cam.get("position") or [0, 1.6, -4.2]
-    ctgt = cam.get("target") or [0, 0.95, 0]
-    try:
-        eye = Vector((float(cpos[0]), float(cpos[1]), float(cpos[2])))
-        look = Vector((float(ctgt[0]), float(ctgt[1]), float(ctgt[2])))
-    except (TypeError, ValueError, IndexError):
-        eye, look = Vector((0.0, 4.2, 1.6)), Vector((0.0, 0.0, 0.95))
-
-    fwd = look - eye
-    if fwd.length < 1e-6:
-        fwd = Vector((0.0, -1.0, 0.0))
-    fwd.normalize()
-
-    def view_z(p):
-        """点在相机朝向上的投影深度（与 ShaderNodeCameraData.View Z Depth 同义）。"""
-        return (p - eye).dot(fwd)
-
-    depths = []
-    for a in spec.get("actors") or []:
-        pos = a.get("position") or [0, 0, 0]
-        try:
-            h = float(a.get("heightM") or 1.72)
-            px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
-        except (TypeError, ValueError, IndexError):
-            continue
-        rx, ry = h * 0.35, h * 0.30
-        for dx in (-rx, rx):
-            for dy in (-ry, ry):
-                for dz in (0.0, h):
-                    depths.append(view_z(Vector((px + dx, py + dy, pz + dz))))
-
-    for p in spec.get("props") or []:
-        pos = p.get("position") or [0, 0, 0]
-        sc = p.get("scale") or [1, 1, 1]
-        try:
-            px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
-            sx = abs(float(sc[0])) * 0.5
-            sy = abs(float(sc[1])) * 0.5
-            sz = abs(float(sc[2])) * 0.5
-        except (TypeError, ValueError, IndexError):
-            continue
-        if str(p.get("kind") or "") == "wall":     # 墙的 scale 在 build_prop 里被放大过
-            sx, sy, sz = sx * 3.0, sy * 0.12, sz * 2.4
-        for dx in (-sx, sx):
-            for dy in (-sy, sy):
-                for dz in (-sz, sz):
-                    depths.append(view_z(Vector((px + dx, py + dy, pz + dz))))
-
-    depths = [d for d in depths if d > dmin_allowed and math.isfinite(d)]
-    if not depths:
-        d = max(0.5, (look - eye).length)
-        return max(dmin_allowed, d * 0.7), d * 3.0
-
-    near = max(dmin_allowed, min(depths) * 0.95)
-    far = max(near * 1.5, max(depths) * 3.0)
-    return near, far
-
-
-def _depth_math_chain(nt, near, far, dim=1.0):
-    """建一条 1/z → 归一化 → (可选压暗) 的节点链，返回末端输出 socket。"""
-    near = max(1e-3, float(near))
-    far = max(near + 1e-3, float(far))
-
-    cam_data = nt.nodes.new("ShaderNodeCameraData")
-    cam_data.location = (-900, 0)
-
-    inv = nt.nodes.new("ShaderNodeMath")
-    inv.operation = "DIVIDE"
-    inv.location = (-700, 0)
-    inv.inputs[0].default_value = 1.0
-    nt.links.new(cam_data.outputs["View Z Depth"], inv.inputs[1])
-
-    sub = nt.nodes.new("ShaderNodeMath")
-    sub.operation = "SUBTRACT"
-    sub.location = (-520, 0)
-    sub.inputs[1].default_value = 1.0 / far
-    nt.links.new(inv.outputs[0], sub.inputs[0])
-
-    mul = nt.nodes.new("ShaderNodeMath")
-    mul.operation = "MULTIPLY"
-    mul.location = (-340, 0)
-    mul.inputs[1].default_value = 1.0 / (1.0 / near - 1.0 / far)
-    nt.links.new(sub.outputs[0], mul.inputs[0])
-
-    clamp = nt.nodes.new("ShaderNodeMath")
-    clamp.operation = "ADD"
-    clamp.use_clamp = True
-    clamp.location = (-160, 0)
-    clamp.inputs[1].default_value = 0.0
-    nt.links.new(mul.outputs[0], clamp.inputs[0])
-
-    tail = clamp
-    if abs(dim - 1.0) > 1e-6:
-        dm = nt.nodes.new("ShaderNodeMath")
-        dm.operation = "MULTIPLY"
-        dm.location = (10, 0)
-        dm.inputs[1].default_value = float(dim)
-        dm.use_clamp = True
-        nt.links.new(clamp.outputs[0], dm.inputs[0])
-        tail = dm
-    return tail
-
-
-def make_depth_material(near, far):
-    """
-    深度材质：相机视空间 Z → 灰度（近白远黑，**逆深度分布**）。
-
-    ⚠️ 为什么不用 Workbench 的 Depth pass（走过三条死路，别再试）：
-      1) `Normalize` 把场景最远点映射到 1.0，地面一铺开人物就被压成一片灰；
-      2) `world.mist_settings` + Mist pass 在 Workbench 下**不产生输出**
-         （RLayers.outputs 里没有 "Mist"）；
-      3) Workbench 的 Depth 通道按**相机 clip 范围**归一化，且不完全随
-         clip_start/clip_end 线性响应（实测收紧到 0.5–24 仍是"一片白"）。
-
-    ⚠️ 为什么不用 MapRange 做线性映射（本次修正的核心）：
-      Fun ControlNet 这一族的 depth 分支是拿 VideoX-Fun / VACE 的预处理结果
-      训出来的，而它们的预处理是：
-
-        VACE      DepthAnything/MiDaS → min-max 归一化（值是 inverse depth）
-        VideoX-Fun ZoeDepth（米制）→ 归一化后 `1.0 - depth` 反相
-
-      两条路径最终**都是"近=白、远=黑"，且分布是逆深度 1/z 而不是线性米制**。
-      用线性 (z-near)/(far-near) 会让近景压成一片白、中景几乎全黑，
-      与训练分布差得很远 —— 控制力弱、人物数量约束不住。
-
-      实测（本机某镜，人物 3.5–3.8m）：
-          线性   → 144–162/255（落到中灰，主体与环境挤在一起）
-          逆深度 → 73–88/255（主体是明确的暗剪影，梯度铺满全程）
-
-    ⚠️ 必须用 Raw：Standard 会把线性值再走一遍 sRGB 编码。
-    """
-    mat = bpy.data.materials.new("JZ_DEPTH")
-    mat.use_nodes = True
-    nt = mat.node_tree
-    nt.nodes.clear()
-
-    tail = _depth_math_chain(nt, near, far, dim=1.0)
-    em = nt.nodes.new("ShaderNodeEmission")
-    em.location = (200, 0)
-    em.inputs["Strength"].default_value = 1.0
-    nt.links.new(tail.outputs[0], em.inputs["Color"])
-    out = nt.nodes.new("ShaderNodeOutputMaterial")
-    out.location = (380, 0)
-    nt.links.new(em.outputs[0], out.inputs["Surface"])
-
-    mat["jz_depth_near"] = float(near)
-    mat["jz_depth_far"] = float(far)
-    mat["jz_depth_mode"] = "inverse-z"
-    return mat
-
-
-def setup_depth(scene, near, far):
-    """EEVEE + 深度材质。所有网格换成深度材质，世界背景压黑。"""
-    scene.render.engine = "BLENDER_EEVEE"
-    scene.render.film_transparent = False
-
-    if scene.world is None:
-        scene.world = bpy.data.worlds.new("JZ_World")
-    scene.world.use_nodes = True
-    bg = scene.world.node_tree.nodes.get("Background")
-    if bg:
-        bg.inputs[0].default_value = (0, 0, 0, 1)
-        bg.inputs[1].default_value = 0.0
-
-    depth_mat = make_depth_material(near, far)
-    # 地面**也走真实深度映射**，只是整体压暗一档。
-    #
-    # ⚠️ 历史做法是把地面固定成 0.22 灰。两个问题：
-    #    ① 逆深度下主体自己落在 0.3–0.8 区间，固定 0.22 与它亮度太接近，
-    #       人和地仍然糊在一起（实测 56 vs 93，只差 37 级）；
-    #    ② 地面不随距离变化 = 告诉模型"整个地面同一深度"，
-    #       这是错误的空间信息，地平线会被当成垂直于视线的大平面。
-    #
-    # 现在：地面用同一条逆深度链，再乘 0.45。既保留"越远越黑"的真实梯度，
-    # 又保证人永远比地面亮、剪影清晰。
-    ground_mat = bpy.data.materials.new("JZ_DEPTH_GROUND")
-    ground_mat.use_nodes = True
-    gnt = ground_mat.node_tree
-    gnt.nodes.clear()
-    g_tail = _depth_math_chain(gnt, near, far, dim=0.45)
-    g_em = gnt.nodes.new("ShaderNodeEmission")
-    g_em.inputs["Strength"].default_value = 1.0
-    gnt.links.new(g_tail.outputs[0], g_em.inputs["Color"])
-    g_out = gnt.nodes.new("ShaderNodeOutputMaterial")
-    gnt.links.new(g_em.outputs[0], g_out.inputs["Surface"])
-    ground_mat["jz_ground_dim"] = 0.45
-
-    for ob in scene.objects:
-        if ob.type == "MESH":
-            ob.data.materials.clear()
-            ob.data.materials.append(ground_mat if ob.name == "ground" else depth_mat)
-
-    # ⚠️ 必须用 Raw：Standard 会把线性深度再走一遍 sRGB 编码，
-    #    值域被压到 50–90/255 这一小段（实测），灰阶分辨力只剩个位数。
-    #    Raw 直接输出线性值，深度差能完整映射到 0–255。
-    scene.view_settings.view_transform = "Raw"
-    scene.view_settings.look = "None"
-    scene.view_settings.exposure = 0.0
-    scene.view_settings.gamma = 1.0
-
-
-# ------------------------------------------------------------ OpenPose 骨架
-# 与 DWPose / OpenPose COCO-18 对齐：H3 Fun ControlNet 的 pose 分支就是拿
-# DWPose 骨架训的（模型卡原文 "Pose | DWPose skeleton"），
-# 提供同构的彩色骨架才算"同一个语义"。
-#
-# 关键配色事实（源码级）：VACE / VideoX-Fun 的 draw_bodypose 画完四肢后执行
-#     canvas = (canvas * 0.6).astype(uint8)
-# 即**肢体整体压到 60% 亮度、关键点保持满亮度**。只画满亮度线段是对不上的。
-#
-# limbSeq / colors 顺序固定，不要"顺手优化"。
-
-# COCO-18 的官方 limbSeq（1-based，顺序与 VACE draw_bodypose 一致）：
-# 点位定义（1-based）：
-#   1 nose  2 neck  3 Rshoulder 4 Relbow 5 Rwrist  6 Lshoulder 7 Lelbow 8 Lwrist
-#   9 Rhip  10 Rknee 11 Rankle  12 Lhip 13 Lknee 14 Lankle
-#   15 Reye 16 Leye  17 Rear    18 Lear
-OPENPOSE_LIMBS = (
-    (2, 3), (2, 6), (3, 4), (4, 5), (6, 7), (7, 8), (2, 9), (9, 10),
-    (10, 11), (2, 12), (12, 13), (13, 14), (2, 1), (1, 15), (15, 17),
-    (1, 16), (16, 18), (3, 17), (6, 18),
-)
-
-OPENPOSE_COLORS = (
-    (255, 0, 0), (255, 85, 0), (255, 170, 0), (255, 255, 0), (170, 255, 0),
-    (85, 255, 0), (0, 255, 0), (0, 255, 85), (0, 255, 170), (0, 255, 255),
-    (0, 170, 255), (0, 85, 255), (0, 0, 255), (85, 0, 255), (170, 0, 255),
-    (255, 0, 255), (255, 0, 170), (255, 0, 85),
-)
-
-# 骨段粗细按**身高**归一，不按骨长。
-# OpenPose / DWPose 的骨架是**全肢体统一线宽**（stickwidth≈4px），
-# 按骨长百分比算会让大腿粗、脖子细，与训练分布不符。
-# 0.011 × 身高 ≈ 1.9cm，在 480px 画幅（约 100px/m）上约 4px 宽。
-BONE_RADIUS_RATIO = 0.011
-DOT_RADIUS_RATIO = 0.013
-
-
-def _solid_emission(r, g, b, name="JZ_EMIT", dim=1.0):
-    """纯色自发光材质（无光照、无阴影），同名复用。"""
-    mat = bpy.data.materials.get(name)
-    if mat:
-        return mat
-    mat = bpy.data.materials.new(name)
-    mat.use_nodes = True
-    nt = mat.node_tree
-    nt.nodes.clear()
-    em = nt.nodes.new("ShaderNodeEmission")
-    em.inputs["Color"].default_value = (r * dim, g * dim, b * dim, 1.0)
-    em.inputs["Strength"].default_value = 1.0
-    out = nt.nodes.new("ShaderNodeOutputMaterial")
-    nt.links.new(em.outputs[0], out.inputs["Surface"])
-    return mat
-
-
-def _bone_material(color_rgb):
-    name = "JZ_POSE_L{}_{}_{}".format(*color_rgb)
-    # ×0.6 —— 与训练侧 draw_bodypose 的压暗一致
-    return _solid_emission(color_rgb[0] / 255.0, color_rgb[1] / 255.0,
-                           color_rgb[2] / 255.0, name=name, dim=0.6)
-
-
-def _dot_material(color_rgb):
-    name = "JZ_POSE_P{}_{}_{}".format(*color_rgb)
-    return _solid_emission(color_rgb[0] / 255.0, color_rgb[1] / 255.0,
-                           color_rgb[2] / 255.0, name=name, dim=1.0)
-
-
-def _pose_point_map(joints, actor):
-    """人偶关节 → OpenPose COCO-18 点位序号。
-
-    OpenPose 18 点：
-      1 颈  2 右肩 3 右肘 4 右腕 5 左肩 6 左肘 7 左腕
-      8 右髋 9 右膝 10 右踝 11 左髋 12 左膝 13 左踝
-      14 头顶 15 右眼 16 左眼 17 右耳 18 左耳
-
-    ⚠️ head / hand 是**网格（blob）不是关节（joint）**，不在 joints 字典里。
-       早期版本把它们写进 need 列表，导致 `all(n in joints)` 恒假、
-       整条骨架被跳过（表现为 POSE_SKELETON_FALLBACK）。
-       现在：head 用网格对象本身，手腕/脚踝用关节 + 按身高归一的偏移。
-    """
-    need = ("neck", "spine", "hips",
-            "shoulderR", "elbowR", "hipR", "kneeR",
-            "shoulderL", "elbowL", "hipL", "kneeL")
-    if not all(n in joints for n in need):
-        return {}
-
-    # ⚠️ COCO-18 是 1-based，且 **1=nose、2=neck**。
-    #    早期版本按"1=neck"编号，limbSeq 连出来的拓扑整个错位
-    #    （实测：一堆交叉线段，根本不成人形）。
-    m = {
-        2: ("j", "neck"),
-        3: ("j", "shoulderR"), 4: ("j", "elbowR"),
-        6: ("j", "shoulderL"), 7: ("j", "elbowL"),
-        9: ("j", "hipR"), 10: ("j", "kneeR"),
-        12: ("j", "hipL"), 13: ("j", "kneeL"),
-    }
-
-    # 1 = nose：人偶没有五官，用 head 网格略偏前（+Y 朝画面前方）的位置代表
-    head_obj = bpy.data.objects.get("{}_head".format(actor.get("name")))
-    if head_obj is not None:
-        head_h = 0.068 * (float(actor.get("heightM") or 1.72) / 1.72)
-        m[1] = ("o", head_obj, (0.0, -head_h * 0.75, -head_h * 0.15))
-        m[15] = ("o", head_obj, (0.012, -head_h * 0.85, -0.005))   # 右眼
-        m[16] = ("o", head_obj, (-0.012, -head_h * 0.85, -0.005))  # 左眼
-        m[17] = ("o", head_obj, (0.030, 0.0, -0.015))              # 右耳
-        m[18] = ("o", head_obj, (-0.030, 0.0, -0.015))             # 左耳
-
-    for side, idx in (("R", 5), ("L", 8)):
-        if "hand{}".format(side) in joints:
-            m[idx] = ("j", "hand{}".format(side))
-        else:
-            m[idx] = ("j", "elbow{}".format(side), (0.0, 0.0, -0.170))
-    for side, idx in (("R", 11), ("L", 14)):
-        if "ankle{}".format(side) in joints:
-            m[idx] = ("j", "ankle{}".format(side))
-        else:
-            m[idx] = ("j", "knee{}".format(side), (0.0, 0.0, -0.235))
-    return m
-
-
-def _resolve_point(joints, entry, height=1.72):
-    """把 _pose_point_map 的一项解析成世界坐标 Vector；失败返回 None。"""
-    if not entry:
-        return None
-    kind = entry[0]
-    scale = float(height or 1.72) / 1.72
-    if kind == "j":
-        ob = joints.get(entry[1])
-        if ob is None:
-            return None
-        off = entry[2] if len(entry) > 2 else (0.0, 0.0, 0.0)
-        return ob.matrix_world.translation + Vector(
-            (off[0] * scale, off[1] * scale, off[2] * scale))
-    if kind == "o":
-        ob = entry[1]
-        if ob is None:
-            return None
-        off = entry[2] if len(entry) > 2 else (0.0, 0.0, 0.0)
-        return ob.matrix_world.translation + Vector(
-            (off[0] * scale, off[1] * scale, off[2] * scale))
-    return None
-
-
-def _build_pose_rig(scene, joints, mapping, height):
-    """按当前帧建出整套骨段 + 关键点，返回绑定关系供逐帧更新。
-
-    骨段用**单位圆柱 + scale.z 拉伸**，每帧只改 transform，不重建 mesh
-    （每帧重建 20 个 mesh 在 124 帧上会明显拖慢）。
-    """
-    pts = {}
-    for idx, entry in mapping.items():
-        p = _resolve_point(joints, entry, height)
-        if p is not None:
-            pts[idx] = p
-    if len(pts) < 6:
-        return None
-
-    me_bone = bpy.data.meshes.new("jz_pose_bone_unit")
-    bm = bmesh.new()
-    bmesh.ops.create_cone(bm, cap_ends=True, segments=6, radius1=1.0,
-                          radius2=1.0, depth=1.0)
-    bm.to_mesh(me_bone)
-    bm.free()
-
-    me_dot = bpy.data.meshes.new("jz_pose_dot_unit")
-    bm = bmesh.new()
-    bmesh.ops.create_uvsphere(bm, u_segments=8, v_segments=6, radius=1.0)
-    bm.to_mesh(me_dot)
-    bm.free()
-
-    bones = []
-    for limb_index, (a, b) in enumerate(OPENPOSE_LIMBS):
-        if a not in pts or b not in pts:
-            continue
-        own = me_bone.copy()
-        ob = bpy.data.objects.new("jz_bone_{}_{}".format(a, b), own)
-        ob.data.materials.append(_bone_material(OPENPOSE_COLORS[limb_index % len(OPENPOSE_COLORS)]))
-        ob.rotation_mode = "QUATERNION"
-        scene.collection.objects.link(ob)
-        bones.append({"a": a, "b": b, "obj": ob})
-
-    dots = []
-    for idx in sorted(pts):
-        own = me_dot.copy()
-        ob = bpy.data.objects.new("jz_dot_{}".format(idx), own)
-        ob.data.materials.append(_dot_material(OPENPOSE_COLORS[(idx - 1) % len(OPENPOSE_COLORS)]))
-        scene.collection.objects.link(ob)
-        dots.append({"idx": idx, "obj": ob})
-
-    return {"points": dict(mapping), "joints": joints, "bones": bones,
-            "dots": dots, "height": float(height or 1.72)}
-
-
-def update_pose_rig(scene, rigs):
-    """把骨架更新到**当前帧**。必须在每次 frame_set 之后调用。"""
-    if not rigs:
-        return
-    bpy.context.view_layer.update()
-    for rig in rigs:
-        joints = rig["joints"]
-        height = rig["height"]
-        pts = {}
-        for idx, entry in rig["points"].items():
-            p = _resolve_point(joints, entry, height)
-            if p is not None:
-                pts[idx] = p
-        for bone in rig["bones"]:
-            pa, pb = pts.get(bone["a"]), pts.get(bone["b"])
-            ob = bone["obj"]
-            if pa is None or pb is None:
-                continue
-            vec = pb - pa
-            length = vec.length
-            if length < 1e-5:
-                continue
-            radius = max(0.004, height * BONE_RADIUS_RATIO)
-            ob.location = (pa + pb) * 0.5
-            ob.rotation_quaternion = vec.to_track_quat("Z", "Y")
-            ob.scale = (radius, radius, length)
-        dot_r = max(0.008, min(0.030, height * DOT_RADIUS_RATIO))
-        for dot in rig["dots"]:
-            pos = pts.get(dot["idx"])
-            if pos is None:
-                continue
-            dot["obj"].location = pos
-            dot["obj"].scale = (dot_r, dot_r, dot_r)
-
-
-def setup_pose(scene, actor_objs):
-    """姿态通道：黑底 + OpenPose 彩色骨架（COCO-18 / DWPose 同构）。
-
-    ⚠️ 为什么不再画"纯白剪影"
-      H3 Fun ControlNet 的 pose 分支是拿 DWPose 骨架训的，ComfyUI 官方模板
-      也是先过 SDPose 抽骨架再喂。骨架承载的是**关节拓扑与角度**；
-      纯白剪影丢掉这层信息，模型只会把它当成"一张对比度很高的图"。
-      所以剪影喂进去，控制力显著偏弱。
-
-    ⚠️ 为什么骨架必须逐帧驱动
-      ① apply_actor_actions 结束时场景停在最后一帧，此时读关节世界坐标会把
-         骨架冻结在动作终点（实测：整条骨架错位到画面右上）；
-      ② 骨段几何按两端点建立，每帧都要更新。
-      所以这里只建绑定关系，真正的更新在 render_sequence 的逐帧循环里。
-
-    ⚠️ 人偶网格必须 hide_render，不能只涂黑
-      涂黑的话网格会挡住画在它内部的骨架线段，渲染出来只剩几段露在轮廓外的
-      彩色碎片（实测就是这个症状）。
-    """
-    scene.render.engine = "BLENDER_EEVEE"
-    scene.render.film_transparent = False
-
-    if scene.world is None:
-        scene.world = bpy.data.worlds.new("JZ_World")
-    scene.world.use_nodes = True
-    bg = scene.world.node_tree.nodes.get("Background")
-    if bg:
-        # 强度必须为 0：EEVEE 的 world 是环境光，非零会把整个画面照成灰白
-        bg.inputs[0].default_value = (0, 0, 0, 1)
-        bg.inputs[1].default_value = 0.0
-
-    black_mat = _solid_emission(0.0, 0.0, 0.0, name="JZ_POSE_BLACK", dim=0.0)
-
-    actor_roots = set()
-    for _actor, (root, _joints) in actor_objs:
-        if root is None:
-            continue
-        actor_roots.add(root.name)
-        for _child in root.children_recursive:
-            if _child.type == "MESH":
-                actor_roots.add(_child.name)
-
-    def _is_actor_mesh(ob):
-        node = ob
-        while node is not None:
-            if node.name in actor_roots:
-                return True
-            node = node.parent
-        return False
-
-    for ob in scene.objects:
-        if ob.type != "MESH":
-            continue
-        ob.data.materials.clear()
-        ob.data.materials.append(black_mat)
-        if _is_actor_mesh(ob):
-            ob.hide_render = True
-
-    pose_rigs = []
-    for actor, (root, joints) in actor_objs:
-        if not joints:
-            continue
-        mapping = _pose_point_map(joints, actor)
-        if not mapping:
-            continue
-        rig = _build_pose_rig(scene, joints, mapping, actor.get("heightM") or 1.72)
-        if rig:
-            pose_rigs.append(rig)
-
-    if not pose_rigs:
-        # 没有可用关节（例如全是导入模型）→ 退回剪影，保证通道不空
-        print("POSE_SKELETON_FALLBACK: 无可用关节，退回剪影")
-        white = _solid_emission(1.0, 1.0, 1.0, name="JZ_POSE_WHITE")
-        for ob in scene.objects:
-            if ob.type == "MESH" and _is_actor_mesh(ob):
-                ob.hide_render = False
-                ob.data.materials.clear()
-                ob.data.materials.append(white)
-    else:
-        print("POSE_SKELETON_OK rigs={}".format(len(pose_rigs)))
-
-    scene.view_settings.view_transform = "Raw"
-    scene.view_settings.look = "None"
-    scene.view_settings.exposure = 0.0
-    scene.view_settings.gamma = 1.0
-    return pose_rigs
 
 
 def pad_frame_numbers(out_dir):
@@ -1263,7 +734,7 @@ def count_frames(out_dir):
         return 0
 
 
-def render_sequence(scene, out_dir, pose_rigs=None):
+def render_sequence(scene, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     # 清掉上一轮残留：目录虽然每次新建，但重新渲染同一 job 时可能复用
     for stale in os.listdir(out_dir):
@@ -1276,17 +747,6 @@ def render_sequence(scene, out_dir, pose_rigs=None):
     scene.render.image_settings.file_format = "PNG"
     scene.render.image_settings.color_mode = "RGB"
     scene.render.use_file_extension = True
-
-    if pose_rigs:
-        # pose：骨架必须**每帧**重新贴合关节，否则整段都是同一个姿势。
-        # 逐帧手动渲染（而不是 render(animation=True)），因为要在每次
-        # frame_set 之后插一次 update_pose_rig。
-        for f in range(scene.frame_start, scene.frame_end + 1):
-            scene.frame_set(f)
-            update_pose_rig(scene, pose_rigs)
-            scene.render.filepath = os.path.join(out_dir, "f_{:05d}".format(f))
-            bpy.ops.render.render(write_still=True)
-        return count_frames(out_dir)
 
     scene.render.filepath = os.path.join(out_dir, "f_")
     bpy.ops.render.render(animation=True)
@@ -1356,21 +816,7 @@ def main():
     setup_camera(spec)
     apply_actor_actions(spec, actor_objs)
 
-    pose_rigs = None
-    if MODE == "depth":
-        # 近/远平面按**场景实际几何**推算（不再用相机到注视点的经验系数）。
-        # 允许 spec 显式覆盖：depthNear / depthFar。
-        auto_near, auto_far = compute_depth_range(spec)
-        near = float(spec.get("depthNear") or auto_near)
-        far = float(spec.get("depthFar") or auto_far)
-        print("DEPTH_RANGE near={:.3f} far={:.3f} (auto {:.3f}/{:.3f})".format(
-            near, far, auto_near, auto_far))
-        setup_depth(scene, near, far)
-    elif MODE == "pose":
-        pose_rigs = setup_pose(scene, actor_objs)
-    elif MODE == "canny" or MODE == "gray":
-        setup_workbench_gray()
-    elif MODE == "blockout":
+    if MODE == "blockout":
         # 一律用材质色 —— 理由见 setup_blockout 的 docstring：
         # 单角色用 SINGLE 灰会让"浅灰人站浅灰地"剪影消失（实测踩过）。
         setup_blockout(scene, colored=True)
@@ -1386,16 +832,47 @@ def main():
     #    用户会以为"动画没做"（实测踩过）。
     try:
         scene.frame_set(scene.frame_start)
-        if pose_rigs:
-            update_pose_rig(scene, pose_rigs)
         bpy.ops.wm.save_as_mainfile(filepath=os.path.join(OUT_DIR, "scene.blend"),
                                     check_existing=False)
     except Exception as e:
         print(f"BLEND_SAVE_SKIP: {e}")
 
-    n = render_sequence(scene, out_dir, pose_rigs)
+    # ---- 完成哨兵：先写，成功后再删 ----
+    #
+    # 为什么需要：JS 侧只能看"目录里有没有 PNG"，而**部分渲染**（Blender 被杀、
+    # 显存耗尽、磁盘满、pad 中途崩）会留下几十上百个 5 位 PNG。
+    # 那种情况下帧数 >0 但 != FRAMES，JS 会判成功，ffmpeg 把残缺序列编成
+    # 一段时长错误的 mp4 交给 H3 —— 模型会把残缺运动当成完整参考，
+    # 且用户看到的是"成功"。
+    #
+    # 哨兵文件存在 = 这次渲染没有正常收尾，产物一律不可信。
+    sentinel = os.path.join(OUT_DIR, "_running")
+    try:
+        os.makedirs(OUT_DIR, exist_ok=True)
+        with open(sentinel, "w", encoding="utf-8") as fh:
+            fh.write("{}".format(os.getpid()))
+    except OSError as e:
+        print(f"SENTINEL_SKIP: {e}")
+
+    n = render_sequence(scene, out_dir)
+
+    # ⚠️ 帧数必须**等于** spec 声明的 FRAMES。
+    #    只判 n>0 是历史缺陷（见上方 pad_frame_numbers 注释里的复合 bug）。
     if n <= 0:
         raise SystemExit("BLENDER_NO_FRAMES: mode={} dir={}".format(MODE, out_dir))
+    if n != FRAMES:
+        raise SystemExit(
+            "BLENDER_INCOMPLETE_FRAMES: got={} want={} mode={} dir={}".format(
+                n, FRAMES, MODE, out_dir,
+            ),
+        )
+
+    # 正常收尾才删哨兵
+    try:
+        os.remove(sentinel)
+    except OSError:
+        pass
+
     print(f"BLENDER_RENDER_DONE mode={MODE} frames={n} dir={out_dir}")
 
 

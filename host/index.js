@@ -24,17 +24,36 @@ import { registerTools } from './tools.js';
 import { createH3Workshop } from './services/h3-workshop.js';
 import { createPostService } from './services/post.js';
 import { createAssetService } from './services/asset-service.js';
-import { createScriptService } from './services/script-service.js';
-import { createComicService } from './services/comic-service.js';
-import { createModelWorkbench } from './services/model-workbench.js';
 import { createCanvasAgent } from './services/canvas-agent.js';
 import { createVaultService } from './services/character-vault.js';
 import { createExtrasService } from './services/extras.js';
 import { initRuntime, attachControllers, disposeRuntime } from './runtime.js';
 import { readWorkflowCached } from './services/workflow-paths.js';
+import { registerSkillProvider } from './skills.js';
 
-export const inject = ['tools', 'webServer'];
+/**
+ * 依赖的 Host 服务。
+ *
+ * `llm` / `agentDefaultModel` / `attachments` 用于智能分镜：
+ *   · llm              → 调模型（文本 + 视觉）
+ *   · agentDefaultModel→ 读用户当前默认模型
+ *   · attachments      → 把本地图片变成 ImageAttachmentRef 喂给模型
+ *
+ * 放进 inject 是**安全的** —— Cordis 的语义是"等待服务就绪"，
+ * 不是"缺服务就崩"；没有这些服务的 profile 里插件会保持 inactive。
+ *
+ * ⚠️ 光声明 inject 不够：工具/API 读的是 getRuntime() 这个模块级单例，
+ *    不是 Cordis ctx。所以 index.js 还必须把服务传进 initRuntime()。
+ */
+export const inject = ['tools', 'webServer', 'llm', 'agentDefaultModel', 'attachments'];
 
+/**
+ * `skills` 是**可选**依赖 —— 用 ctx.get() 取而不是写进 inject。
+ *
+ * 理由：没有 skills 服务的 profile 里插件也该正常工作（只是 agent 看不到
+ * 本插件自带的提示词规范）。写进 inject 会把整个插件变成硬依赖，
+ * 缺技能服务的环境下插件直接 failed，页面和工具全没了。
+ */
 const API_PREFIX = '/jiuzhang/api';
 const APP_PREFIX = '/jiuzhang/app';
 const ASSET_PREFIX = '/jiuzhang/assets';
@@ -42,8 +61,47 @@ const ASSET_PREFIX = '/jiuzhang/assets';
 export function apply(ctx) {
   const root = path.resolve(import.meta.dirname, '..');
 
+  /**
+   * 把 llm / agentDefaultModel 服务暴露给子模块。
+   *
+   * Cordis 的 `ctx.llm` 只有把 llm 写进 inject 才存在；写进去就等于硬依赖，
+   * 缺模型服务的环境会让整个插件 failed。智能分镜只是可选功能，
+   * 所以用 `ctx.get(name)` 可选取用，再挂到自有属性上供
+   * services/nanfeng/dsh-llm.js 读取。
+   *
+   * 取不到时不影响插件加载 —— llmStatus() 会把原因报给前端。
+   */
+  try {
+    const llm = ctx.get?.('llm');
+    if (llm) ctx.jiuzhangLlm = llm;
+  } catch { /* 取不到就靠 llmStatus 报告 */ }
+  try {
+    const dm = ctx.get?.('agentDefaultModel');
+    if (dm) ctx.jiuzhangDefaultModel = dm;
+  } catch { /* 同上 */ }
+
   // 配置变更 → 重建各模块缓存（ComfyUI 探活、工作流目录、存储句柄等）
   wireConfigInvalidation().catch(() => { /* 个别模块加载失败不影响主流程 */ });
+
+  /**
+   * 把插件自带的 skills/ 注册进 DSH 的 skill 目录。
+   *
+   * ⚠️ 为什么不能只靠文件系统自动发现：
+   *    dsh-skill-filesystem 只扫 skill 根的**一层**，而本插件的提示词规范放在
+   *    `skills/prompt/<name>/SKILL.md`（两层），自动发现永远看不到它们。
+   *    另外它要求 name 是 kebab-case，`name: H3官方提示词` 会被静默丢弃。
+   *    所以这里注册自有 provider，深度与命名都在本文件里校验并 warn。
+   *
+   * 注册失败不能影响插件加载 —— 用 try/catch 兜住并只记日志。
+   */
+  ctx.effect(() => {
+    try {
+      return registerSkillProvider(ctx, root);
+    } catch (e) {
+      ctx.logger?.warn?.(`[jiuzhang] skill provider 注册失败：${String(e?.message || e)}`);
+      return () => {};
+    }
+  });
 
   /** 加载 H3-Image 工作流（画布 Agent 的 generate_image 用） */
   let _imgWf = null;
@@ -62,7 +120,20 @@ export function apply(ctx) {
 
   resetConfigCache();
   const cfg = loadConfig();
-  initRuntime({ root, cfg, webServer: ctx.webServer });
+  /**
+   * 把 Host 服务一并放进 runtime。
+   *
+   * ⚠️ 工具和 API 拿到的是 `getRuntime()` 这个对象（见 tools.js 的 `const z = getRuntime()`），
+   *    不是 Cordis ctx。所以 llm 必须挂在 runtime 上，否则 `z.llm` 恒为 undefined。
+   */
+  initRuntime({
+    root,
+    cfg,
+    webServer: ctx.webServer,
+    llm: ctx.llm,
+    agentDefaultModel: ctx.agentDefaultModel,
+    attachments: ctx.attachments,
+  });
 
   /**
    * ⚠️ 服务工厂必须拿**读取函数**而不是配置快照。
@@ -82,10 +153,7 @@ export function apply(ctx) {
   const h3 = createH3Workshop({ root, cfg, getCfg });
   const post = createPostService({ cfg, getCfg });
   const assets = createAssetService({ cfg, getCfg });
-  const script = createScriptService({ cfg, getCfg });
-  const comic = createComicService({ cfg, getCfg });
-  const mw = createModelWorkbench({ cfg, getCfg });
-  const vault = createVaultService({ cfg, getCfg });
+        const vault = createVaultService({ cfg, getCfg });
   const canvasAgent = createCanvasAgent({
     cfg,
     getCfg,
@@ -121,28 +189,12 @@ export function apply(ctx) {
       return { jobId: job.id, status: job.status, backendId: job.backendId };
     },
     // 画布 AI 助手调用技能 → 分发到真实服务（旧实现只回一句"已转交"的空壳）
+    //
+    // ⚠️ 阶段 3 已删除 script / comic / mw 三个模块。这里的 case 必须同步删除 ——
+    //    残留的 `script.runStage()` 会在插件加载时抛 "script is not defined"，
+    //    导致整个插件 fiber failed（工具、页面全部不可用）。
     runSkill: async ({ skill, args }) => {
       switch (skill) {
-        case 'script':
-        case 'script-stage': {
-          const projectId = String(args.projectId ?? '');
-          if (!projectId) throw new Error('PROJECT_REQUIRED');
-          const stage = String(args.stage ?? 'outline');
-          return await script.runStage(projectId, stage, args);
-        }
-        case 'script-all': {
-          const projectId = String(args.projectId ?? '');
-          if (!projectId) throw new Error('PROJECT_REQUIRED');
-          return await script.runAll(projectId, args);
-        }
-        case 'comic':
-        case 'comic-plan': {
-          const projectId = String(args.projectId ?? '');
-          if (!projectId) throw new Error('PROJECT_REQUIRED');
-          return await comic.planPrompts(projectId, args);
-        }
-        case 'mw':
-        case 'model-workbench': return mw.createJob(args);
         case 'prompt':
         case 'h3-prompt': {
           const lv = breakdownLevel(args.level ?? 'standard');
@@ -155,7 +207,7 @@ export function apply(ctx) {
     },
   });
   const extras = createExtrasService({ cfg });
-  attachControllers({ h3, post, assets, script, comic, mw, canvasAgent, extras, vault });
+  attachControllers({ h3, post, assets, canvasAgent, extras, vault });
 
   /* ---------------------------- HTTP 路由 ---------------------------- */
 

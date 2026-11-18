@@ -33,7 +33,8 @@ const DEFAULTS = Object.freeze({
   workflowDir: '',
   comfyUrl: 'http://127.0.0.1:8188',
   comfyInputDir: '',
-  defaultBackend: 'h3-local',
+  // 南风 V15 是默认视频后端（支持二采/续写）；h3-local 为旧的模板替换路径，保留作回退
+  defaultBackend: 'h3-nanfeng',
   defaultProfile: 'P12-draft',
   /**
    * H3 加速方案（蒸馏 LoRA）。
@@ -41,11 +42,10 @@ const DEFAULTS = Object.freeze({
    * 可选值见 services/accel-plan.js 的 ACCEL_PLANS：
    *   dmad8     DMAD 8 步学生（默认，音画质量优先）
    *   dmad4     DMAD 4 步学生（最快）
-   *   lightx2v  LightX2V Turbo（边缘更锐，视频理解弱）
    *   none      不加速，50 步原模型
    *
    * 为什么默认 dmad8：实测（docs/probes/dmad-2026-11-16/）在复杂提示词下
-   * DMAD 对角色形态、动作连续性、音频起伏明显更准。LightX2V 保留为回退。
+   * DMAD 对角色形态、动作连续性、音频起伏明显更准。
    */
   accelPlan: 'dmad8',
   maxConcurrentLocal: 1,
@@ -141,6 +141,30 @@ export function loadConfig() {
   if (cache) return cache;
   const raw = readJsonSafe(CONFIG_FILE, {});
   const merged = { ...DEFAULTS, ...pick(raw, WRITABLE_CONFIG_KEYS) };
+
+  /**
+   * ⚠️ dataDir 的**可移植性**修正。
+   *
+   * `data/config.json` 会被写进实际路径（本机是 `F:\AI视频\dsh-jiuzhang-studio\data`）。
+   * 仓库克隆到别的机器、或整个目录被搬走之后，那个绝对路径就指向一个
+   * 不存在的盘 —— 而 `loadConfig()` 不校验存在性，启动时
+   * `fs.mkdirSync(c.dataDir, { recursive: true })`（host/index.js）
+   * 会试图在别的盘上建目录，或者直接 ENOENT，用户完全看不出原因。
+   *
+   * 规则：只有当配置里的 dataDir **确实存在**时才采用它；否则回退到
+   * `<插件根>/data`。这样"搬家/clone 后开箱即用"，而用户显式指定一个
+   * 已存在的自定义目录仍然被尊重。
+   *
+   * 注意只能改 dataDir：`ffmpegDir` / `workflowDir` 不在 WRITABLE_CONFIG_KEYS 里，
+   * 本来就不会从文件读入。
+   */
+  const configuredDir = merged.dataDir;
+  if (configuredDir && path.resolve(configuredDir) !== path.resolve(DEFAULT_DATA_DIR)) {
+    let ok = false;
+    try { ok = fs.existsSync(configuredDir) && fs.statSync(configuredDir).isDirectory(); } catch { ok = false; }
+    if (!ok) merged.dataDir = DEFAULT_DATA_DIR;
+  }
+
   cache = merged;
   return merged;
 }
@@ -181,6 +205,51 @@ export function maskConfig(cfg = loadConfig()) {
 }
 
 /**
+ * 校验 comfyUrl —— 只允许指向本机的 http(s) 地址。
+ *
+ * 为什么必须校验：`comfyUrl` 在 WRITABLE_CONFIG_KEYS 内，任何能过
+ * guard() 的写请求都能改它。而后端会用这个 URL **主动发请求**
+ * （health / vram / submit / cancel / upload）。不校验等于给了一个
+ * 完全开放的 SSRF 出口：
+ *   · http://169.254.169.254/latest/meta-data/   云元数据
+ *   · http://127.0.0.1:<别的端口>/...             内网端口探测
+ *   · file:///... 之类非 http 协议（取决于 fetch 实现）
+ *
+ * 允许的主机：localhost / 127.0.0.0/8 / ::1。
+ * ComfyUI 本来就是本机服务，限制到 loopback 不影响任何正常用法；
+ * 确实需要远程跑 ComfyUI 的场景，请用环境变量 DSH_COMFY_URL 覆盖
+ * （那条路径不经过本函数，属于部署者显式选择）。
+ *
+ * @returns {string} 规范化后的 URL（去掉尾部斜杠）
+ * @throws {string} 不合法时抛出配置错误码
+ */
+export function validateComfyUrl(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  let u;
+  try {
+    u = new URL(s);
+  } catch {
+    throw new Error(`INVALID_COMFY_URL: ${JSON.stringify(s)} 不是合法 URL`);
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error(`INVALID_COMFY_URL: 只支持 http/https，收到 ${u.protocol}`);
+  }
+  const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const isLoopback = host === 'localhost'
+    || host === '::1'
+    || host === '0.0.0.0'
+    || /^127\./.test(host);
+  if (!isLoopback) {
+    throw new Error(
+      `INVALID_COMFY_URL: 只允许本机地址（localhost / 127.x / ::1），收到 ${host}。`
+      + '需要连远程 ComfyUI 请用环境变量 DSH_COMFY_URL 指定。',
+    );
+  }
+  return s.replace(/\/+$/, '');
+}
+
+/**
  * 写盘前的清洗：剔除占位符、剔除白名单外字段。
  * 修复原实现"哨兵值被存成真实密钥"与"任意字段落盘"两个缺陷。
  */
@@ -194,6 +263,11 @@ export function sanitizeConfigPatch(patch) {
       const trimmed = value.trim();
       // 掩码回填：'***' 或含"保持不变"的占位文案不写盘
       if (trimmed === '***' || trimmed.includes('保持不变')) continue;
+      // SSRF 防护：comfyUrl 必须是本机 http(s) 地址
+      if (key === 'comfyUrl') {
+        out[key] = validateComfyUrl(trimmed);
+        continue;
+      }
       out[key] = trimmed;
     } else if (typeof value === 'number' || typeof value === 'boolean') {
       out[key] = value;

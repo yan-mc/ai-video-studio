@@ -185,7 +185,25 @@ export async function serveStatic(req, res, { prefix, baseDir, spaFallback = nul
 /** SPA 专用：总是回退到 index.html，并把写 token 注入页面 */
 export async function serveSpa(req, res, { prefix, distDir }) {
   const url = new URL(req.url, 'http://127.0.0.1');
-  let rel = decodeURIComponent(url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : url.pathname);
+
+  /**
+   * 目录式路径缺尾斜杠要 301 补上。
+   *
+   * 为什么必须做：index.html 用相对路径 `./assets/index-xxx.js`（base: './'）。
+   * 浏览器按 URL 规范解析相对路径：
+   *   /jiuzhang/app/  → /jiuzhang/app/assets/xxx.js   ✅
+   *   /jiuzhang/app   → /jiuzhang/assets/xxx.js       ❌ 404
+   * 而本函数对两种形态都返回同一份 index.html，于是**不补斜杠的链接会白屏**
+   * （#root:empty::after 停在"载入中…"，且没有任何错误提示）。
+   * 分享/收藏的裸链接、用户手删斜杠都会踩到。
+   */
+  const pathname = url.pathname;
+  if (!pathname.endsWith('/') && !path.extname(pathname)) {
+    res.writeHead(301, { Location: `${pathname}/${url.search}` });
+    return res.end();
+  }
+
+  let rel = decodeURIComponent(pathname.startsWith(prefix) ? pathname.slice(prefix.length) : pathname);
   rel = rel.replace(/^\/+/, '');
   const wantsIndex = !rel || rel === 'index.html' || !path.extname(rel);
 

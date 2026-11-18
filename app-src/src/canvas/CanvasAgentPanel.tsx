@@ -214,7 +214,7 @@ export function CanvasAgentPanel({ getContext, applyDiff, projectId }: Props) {
         ) : logs.map((l, i) => (
           <div key={i} style={{ alignSelf: l.role === 'user' ? 'flex-end' : 'flex-start', maxWidth: '90%' }}>
             <div className="jz-xs" style={{
-              background: l.role === 'user' ? 'var(--jz-accent)' : 'var(--jz-bg-raised)',
+              background: l.role === 'user' ? 'var(--jz-accent)' : 'var(--jz-bg-layer-1)',
               color: l.role === 'user' ? 'var(--jz-on-accent)' : undefined,
               padding: '5px 8px', borderRadius: 6, whiteSpace: 'pre-wrap',
             }}>

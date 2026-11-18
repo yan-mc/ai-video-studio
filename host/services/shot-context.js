@@ -155,6 +155,16 @@ export async function withVaultCards(shot, projectId, ctx, cfg = loadConfig()) {
         const c = await ctx.vault.get(id).catch(() => null);
         if (c) cards.push(c);
       }
+      /**
+       * ⚠️ 必须按 createdAt 正序排，与 `vault.list()` 的展示顺序对齐。
+       *
+       * 不排的话这里是"镜头级卡在前、项目级卡在后"，而仓库页/项目页是
+       * "创建早的在前"。两张卡时，用户在**页面上看到的名次**与
+       * **实际编译出来的 <Subject N> / <Picture N> 归属**会互换 ——
+       * 编号内部是自洽的（refList 与 Picture 同源），但人读的顺序对不上，
+       * 排障时极易误判成"编号错位"。
+       */
+      cards.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
       out.characterCards = cards;
     }
     // ---- 视频 / 音频 ----

@@ -9,10 +9,22 @@ import react from '@vitejs/plugin-react';
  *
  * 为什么 outDir 指向插件目录：构建产物直接落进 dsh-jiuzhang-studio/app-dist，
  * Host 静态服务直接从那里读，免去二次拷贝（也就免去"忘了拷贝"的失败模式）。
+ *
+ * ⚠️ 必须显式写 `root`。
+ *    Vite 的 root 默认是 process.cwd()，而本仓库的构建入口有两处：
+ *      · 插件根目录的 `pnpm run build`  → `vite build --config app-src/vite.config.ts`
+ *      · app-src 里的 `npm run build`
+ *    只写相对路径的话，从插件根目录跑时 root=插件根，index.html 在
+ *    app-src/index.html，Vite 会报 `Could not resolve entry module "index.html"`。
+ *    写死 root 到本配置文件所在目录，两种入口都能跑通。
  */
 const DEV_HOST_PORT = process.env.DSH_PORT || process.env.DSH_HOST_PORT || '7983';
 
+/** 配置文件自身所在目录 = app-src（Node 20.11+ / 24 均支持 import.meta.dirname） */
+const APP_ROOT = import.meta.dirname;
+
 export default defineConfig({
+  root: APP_ROOT,
   base: './',
   plugins: [react()],
   build: {
