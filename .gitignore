@@ -42,3 +42,22 @@ Thumbs.db
 *.stage4bak
 *.reinstall-backup-*
 __pycache__/
+
+# 生成的成片与抽帧 —— **不入库**
+#
+# 为什么：这些是运行产物，不是源码。
+#   · 每轮实验都会产出几十 MB，累积起来仓库会被撑爆
+#   · 二进制文件在 git 里无法增量存储，历史只增不减
+#   · 想看效果应当自己跑一次，或看 Release 附件
+#
+# 保留的是「分析文档」：docs/VIDEO-ANALYSIS.md、docs/prompts.json
+# —— 那是可审阅的文本，不是视频。
+docs/result/
+docs/probes/
+
+# 任何位置的大媒体文件
+*.mp4
+*.mov
+*.webm
+*.mkv
+*.avi

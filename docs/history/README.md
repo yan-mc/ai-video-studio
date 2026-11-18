@@ -25,6 +25,10 @@ skill 为什么从 vendor 迁出来、上游 `h3_generator.py` 的哪些 `False`
 | `docs/PARAM-AUDIT.md` | 217 个南风参数的有效性审计（A/B/C/D 分类） |
 | `docs/VIDEO-ANALYSIS.md` | 参考片的逐镜分析（切点/光比/人物档案） |
 | `docs/prompts.json` | 那次复刻实验用的 6 段提示词 |
-| `docs/result/` | 那次复刻的成片与抽帧 |
+| `docs/CONTINUATION-VS-UPSCALE.md` | 续写与二采「冲突」的机制查明 |
 | `skills/README.md` | skill 体系的**当前**说明 |
 | `CHANGELOG.md` | 每一轮改了什么、为什么 |
+
+> **成片与抽帧不入库**（`docs/result/`、`docs/probes/`，见 `.gitignore`）。
+> 它们是运行产物，每轮几十 MB，二进制在 git 里只增不减。
+> 想看效果请自己跑一次；分析结论都以可审阅的文本形式留在上面这些文档里。

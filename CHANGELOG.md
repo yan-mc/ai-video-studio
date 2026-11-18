@@ -5,6 +5,55 @@
 
 ---
 
+## 2.8.1 — 成片移出版本控制（2026-11-18）
+
+> 生成的成片与抽帧不应出现在 GitHub 上。
+
+### 改了什么
+
+| 项 | 处理 |
+|---|---|
+| `docs/result/`（两轮成片 + 抽帧，约 14 MB） | `git rm --cached`，**本地文件保留** |
+| `docs/probes/`（历史探针产物） | 加入 `.gitignore` |
+| `.gitignore` | 新增两类规则（见下） |
+
+新增的忽略规则：
+
+```gitignore
+docs/result/      # 生成的成片与抽帧
+docs/probes/      # 历史探针产物
+*.mp4  *.mov  *.webm  *.mkv  *.avi   # 任何位置的大媒体文件
+```
+
+### 为什么
+
+- 这些是**运行产物**，不是源码。每轮实验产出几十 MB，累积会把仓库撑爆
+- 二进制文件在 git 里**无法增量存储**，历史只增不减
+- 想看效果应当自己跑一次——插件用的是本地模型，本来就该本地出片
+
+保留的是**可审阅的文本**：`docs/VIDEO-ANALYSIS.md`（逐镜分析）、
+`docs/prompts.json`（6 段提示词）、`docs/CONTINUATION-VS-UPSCALE.md`（机制查明）。
+这些才是能被人 review、被 git 有效管理的部分。
+
+### 未做的事（明确记录）
+
+`.git` 目录里仍保留约 105 MB 历史 blob（以前的探针产物和两轮成片）。
+**本次没有重写历史**——重写会改变所有 commit hash，
+需要 force push，其他协作者必须重新 clone。
+
+当前状态：仓库新提交里不再有媒体文件，但克隆下来的 `.git` 仍含历史。
+若将来确实要瘦身，可以用 `git filter-repo --path docs/result --path docs/probes --invert-paths`
+（会重写全部历史）。
+
+### 验证
+
+- `git ls-files | grep -E '\.(mp4|jpg|png)'` → **空**（仓库里已无媒体文件）
+- 忽略规则校验：`docs/result/x.mp4` / `docs/probes/a/b.mp4` / `*.mp4` 全部 IGNORED
+- `docs/` 下 9 个 md/json 文档全部完好
+- 冒烟 111/111
+
+---
+
 ## 2.8.0 — 人物替换 skill + 续写×二采机制查明 + 两条硬要求（2026-11-18）
 
 > 第八轮：新增一个 skill，把一条被误传为「功能互斥」的限制查清楚，
