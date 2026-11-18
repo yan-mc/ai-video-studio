@@ -20,6 +20,7 @@ skills/
 │  ├─ h3-hailuo/                  海螺版（中文流程 + 本地 ComfyUI 结构，26.7KB）
 │  ├─ h3-continuation/            一镜到底续写
 │  ├─ h3-continuation-cuts/       可切镜续写
+│  ├─ h3-character-replace/       人物替换（视频换人，与六字段规范互斥）
 │  ├─ h3-nonfirst-i2v/            非首帧 I2V
 │  ├─ group-master/               群友实战总纲 v2.0（2041 行 + 适配说明）
 │  └─ jiuzhang-prompt-spec.md     本插件提示词编译器规范
@@ -44,6 +45,7 @@ skills/
 | `prompt/h3-hailuo` | ✅ 是 | 同上（`skillId='ns_storyboard'`）| 智能分镜（海螺模式）|
 | `prompt/h3-continuation` | ✅ 是 | 同上（`mode='oneshot_continuation'`）| 续写分镜 |
 | `prompt/h3-continuation-cuts` | ✅ 是 | 同上（`mode='continuation_cuts'`）| 可切镜续写 |
+| `prompt/h3-character-replace` | ⚠️ 仅 DSH 技能目录 | `host/skills.js` provider | 视频换人 / 角色替换（专用四段式）|
 | `prompt/h3-nonfirst-i2v` | ✅ 是 | 同上（`mode='reference_i2va'`）| 非首帧 I2V |
 | `prompt/group-master` | ⚠️ 仅 DSH 技能目录 | `host/skills.js` provider | 写作时参考（含潜空间续写/光比/画风池）|
 | `prompt/jiuzhang-prompt-spec.md` | ⚠️ 仅 DSH 技能目录 | 同上 | `h3-prompt.js` 编译器的权威规范 |

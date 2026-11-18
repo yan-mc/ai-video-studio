@@ -835,6 +835,56 @@ async function moduleChecks() {
    * 群友 skill v2.1 §15.2：两道字幕/overlay 防线必须由编译器自动注入。
    * 不让用户手写，因为他们写的"no subtitles"会被 §15.1 判为非法负面句。
    */
+  /**
+   * 2026-11-18：本插件把提示词上限从官方 7000 收紧到 6000。
+   *
+   * 官方 7000 是**硬拒绝线**，不是**质量最优线**。实测 6500-7000 区间
+   * 六字段注意力被稀释：动作细节写得再细，成片也做不出来。
+   * 6000 是「六字段齐全 + 动作细节写清」的实际上限。
+   */
+  await checkAsync('长度：6000 收紧 + 7000 官方硬上限分两道提示', async () => {
+    const h = await import('../host/services/h3-prompt.js');
+    assert.equal(h.H3_LIMITS.promptMaxChars, 6000, '插件上限应为 6000');
+    assert.equal(h.H3_LIMITS.promptOfficialMaxChars, 7000, '官方硬上限应为 7000');
+
+    const head = 'subject_definitions:\nS.\n\nsummary:\nX.\n\nretention_analysis:\nY.\n\ndetailed_description:\n';
+    const tail = '\n\noverall_soundscape:\nZ.\n\nnon_diegetic_music:\nN/A.';
+    const make = (n) => head + 'a '.repeat(Math.ceil(n / 2)).slice(0, n) + tail;
+
+    const lintOf = (t) => {
+      const w = [];
+      h.lintCompiledPrompt(t, 'ref', w);
+      return w.filter((x) => /字符/.test(x));
+    };
+
+    // 6000 以下无告警
+    assert.equal(lintOf(make(5000)).length, 0, '5000 字符不应告警');
+    // 超 6000 但未超 7000：一条
+    assert.equal(lintOf(make(6500)).length, 1, '6500 应只有一条（本插件上限）');
+    // 超 7000：两条
+    assert.equal(lintOf(make(7500)).length, 2, '7500 应有两条（本插件 + 官方）');
+  });
+
+  /**
+   * 续写 × 二采互斥 —— 这条禁令的正确性论证见 docs/CONTINUATION-VS-UPSCALE.md。
+   *
+   * 本质不是两个功能互斥，而是二采把末 latent 的分辨率改了，
+   * 而 ComfyUI-H3-Motion-Context/nodes.py:416 比对宽高、不符即抛
+   * （"a latent cannot be resized"）。所以插件层提前拦截是对的。
+   */
+  await checkAsync('约束：续写 × 潜空间二采 被拦截且提示替代方案', async () => {
+    const nf = await import('../host/services/nanfeng/index.js');
+    assert.throws(
+      () => nf.buildShotWorkflow({
+        shot: { mode: 'ref2va', prompt: 'x', durationSec: 5, refs: { images: ['a.png'] } },
+        preset: 'continuation',
+        continuationTask: JSON.stringify({ workflow: 'w', node: '1', group: 'g', run: 'r', index: 2 }),
+        extraParams: { 启用H3潜空间放大二采: true, 启用潜空间续写: true },
+      }),
+      /互斥|画布/,
+    );
+  });
+
   await checkAsync('压制：两道防线由编译器自动注入', async () => {
     const h = await import('../host/services/h3-prompt.js');
     assert.ok(h.SUPPRESSION_GUARDS.textSuppression.includes('NO subtitles'));

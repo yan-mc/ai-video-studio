@@ -104,6 +104,7 @@ dsh-jiuzhang-studio/
 │  │  ├─ h3-hailuo/             海螺版
 │  │  ├─ h3-continuation/       一镜到底续写
 │  │  ├─ h3-continuation-cuts/  可切镜续写
+│  │  ├─ h3-character-replace/  人物替换（视频换人）
 │  │  ├─ h3-nonfirst-i2v/       非首帧 I2V
 │  │  ├─ group-master/          群友实战总纲
 │  │  └─ jiuzhang-prompt-spec.md 本插件编译器规范
@@ -113,7 +114,7 @@ dsh-jiuzhang-studio/
 │  └─ templates/                提示词模板（数据，可编辑）
 │
 │  ⚠️ prompt/ 是两层嵌套，DSH 内置发现（只扫一层）看不到它。
-│     由 host/skills.js 注册自有 provider 来收录，共 10 个 skill。
+│     由 host/skills.js 注册自有 provider 来收录，共 11 个 skill。
 │     改 SKILL.md 的 frontmatter 时 name 必须是 kebab-case，否则静默丢弃。
 │
 ├─ data/                        ← 运行时数据（不在 git 里）

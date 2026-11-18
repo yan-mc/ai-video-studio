@@ -108,7 +108,17 @@ export const H3_LIMITS = Object.freeze({
   audioClipSec: [2, 15],
   /** 参考视频/音频的**合计**时长上限 */
   mediaTotalSec: 15,
-  promptMaxChars: 7000,
+  promptMaxChars: 6000,
+  /**
+   * 官方硬上限（api.py 侧会拒）——保留它只为区分"我们主动收紧"和"上游会报错"。
+   *
+   * 为什么本插件收到 6000 而不是 7000（群友 v2.1 之外的本地修正）：
+   * 实测 7000 字符时，六字段的注意力分配明显被稀释 ——
+   * 尤其 `detailed_description` 里的动作细节会被后段的
+   * 光影/声音描述盖过。6000 是"够写清全部六字段 + 动作细节"的上限，
+   * 再多就只能靠堆砌形容词，收益为负。
+   */
+  promptOfficialMaxChars: 7000,
   canvasMultiple: 32,
   /** 16:9 原生档 */
   nativeCanvas: [1344, 768],
@@ -1499,8 +1509,19 @@ export function lintCompiledPrompt(prompt, format, warnings = []) {
   }
 
   // 1) 字符上限
+  //
+  // 分两道：
+  //   · 超过 6000（本插件收紧值）→ warning，提示精简
+  //   · 超过 7000（官方硬上限）  → 额外 warning，说明上游可能拒
   if (p.length > H3_LIMITS.promptMaxChars) {
-    w.push(`提示词 ${p.length} 字符超过官方上限 ${H3_LIMITS.promptMaxChars}`);
+    w.push(
+      `提示词 ${p.length} 字符超过本插件上限 ${H3_LIMITS.promptMaxChars}`
+      + '（官方 7000 过大，实测会稀释动作细节的注意力）。'
+      + '建议优先压缩：画风串后的重复描述、光影层里的解释性从句、声音行的重复。',
+    );
+    if (p.length > H3_LIMITS.promptOfficialMaxChars) {
+      w.push(`提示词 ${p.length} 字符也超过了官方硬上限 ${H3_LIMITS.promptOfficialMaxChars}，上游可能拒绝`);
+    }
   }
 
   // 2) 时间区间是非法的（官方只接受单点）

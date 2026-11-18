@@ -16,6 +16,7 @@ data/previz-shots/
 data/inputs/
 data/vault/
 data/prompts/
+data/projects/
 
 # 仓库里只保留工作流模板
 !data/workflows/

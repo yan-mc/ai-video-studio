@@ -66,7 +66,7 @@ non_diegetic_music
 | 参考图上限 | 9 张 |
 | 参考视频上限 | 3 段 |
 | 参考音频上限 | 3 段 |
-| 提示词总长 | ≤ 7,000 字符 |
+| 提示词总长 | **≤ 6,000 字符**（本插件收紧；官方上限 7000，但实测 7000 会稀释注意力） |
 
 ## 0.4 分辨率与步数分配
 
@@ -210,6 +210,71 @@ Then Sakiko pushes up from the bench in one continuous motion.
 ```
 
 凡是「然后」开头的变化，都必须显式写。
+
+## 1.6.5 续写时的服饰一致性（强制要求）
+
+> **为什么单开一节**：服饰是续写里最容易漂、也最容易被忽视的一类。
+> latent 只携带「上一段的实际画面」，**不携带「这套衣服的设计说明」** ——
+> 它会把上一段看到的布料颜色糊成一片，把蕾丝糊成一块布，
+> 把「黑金刺绣长裙」慢慢漂成「黑色长裙」，再把开叉位置漂走。
+>
+> 上面「类 3：抽象规则」虽然提了一句「服装继承哪张图」，
+> 但那只是**一句声明**，不足以钉住细节。服饰需要更具体的写法。
+
+### 三类服饰信息，待遇完全不同
+
+| 类型 | 例子 | 写法 |
+|:---|:---|:---|
+| **会自然延续的** | 布料整体色相、服装大致轮廓 | 只声明继承，不重述 |
+| **会被逐段稀释的** | 刺绣纹样、蕾丝密度、金属件位置、开叉高度、褶皱走向 | **每段重述一次，且要用同一组词** |
+| **必须锁死的** | 配饰的左右方位、图案方向、扣具位置、鞋跟高度 | **每段逐项复述，措辞不变** |
+
+### 标准句式：服饰锚点行（每段必写，紧跟在 subject 定义之后）
+
+```text
+Outfit anchors, unchanged throughout and identical to every other segment: [角色] wears [上装] with [具体工艺/材质/纹样], [下装] with [开叉/褶皱/内衬描述], [腿部装束] with [透明感/花纹/光泽层级], [鞋] with [跟高/绑带/扣具], plus [配饰逐项，含左右方位]. The fabric is matte [或 silk/leather/lace]，它的 [关键材质反应] 与上一段完全相同。
+```
+
+具体到本地两个角色的写法（可直接复用）：
+
+```text
+Outfit anchors for <Subject 1>, unchanged throughout and identical to every other segment: a black off-shoulder corset top with gold frog-clasps and a black bow collar carrying a square emerald, white lace cuffs at both wrists, a floor-length black skirt whose stiff outer panel carries gold embroidered vinework with a vivid crimson silk lining visible at the high front slit, a black lace underskirt beneath it, knee-high black boots with cross-lacing and a stacked heel, a thin gold choker with a sapphire drop, gold earrings and rings, a gold chain at the waist and a black cummerbund. All fabric is matte with flat block shadows; the lace stays strictly matte and never turns glossy.
+```
+
+```text
+Outfit anchors for <Subject 2>, unchanged throughout and identical to every other segment: a black lace off-shoulder top with a blue ribbon bow at the breast and lace ruffle sleeves, a layered black tulle skirt with tiny gold and violet floral embroidery and a black lace hem over a white petticoat, black semi-sheer tights carrying a small gold dot pattern, black ankle boots with metal buckles, a sapphire-and-gold chain at the throat, sapphire drop earrings, a gold bracelet, and a black lace open-front long cape. All fabric is matte with flat block shadows; the tights keep their scattered sheen only where the fabric is stretched, never a mirror gloss.
+```
+
+### 四条铁律
+
+| # | 铁律 | 违反后果 |
+|---|---|---|
+| 1 | **同一件衣服在每一段用完全相同的词**（不要这段说 `corset`、下段说 `bodice`） | 模型会当成两件不同的衣服，中途换装 |
+| 2 | **配饰必须带左右方位**（`above her left ear`，不是 `on her head`） | 左右互换，或每段漂一个位置 |
+| 3 | **材质反应要显式写「与上段相同」** | latent 会把它平滑掉，蕾丝逐渐变成一块平布 |
+| 4 | **不要用「同上段」省略** | 续写没有「同上」的通道，不写就是不写 |
+
+### 与「镜面分级」的配合
+
+服饰的镜面反应属于 §6.6 的镜面分级，但**分级可以按镜别变化，材质本身不能变**：
+
+```text
+镜面分级：本镜 2 级（a soft scattered sheen present only where the palm presses）
+服饰锚点：the black nylon keeps its scattered sheen wherever the fabric is stretched, and nowhere else
+```
+
+分级变了（远景 1 级 → 特写 3 级）是**镜头语言**，
+材质从「尼龙」变「乳胶」是**错误** —— 前者由镜别决定，后者绝不允许发生。
+
+### 自查
+
+- ☐ 每一段是否都有 `Outfit anchors` 行？
+- ☐ 同一件衣服在不同段用的词是否**完全一致**？
+- ☐ 配饰是否都带了左右方位？
+- ☐ 是否写了「材质反应与上段相同」？
+- ☐ 有没有用「同上段」偷懒？
+
+---
 
 ## 1.7 段尾免责句
 
@@ -1729,6 +1794,15 @@ N/A
 - [ ] 指示牌明确无可读文字
 - [ ] 遮阳伞明确保持收起
 
+### M-1 服饰一致性（续写必查，见 §1.6.5）
+
+- [ ] 每段都有 `Outfit anchors` 行
+- [ ] 同一件衣服在各段用的**英文词完全一致**（不换同义词）
+- [ ] 配饰全部带**左右方位**
+- [ ] 显式写了「材质反应与上段相同」
+- [ ] 没有用「同上段」省略
+- [ ] 镜面分级随镜别变，但**材质本身没变**
+
 ## N. 压制词
 
 - [ ] 画风串后已追加 `Text suppression: NO subtitles, NO on-screen text, NO captions, NO watermarks, NO logos, NO UI overlays.`
@@ -1758,7 +1832,7 @@ N/A
 - [ ] Prompt Optimizer 关闭
 - [ ] 种子统一
 - [ ] 参考图 ≤ 9 张，参考视频 ≤ 3 段，参考音频 ≤ 3 段
-- [ ] 提示词总长 ≤ 7,000 字符
+- [ ] 提示词总长 **≤ 6,000 字符**（插件收紧值；官方 7000 过大，注意力会被稀释）
 - [ ] 分辨率 / 帧率 / 步数 / CFG / seed 未进任何字段
 
 ---
