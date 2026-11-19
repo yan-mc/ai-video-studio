@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from '../config.js';
+import { updateJson } from '../store/json-store.js';
 
 /* ------------------------------------------------------- 提示词模板 */
 
@@ -501,10 +502,23 @@ export function createExtrasService({ cfg, getCfg = loadConfig }) {
   /* ---------------- 运行日志 ---------------- */
   const LOG_MAX = 500;
 
-  function appendLog(entry) {
-    const all = readJson(file('logs.json'), []);
-    all.unshift({ ...entry, at: Date.now() });
-    writeJson(file('logs.json'), all.slice(0, LOG_MAX));
+  /**
+   * 追加一条运行日志。
+   *
+   * ⚠️ 历史缺陷：这个函数是"读全量 500 条 → unshift → 写全量"，
+   *    两次并发写必然丢日志（A 读完 B 读完，A 写 B 写，B 覆盖 A），
+   *    而且永远返回 `{ok:true}` —— 用户看不到任何异常。
+   *    画布每操作一次都会写日志，所以并发是常态不是边角。
+   *
+   * 现在改用 json-store 的 updateJson：每文件一条 Promise 队列串行读-改-写。
+   */
+  async function appendLog(entry) {
+    const f = file('logs.json');
+    await updateJson(f, [], (cur) => {
+      const all = Array.isArray(cur) ? cur : [];
+      all.unshift({ ...entry, at: Date.now() });
+      return all.slice(0, LOG_MAX);
+    });
     return { ok: true };
   }
   function listLogs(limit = 100) {

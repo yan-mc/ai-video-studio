@@ -1683,8 +1683,19 @@ class NanFengH3MultiReferenceGenerator:
             ).out(0)
         noise = g.node("RandomNoise", noise_seed=int(随机种子))
         # V8.1的完整轨迹只由H3完整Sigma序列或自动完整轨迹决定；旧V4/V7 Sigma字段即使存在于旧工作流也不得介入。
-        # 原 V4 专属 Sigma 调节：V15 恒不启用（V8.1 起由 H3完整Sigma序列 独立控制）
-        sigma_requested = False
+        #
+        # 九章改动（2026-11-19）：原版这里恒为 False，导致整个「西格玛调节」面板是死的
+        # —— 包括 MiniMaxH3SigmaShift 节点永远不会被插入，shift 只能用模型自带的 12/3。
+        # 而 DMAD 等蒸馏学生在 12/2 上训练，用 12/3 就是分布外采样（不报错，只是画质变差）。
+        #
+        # 现在改为读参数，语义分层：
+        #   启用西格玛调节=False           → 完全不碰 sigma（默认，与改前一致）
+        #   启用西格玛调节=True + 原生轨迹   → **只插 SigmaShift 节点**，用下面两个偏移值
+        #   启用西格玛调节=True + 其它策略   → 插 SigmaShift + 走原有加密/手动序列逻辑
+        #
+        # 也就是说「原生轨迹（不加步）」现在的含义是"不加步，但仍可指定 shift"，
+        # 这正是蒸馏学生需要的形态。
+        sigma_requested = bool(kwargs.get("启用西格玛调节", False))
         # 原 V5 高清二采：V7+ 已移除该实验分支，V15 恒不启用
         hd_second_pass = False
         global_refine = False
@@ -1699,11 +1710,16 @@ class NanFengH3MultiReferenceGenerator:
         ))
         is_v7 = True
         sigma_strategy = str(kwargs.get("Sigma策略", "原生轨迹（不加步）")) if is_v7 else ""
+        # 九章改动：拆成两件事 ——
+        #   need_sigma_shift : 要不要插 MiniMaxH3SigmaShift（决定 video/audio shift）
+        #   sigma_enabled    : 要不要在 shift 之上再做"加密 / 手动序列"（决定步网格）
+        # 原实现把两者合成一个开关，于是"只想改 shift、不想改步网格"这件事做不到。
+        need_sigma_shift = bool(sigma_requested)
         sigma_enabled = (
             sigma_requested and sigma_strategy != "原生轨迹（不加步）"
             if is_v7 else sigma_requested and not lora_active
         )
-        if sigma_enabled:
+        if need_sigma_shift:
             # Sigma Shift belongs after every model/attention/cache patch and immediately before
             # both sampling consumers. This keeps BasicGuider and BasicScheduler on one coherent
             # MiniMax H3 video/audio shift model instead of patching only the scheduler branch.

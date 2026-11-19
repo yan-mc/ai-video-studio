@@ -137,11 +137,27 @@ export function extractAssets(segments) {
  * 注意：`root` 参数**已不再需要**（历史上用来拼 workflows 路径，现在统一走
  * services/workflow-paths.js）。保留参数是为了不破坏既有调用点，但不再读取它。
  */
-export function createH3Workshop({ cfg } = {}) {
-  /** 目录扫描：列出可分析的文本文件 */
+export function createH3Workshop({ cfg, getCfg } = {}) {
+  /**
+   * 读配置：优先用 getCfg（每次现取），退回启动快照。
+   *
+   * ⚠️ 历史缺陷：这里以前只用闭包 `cfg` —— 启动快照。用户在设置页改了
+   * dataDir 之后，本模块仍然读写旧目录（"项目还在、内容空了"那类现象）。
+   */
+  const config = () => (typeof getCfg === 'function' ? getCfg() : cfg);
+
+  /**
+   * 目录扫描：列出可分析的文本文件。
+   *
+   * ⚠️ 与 readPreview 同理，目录也必须在 dataDir 内（安全级）。
+   */
   function scanDir(dir) {
-    const abs = path.resolve(dir);
-    if (!fs.existsSync(abs)) throw new Error('DIR_NOT_FOUND');
+    let abs;
+    try {
+      abs = resolveUserPath({ root: config().dataDir, input: dir, mustExist: true });
+    } catch (e) {
+      throw new Error(String(e?.message || e) === 'FORBIDDEN_PATH' ? 'FORBIDDEN_PATH' : 'DIR_NOT_FOUND');
+    }
     const out = [];
     const walk = (d, depth = 0) => {
       if (depth > 4) return;
@@ -159,10 +175,26 @@ export function createH3Workshop({ cfg } = {}) {
     return out.sort((a, b) => a.rel.localeCompare(b.rel, 'zh'));
   }
 
-  /** 读文件预览（只读，限制大小） */
+  /**
+   * 读文件预览（只读，限制大小）。
+   *
+   * ⚠️ 路径必须限定在 dataDir 内（安全级）。
+   *
+   * 历史漏洞：`path.resolve(file)` 直接读 ——
+   *   POST /h3/workshop/analyze {"source":"dir","file":"C:/任意/文件.txt"}
+   * 能把任意本机文本读出来并切进 segments 返回给调用方。
+   *
+   * 注意：这里刻意**不接受 dataDir 外的绝对路径**。前端「扫描分镜目录」
+   * 给的是 `dataDir` 相对路径（见 scanDir），外置目录属于未实现能力，
+   * 需要时应当做成显式的配置项 + 审计日志，不能靠一个不设防的 path.resolve。
+   */
   function readPreview(file, limit = 200000) {
-    const abs = path.resolve(file);
-    if (!fs.existsSync(abs)) throw new Error('FILE_NOT_FOUND');
+    let abs;
+    try {
+      abs = resolveUserPath({ root: config().dataDir, input: file, mustExist: true });
+    } catch (e) {
+      throw new Error(String(e?.message || e) === 'FORBIDDEN_PATH' ? 'FORBIDDEN_PATH' : 'FILE_NOT_FOUND');
+    }
     const st = fs.statSync(abs);
     if (st.size > limit) throw new Error('FILE_TOO_LARGE');
     if (!/\.(md|markdown|txt)$/i.test(abs)) throw new Error('NON_TEXT_FILE');

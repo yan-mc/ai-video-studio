@@ -41,6 +41,9 @@ import type {
   CreateProjectInput,
   BlenderHealth,
   BlenderRenderResult,
+  LoraCategory,
+  LoraItem,
+  LoraSolveResult,
 } from './types';
 
 /* ------------------------------------------------------------ 基础设置 */
@@ -491,6 +494,29 @@ export const api = {
     desc: string;
     params: Record<string, unknown>;
   }>('GET', `/nanfeng/presets/${encodeURIComponent(id)}`),
+
+  /* ------------------------------ LoRA ------------------------------ */
+
+  /**
+   * LoRA 目录：分类定义 + 当前装了哪些文件 + 自动归类结果。
+   *
+   * `probed=false` 表示"没探测到"（ComfyUI 不可达），**不是**"一个都没装" ——
+   * 两者必须区分，否则用户会以为自己的 LoRA 全丢了。
+   */
+  loraCatalog: () => request<{
+    ok: boolean;
+    probed: boolean;
+    probeError?: string;
+    categories: LoraCategory[];
+    limits: { warn: number; block: number };
+    items: LoraItem[];
+    byCategory: Record<string, number>;
+    total: number;
+  }>('GET', '/lora/catalog'),
+
+  /** 把候选 LoRA 摊开校验（单选替换 / 同类衰减 / 总强度看门狗） */
+  loraSolve: (input: { items: Array<{ name: string; strength?: number }>; maxSlots?: number }) =>
+    request<LoraSolveResult>('POST', '/lora/solve', input),
 
   /* ------------------------- 南风续写批次 ------------------------- */
 

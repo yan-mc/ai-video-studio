@@ -629,8 +629,16 @@ const DEFS: NodeDefinition[] = [
         hint: '段数 = 镜头数（1~5），每段可有独立提示词与起点图；段间尾接头',
       },
       /* --- 采样 / 动作 --- */
-      { kind: 'number', key: 'steps', label: '总步数', min: 1, max: 100, step: 1, default: 4 },
-      { kind: 'number', key: 'firstPassSteps', label: '一采步数', min: 1, max: 100, step: 1, default: 4 },
+      { kind: 'number', key: 'steps', label: '总步数', min: 1, max: 100, step: 1, default: 4, hint: '会写进 nanfeng.overrides 的「采样步数」；与加速方案的训练步数一致才不出鬼影' },
+      { kind: 'number', key: 'firstPassSteps', label: '一采步数', min: 1, max: 100, step: 1, default: 4, hint: '开二采时上游只读「一采步数 + 二采步数」，总步数不生效' },
+      /**
+       * ⚠️ 这个滑条以前是纯装饰（`nodeToShot` 里没有这个键，host 零读取）。
+       *    现在它映射到语义 LoRA 的 strength（`nanfeng.loras[].strength`），
+       *    并配合下面的 `loras` 列表使用。
+       *
+       *    注意：加速学生（DMAD）的强度恒为 1.0，**不**受这里影响 ——
+       *    它是蒸馏后的学生本体，压强度会让低步数去噪不足。
+       */
       {
         kind: 'range',
         key: 'motionLoraStrength',
@@ -639,13 +647,21 @@ const DEFS: NodeDefinition[] = [
         max: 2,
         step: 0.05,
         default: 1,
+        hint: '只作用于语义 LoRA（动作/运镜/画质）。DMAD 加速 LoRA 恒 1.0，不受影响',
+      },
+      /**
+       * 语义 LoRA 文件名列表（每行一个，必须是 ComfyUI loras 目录里的真实文件名）。
+       * 空 = 只挂加速学生。
+       */
+      {
+        kind: 'list',
+        key: 'loras',
+        label: '语义 LoRA',
+        max: 7,
+        placeholder: '每行一个 LoRA 文件名（动作/运镜/画质），≤7',
+        hint: '从 LoRA2 槽位开始挂；同时最多 2–3 个，多了会出 artifacts',
       },
       { kind: 'input', key: 'positivePrompt', label: '正向提示词', placeholder: '动作/镜头/风格…' },
-      { kind: 'input', key: 'negativePrompt', label: '反向提示词', placeholder: '避免的元素…' },
-      { kind: 'switch', key: 'generateAudio', label: '生成音频', default: true },
-      { kind: 'switch', key: 'returnLastFrame', label: '返回尾帧', default: true },
-      { kind: 'switch', key: 'freeVramBeforeRun', label: '生成前释放显存', default: true },
-      { kind: 'switch', key: 'watermark', label: '水印', default: false },
       { kind: 'number', key: 'seed', label: '种子', min: 0, step: 1, default: 1101 },
     ],
   },
@@ -1103,15 +1119,19 @@ export function toneVar(tone: CanvasTone, part: 'text' | 'soft' | 'line'): strin
   }
 }
 
-/** 参数面板分组：视频节点参数多，按功能区拆开渲染 */
+/* 参数面板分组：视频节点参数多，按功能区拆开渲染 */
 export const VIDEO_PARAM_GROUPS: ReadonlyArray<{ title: string; keys: string[] }> = [
   { title: '后端 · 模型', keys: ['backend', 'model', 'mode', 'profile'] },
   { title: '画面 · 时长', keys: ['aspectRatio', 'durationSec', 'seed'] },
   { title: '首尾帧 · 参考', keys: ['firstFrameUrl', 'lastFrameUrl', 'referenceImages', 'referenceVideos'] },
   { title: '五段流', keys: ['segments'] },
-  { title: '采样 · 动作', keys: ['steps', 'firstPassSteps', 'motionLoraStrength'] },
-  { title: '提示词', keys: ['positivePrompt', 'negativePrompt'] },
-  { title: '开关', keys: ['generateAudio', 'returnLastFrame', 'freeVramBeforeRun', 'watermark'] },
+  // ⚠️ 「开关」这一组已删除。
+  //    generateAudio / returnLastFrame / freeVramBeforeRun / watermark 四个开关
+  //    在南风 217 参数里**没有任何对应项**，host 侧零读取 ——
+  //    它们只是让用户以为能控音频/尾帧/显存，实际提交出去的 body 完全不变。
+  //    留着假开关比删掉更糟：用户会照着它调参，然后怀疑是模型不行。
+  { title: '采样 · LoRA', keys: ['steps', 'firstPassSteps', 'motionLoraStrength', 'loras'] },
+  { title: '提示词', keys: ['positivePrompt'] },
 ];
 
 /** 取某节点的参数分组（未分组的字段统一进"其它"） */

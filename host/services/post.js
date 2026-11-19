@@ -42,6 +42,38 @@ export function createPostService({ cfg, getCfg = loadConfig }) {
     return 'unknown';
   }
 
+  /**
+   * 去掉视频的音轨（**换人/换皮任务的必需前置**）。
+   *
+   * ============================================================================
+   * 为什么必须有这个能力
+   * ============================================================================
+   *
+   * H3 的 Ref2VA 参考视频会把**自带音轨**作为 `<Audio j>` 一起送进条件
+   * （ComfyUI 源码：`soundtrack is not None` → 先 append 一个 audio token，
+   *  再 append video token；南风 build_native_prompt 也按"有音轨才占号"映射）。
+   *
+   * 所以：源视频只要带声音，即使提示词里一个 `<Audio N>` 都不写，
+   * 输出音轨仍会被这段原声影响 —— 人物替换 skill 的「铁律 1：禁用音频」
+   * 在**素材层**就做不到，光改提示词是无效的。
+   *
+   * 正确做法是先把源视频的音轨剥掉，再作为 `视频1` 提交。
+   * 这个 op 就是为此存在，`an: true` 时输出纯视频流。
+   */
+  async function stripAudio({ input }) {
+    const abs = resolveInput(input);
+    if (kindOf(abs) !== 'video') throw new Error('NOT_A_VIDEO: 去音轨只对视频有意义');
+    const out = uniqueOut('.mp4');
+    await runProcess(resolveFfmpeg(cfg), [
+      '-y', '-i', abs,
+      '-c:v', 'copy',        // 视频流原样复制：不重编码，无画质损失，速度极快
+      '-an',                 // 丢弃音频流
+      '-movflags', '+faststart',
+      out,
+    ], 600000);
+    return result(out);
+  }
+
   /** 转码 / 压缩（视频） */
   async function transcode({ input, crf = 23, preset = 'veryfast', videoCodec = 'libx264', audioCodec = 'aac', audioBitrate = '128k' }) {
     const abs = resolveInput(input);
@@ -285,5 +317,5 @@ export function createPostService({ cfg, getCfg = loadConfig }) {
     return { ok: true, path: out, rel: path.relative(C().dataDir, out).replace(/\\/g, '/'), bytes };
   }
 
-  return { transcode, scale, extractFrame, crop, extractAudio, split, annotate, qc, resolveInput };
+  return { transcode, scale, extractFrame, crop, extractAudio, stripAudio, split, annotate, qc, resolveInput };
 }

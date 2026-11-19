@@ -505,7 +505,7 @@ export function SettingsPage() {
               <div className="jz-divider" />
               <KeyValue
                 rows={[
-                  { key: t('app.version'), value: '0.1.0' },
+                  { key: t('app.version'), value: __APP_VERSION__ },
                   { key: 'API', value: <code className="jz-mono">/jiuzhang/api</code> },
                   { key: 'SPA', value: <code className="jz-mono">/jiuzhang/app</code> },
                   { key: t('settings.tokenHint'), value: '' },

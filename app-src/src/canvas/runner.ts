@@ -148,6 +148,26 @@ export function nodeToShot(node: CanvasFlowNode, projectId: string) {
   // 手填的参考图（UI 是换行分隔的 list）
   const manualImages = toList(p['referenceImages']);
 
+  /**
+   * ⚠️ 这两个参数以前是**纯装饰**。
+   *
+   * `motionLoraStrength`（动作 LoRA 强度）在 nodeRegistry 里声明了滑条、
+   * 在节点上画了进度条，但 nodeToShot 的返回值里**没有这个键**，
+   * host/ 全仓库 grep 零命中 —— 拖到 0 还是 2，提交出去的 body 完全一样。
+   *
+   * `steps` / `firstPassSteps` 同理（后端 `/generate` 接受 body.steps）。
+   *
+   * 现在把两者映射到南风的真实参数：
+   *   · motionLoraStrength → 语义 LoRA 强度（`nanfeng.loras` 里的 strength）
+   *   · steps              → H3 一采步数（二采开启时上游只读这两个）
+   *
+   * 注意：加速学生（DMAD）的强度恒为 1.0，**不**受这个滑条影响 ——
+   * 它是学生本体，压强度会让低步数去噪不足。滑条只作用在语义 LoRA 上。
+   */
+  const steps = num(p['steps'], 0);
+  const motionLora = p['motionLoraStrength'] != null ? num(p['motionLoraStrength'], 1) : null;
+  const semanticLoras = toList(p['loras'] ?? p['semanticLoras']);
+
   return {
     title: str(d.title, `画布镜头 ${new Date().toLocaleTimeString('zh-CN')}`),
     mode: h3Mode(p['mode'], manualImages.length > 0),
@@ -167,6 +187,24 @@ export function nodeToShot(node: CanvasFlowNode, projectId: string) {
       videos: toList(p['referenceVideos']),
       audios: toList(p['referenceAudios']),
     },
+    // 加速方案（画布上不选时跟随全局默认）
+    ...(str(p['accelPlan']) ? { accelPlan: str(p['accelPlan']) } : {}),
+    // 南风参数覆盖：步数 + 语义 LoRA 强度
+    ...(steps > 0 || motionLora != null || semanticLoras.length
+      ? {
+        nanfeng: {
+          ...(steps > 0 ? { overrides: { 采样步数: steps, H3一采步数: steps } } : {}),
+          ...(semanticLoras.length
+            ? {
+              loras: semanticLoras.map((file) => ({
+                file,
+                ...(motionLora != null ? { strength: motionLora } : {}),
+              })),
+            }
+            : {}),
+        },
+      }
+      : {}),
     // 首尾帧：后端读 shot.previz.firstFramePath / lastFramePath
     ...(str(p['firstFrameUrl']) || str(p['lastFrameUrl'])
       ? {
@@ -187,6 +225,20 @@ function toList(v: unknown): string[] {
     return v.split(/[\n,，;；]/).map((s) => s.trim()).filter(Boolean);
   }
   return [];
+}
+
+/**
+ * 画布「AI 图片」节点的尺寸下拉（768/1024/1536/2048 像素）→ 后端 IMAGE_SIZES id。
+ *
+ * 两套坐标系不同：UI 是短边像素，后端是 `sq-2048` / `p-4x3` 这种"形状+百万像素"的 id。
+ * 这里按最接近的像素值取，取不到退回 sq-2048。
+ */
+function pixelToSizeId(px: number): string {
+  const n = Number(px);
+  if (n >= 2048) return 'sq-2048';
+  if (n >= 1536) return 'h-16x9';       // 1536 长边 → 16:9 档
+  if (n >= 1024) return 'sq-1024';
+  return 'sq-768';
 }
 
 export interface RunOptions {
@@ -262,14 +314,29 @@ export async function runNodeGeneration(opts: RunOptions): Promise<RunResult> {
   if (route === 'image') {
     const p = (node.data?.params ?? {}) as Record<string, unknown>;
     const prompt = str(p['prompt'] ?? p['description'], '') || str(node.data?.title, '未命名图片');
-    const sizeId = str(p['sizeId'], 'sq-2048');
+
+    /**
+     * ⚠️ UI 的键名是 `size`，不是 `sizeId`。
+     *
+     * nodeRegistry 的 imageNode 用 `key:'size'`（768/1024/1536/2048 四档），
+     * 而这里以前读 `p['sizeId']` —— 永远 undefined → 恒兜底 'sq-2048'，
+     * 用户在画布上选任何尺寸都无效。
+     *
+     * 两个来源都要认：`sizeId`（后端 IMAGE_SIZES 的 id，如 sq-2048）
+     * 与 `size`（画布下拉的像素值）。像素值映射到最接近的后端档位。
+     */
+    const sizeId = str(p['sizeId']) || pixelToSizeId(num(p['size'], 2048));
+
+    // 手填参考图也要带上（UI 的 referenceImages 是换行分隔 list）
+    const manualRefs = toList(p['referenceImages']);
+    const allRefs = [...new Set([...images, ...manualRefs])].slice(0, 9);
 
     onProgress?.(25, '提交图像生成');
     const job = await api.imageGenerate({
       prompt,
       sizeId,
       ...(p['seed'] ? { seed: Number(p['seed']) } : {}),
-      ...(images.length ? { refImages: images } : {}),
+      ...(allRefs.length ? { refImages: allRefs } : {}),
       projectId,
     }) as { id?: string; status?: string };
     if (!job?.id) throw new Error('IMAGE_JOB_FAILED: 后端没有返回任务号');
@@ -313,11 +380,22 @@ export async function runNodeGeneration(opts: RunOptions): Promise<RunResult> {
   onProgress?.(25, '提交生成任务');
 
   // 4) 提交生成
+  const params = (node.data?.params ?? {}) as Record<string, unknown>;
   const job = await api.generate({
     projectId,
     shotId: shot.id,
     backend: shotInput.backend as never,
-    seed: num((node.data?.params as Record<string, unknown>)?.['seed'], 1101),
+    seed: num(params['seed'], 1101),
+    /**
+     * ⚠️ steps / accelPlan 后端一直支持（`/generate` 会读
+     * `body.steps` 与 `body.accelPlan`），但画布以前**从不传** ——
+     * 于是画布上享受不到二采/加速方案的任何控制，而渲染页可以。
+     * 同一个后端能力，两条入口行为不一致。
+     */
+    ...(num(params['steps'], 0) > 0 ? { steps: num(params['steps'], 0) } : {}),
+    ...(typeof params['accelPlan'] === 'string' && params['accelPlan']
+      ? { accelPlan: params['accelPlan'] as never }
+      : {}),
   } as never);
   if (!job?.id) throw new Error('GENERATE_FAILED: 后端没有返回任务号');
 

@@ -5,6 +5,440 @@
 
 ---
 
+## 2.11.0 — Sakuga 实战验证 + 二采/续写互斥确认（2026-11-19）
+
+### ① 确认：潜空间续写与二采硬互斥
+
+`vendor/nanfeng/h3_generator.py:1325` 写死：
+
+```
+V15 潜空间续写要求前后采样画布相同，请关闭潜空间放大二采
+```
+
+**所以「长镜头 + 高画质」在当前架构下无法同时满足。** 实测数据：
+
+| 方案 | 分辨率 | 帧数 | 结论 |
+|---|---|---|---|
+| 续写 + 0.5MP 单采 | 960×544 | 124 | 动作一快就糊 |
+| **二采 0.5→1.2MP，不续写** | **1472×832** | **158** | 边缘锐度 +9.5% |
+
+边缘增强后亮度均值（同尺寸对比）：68.03 → **74.49**。
+
+### ② Sakuga LoRA 的正确用法（实测总结）
+
+`Sakuga Style — Anime Action & Fight Choreography`（Civitai id 3055989，
+触发词 `sakuga_style`，rank 16，158 帧训练长度）三条硬规则：
+
+1. **触发词必须放最前**，官方建议前缀 `2d anime style, sakuga_style, ...`
+2. **帧数必须满足 `帧数 % 17 == 5`**，158 帧（6.58s）是训练长度最稳
+3. **两人场景同一时刻只能一人动** ——
+   官方原文："Keep one body in motion at a time in two-person scenes"
+
+第 3 条最容易被忽略。违反它的表现是：两个角色同时高速动作 → 模型把"该切的地方"
+渲染成模糊过渡，看起来就是"一快就糊"。
+
+### ③ 两个语义 LoRA 叠加会互相拉扯
+
+实测 `Combat BASE` + `Sakuga` 同挂（总强度 1.25，未超阈值）仍然糊。
+原因是**目标相反**：
+
+- Sakuga 求「断裂感 / 定格余韵」，官方描述含 *held aftermath*、*cuts that land on beats*
+- Combat 求「连续物理链」，官方描述是"摆脱攻击→复位的回合制"
+
+**结论：二选一。** 且两者 rank 差 8 倍（DMAD 128 vs Sakuga 16），混合时小 rank 贡献被稀释。
+
+### ④ 最终成片参数（方案 A）
+
+```
+画风        = 90s OVA（提示词通道，styleId='ova90s'）
+打光        = dramatic-4-1（4:1 两档，硬边阴影）
+加速        = DMAD 8step @ 1.0，shift 12/2（已生效）
+语义 LoRA   = sakuga_style_v1 @ 0.85（单个）
+采样        = 8 步 lcm/simple
+画布        = 0.5MP → 二采 1.2MP
+续写        = 关闭
+输出        = 1472×832 / 158 帧 / 6.58s
+```
+
+提示词 6155 字，采用钢琴那次的完整七段式打光写法（主光角度、光比、
+硬边阴影边界、材质响应），而非一句 `dramatic-4-1`。
+
+### ⑤ 清理与本轮工程状态
+
+- 清理运行时缓存：`__pycache__`、Blender 预演中间帧（34.5MB → 0.1MB）
+- 项目总体积 96.8MB → 62.3MB
+- 全项目校验：**112/112 冒烟通过**、路由三方一致、host 0 语法错误、
+  TypeScript 0 错误、vendor Python AST OK
+
+---
+
+## 2.10.1 — 画风通道解耦（2026-11-19）
+
+> 用户实测反馈：想「关掉 OVA 画风、用画风 LoRA」，发现关不掉。
+
+### ① `styleId: 'none'` 真的能关掉画风
+
+**问题**：`resolveStyle()` 在没有 `styleId` 时**静默回退到 `STYLE_PRESETS[2]`**
+（90 年代 OVA）。于是"不指定画风"这件事**做不到** —— 传空值、传 undefined
+都会拿到整串 OVA 描述。而挂画风 LoRA 时，这串描述会和 LoRA 权重互相打架：
+提示词说 OVA、权重说 claymation，产出"两边都不像"的中间态。
+
+**修法**：加一个 `styleId === 'none'` 分支，返回 `en: ''` 的空画风。
+`styleLeadSentence` 检测到空串就不注入任何定调句 —— 画风完全交给 LoRA。
+
+实测：`ova90s` → 484 字（含画风串）；`none` → **111 字**（画风串完全消失）。
+
+### ② `/prompt/meta` 下发「不指定」选项
+
+以前前端只有 11 个画风，没有"关闭"。现在列表首位是
+`none · 不指定（交给 LoRA）`。
+
+### ③ 渲染页默认画风改为 `none`
+
+默认塞一个画风串会让"用画风 LoRA"这条正常路径必然冲突。
+默认不指定、需要时再挑，才是正确默认。
+
+### ④ 画风冲突提示
+
+同时选了内置画风 + 挂了 `30_style/` 的 LoRA 时，渲染页显示警告，
+说明两者会互相拉扯，建议改成「不指定」。**不强行改用户选择，但必须让他看见。**
+
+### ⑤ 补回上一轮被误回滚的修复
+
+编辑 `STYLE_PRESETS` 时误操作导致 `git checkout` 回滚了整个 `h3-prompt.js`，
+丢掉了 2.9/2.10 的两处修复，已逐条补回：
+
+- `truncatePromptKeepFields()`（按字段边界截断，保住六个字段）
+- 中文 `description` / `traits` 不进英文句法（避免中英混排）
+
+### 验证：六组画风实测
+
+统一条件：**同一提示词 2104 字、均不含任何画风词、同 seed、8 步 DMAD、`styleId=none`**。
+差异只能来自画风 LoRA。
+
+| 变体 | LoRA | 强度 | 观感 | 产物 |
+|---|---|---|---|---|
+| A 基线 | 无 | — | 中性 3D/2D 混合、冷调 | 1.30 MB |
+| B | `claymation_style` | 0.85 | 高饱和暖橙、捏塑质感、边缘生硬 | 1.38 MB |
+| C | `studio1939_old_animation` | 0.85 | 褪色胶片、扁平上色、1930s 赛璐珞 | 1.04 MB |
+| D | `vh5tape_vhs` | 0.85 | 低对比、扫描线、录像带色偏 | 0.85 MB |
+| E | `16bit_pixel` | 0.9 | 像素化、色阶量化 | 1.55 MB |
+| F | `anime_2d_style` | 0.85 | 平涂 cel、清晰线稿、高饱和 | 1.57 MB |
+
+六组**提示词逐字相同**（2104 字），产物与观感全部不同 ——
+证明画风 LoRA 确实在起作用，且提示词通道没有污染。
+
+### ⑥ Civitai 实况（供后续选型参考）
+
+- H3 LoRA 总数 **1172**（NSFW 480 / SFW 692），有效 base model 只有 `MiniMax H3`
+- Civitai Red 返回 **403**（需认证）
+- Civitai 下载链接全部 `307 → /login?reason=download-auth` —— **需登录**
+- 可用替代：**HuggingFace 镜像免认证**（本轮 6 个画风 LoRA 全部从 HF 取得）
+
+---
+
+## 2.10.0 — shift 真正生效 + LoRA 分类加载器（2026-11-19）
+
+> 第十轮：把上一轮遗留的两件事做完 —— **DMAD 的 shift 12/2 真正落实**，
+> 以及把 LoRA 从"一串文件名"升级成**按功能分类、带互斥与衰减的选择器**。
+
+### ① shift 12/2 真正生效（改 vendor）
+
+**问题**：`vendor/nanfeng/h3_generator.py:1687` 是 `sigma_requested = False`，
+于是 `MiniMaxH3SigmaShift` 节点**永远不会被插入**，shift 只能用模型自带的 12/3。
+而 DMAD 4/8step 都是在 **12/2** 上训练的（两个 `.safetensors` 的
+`__metadata__.sampling` 里写着原文，可直接读文件核对）——
+用 12/3 就是分布外采样，不报错，只是画质与动态悄悄变差。
+
+**改法**：把一件事拆成两件：
+
+```python
+sigma_requested  = bool(kwargs.get("启用西格玛调节", False))   # 原：恒 False
+need_sigma_shift = bool(sigma_requested)                      # 决定插不插节点
+sigma_enabled    = sigma_requested and 策略 != 原生轨迹         # 决定要不要加密/手动序列
+```
+
+`Sigma策略=原生轨迹（不加步）` 现在的含义是「**不改步网格，但仍可指定 shift**」——
+正是蒸馏学生需要的形态。
+
+**实测验证**（直接在 ComfyUI 的 python 里跑 `INPUT_TYPES` + `generate` 展开图）：
+
+| 配置 | SigmaShift 节点 | 参数 |
+|---|---|---|
+| `启用西格玛调节=False` | ❌ 无 | — |
+| `=True, audio=2` | ✅ 有 | `shift_video=12.0, shift_audio=2.0` |
+| `=True, audio=3` | ✅ 有 | `shift_video=12.0, shift_audio=3.0` |
+
+链序也对：带 LoRA 时 `SigmaShift.model` 指向上游 LoRA 节点（LoRA → shift → sampler）。
+
+**真实渲染对比**（同一张参考图、同 seed、8 步 DMAD）：
+
+| | 12/2 | 12/3 |
+|---|---|---|
+| 规格 | 864×480 / 124 帧 / 5.167s | 同 |
+| 大小 | 916 689 B | 926 747 B |
+| 帧间 PSNR | — | **24.78 dB**（差异显著但都正常出片） |
+
+结论：12/2 现在真正生效，且没有破坏原有行为。
+
+### ② LoRA 分类体系（新增 `host/services/lora-catalog.js`）
+
+**调研结论**：H3 的 LoRA 在 Civitai 上共 **1173 条**（`Base Model` 字符串只有
+`MiniMax H3` 一个有效值），可归为 **12 个互斥功能轴**，其中 **6 个是单选**。
+
+新增模块把这件事显式建模：
+
+```js
+LORA_CATEGORIES = [ {folder, id, label, mode, strength, stackDecay, signed, why}, ... ]
+classifyLora(name)     // 目录优先 → 文件名正则 → 兜底 inbox
+catalogLoras(files)    // 批量归类
+solveLoraStack(items)  // 单选替换 / 同类衰减 / 总强度看门狗
+```
+
+**三条强制规则**（不靠用户自觉）：
+
+1. **单选类只留一个** —— 换选自动替换，并说明「谁被谁换了」
+2. **多挂类自动衰减** —— 同类第 2 条起 ×0.6
+   （依据：Motion Repair 官方「单独 0.9 → 配 Combat 0.5–0.7」）
+3. **总强度看门狗** —— 不含加速学生，>1.5 警告、>1.8 剔除最弱的一条
+   （依据：社区实测「above ~1.5 often breaks motion coherence」）
+
+**加速学生特殊处理**：
+
+- 强度**恒 1.0**，用户填 0.7 会被纠正回 1.0 并说明原因
+- **不计入**总强度（否则「DMAD + 一个动作 LoRA」就逼近上限，正常组合被误杀）
+- 永远排槽 1（它要覆盖后续所有语义偏移）
+
+### ③ 目录约定（ComfyUI 递归扫描，目录名成为路径前缀）
+
+```
+models/loras/
+├─ 00_turbo/  10_camera/  20_motion/  21_motion_slider/
+├─ 30_style/  31_look_slider/  32_quality/  40_character/
+├─ 50_audio/  60_vfx/  70_utility/  99_inbox/
+```
+
+已实际创建这些目录，DMAD 两个文件已移入 `00_turbo/`，
+并写了 `models/loras/README.md`（每类放什么、触发词、推荐强度）。
+
+**踩到并修掉的坑**：ComfyUI 递归扫描后返回的名字**带目录前缀**
+（`00_turbo\dmad_..._8step_....safetensors`），而 `ACCEL_PLANS` 里声明的是
+**纯文件名** —— 直接 `includes()` 永远匹配不到，表现是「明明装了却报没装」。
+现在比对用纯名、提交用完整名。
+
+### ④ 新增 REST 路由
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/lora/catalog` | 12 类定义 + 当前装了哪些 + 自动归类结果 + 每类计数 |
+| POST | `/lora/solve` | 传候选 LoRA，返回单选替换/衰减/剔除的完整决策 |
+
+`probed=false` 明确表示「没探测到」（ComfyUI 不可达），**不是**「一个都没装」。
+
+### ⑤ 前端 LoRA 选择器（新增 `components/LoraPicker.tsx`）
+
+不再是"给一串文件名让人瞎猜"，而是：
+
+- **按 12 个分类分组**，每个分类带一句「为什么是这个规则」
+- 单选类用下拉（物理只能一个），多挂类用可勾选按钮 + 强度输入
+- 滑块类标注「有符号」，0 = 不生效
+- **实时显示「你填的值 → 实际生效的值」**，以及每处替换/衰减/剔除的原因
+- 空分类也显示（灰掉），提示「把 LoRA 放进 `models/loras/xx_xxx/`」
+- 未探测到 ComfyUI 时明确提示「这不代表一个都没装」+ 重新探测按钮
+
+已接入渲染页，选择结果存进 `shot.nanfeng.loras`，随镜头卡走。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 展开图含 SigmaShift | ✅ `shift_video=12.0, shift_audio=2.0` |
+| LoRA → shift 链序 | ✅ `SigmaShift.model` 指向上游 LoRA |
+| 12/2 vs 12/3 真实渲染 | ✅ 均正常出片，PSNR 24.78 dB |
+| 分类器（15 个样例） | ✅ 全部归类正确（含目录优先、文件名回退、兜底） |
+| 约束求解（8 个场景） | ✅ 单选替换/衰减/硬上限/滑块/冲突提示全对 |
+| 冒烟测试 | **111 / 111** |
+| 路由一致性 | ✅ 三方一致 |
+| TypeScript | `tsc --noEmit` **0 错误** |
+| 前端构建 | ✅ 通过 |
+
+---
+
+## 2.9.0 — 全链路审计修复 + LoRA 加载器 + 人物替换可用化（2026-11-19）
+
+> 第九轮：五路并行审计（前后端一致性 / host 服务层 / Blender 管线 /
+> 提示词编译器 / LoRA 生态调研），按"真实使用中爆炸概率 × 后果"排序修复。
+>
+> **一句话概括本轮**：把"看起来成功、其实没做"的静默失败模式挨个拆掉，
+> 并把 LoRA 从"写死文件名"升级成"按实际安装情况成套匹配"。
+
+### ① P0 · 参考视频/音频被整条丢弃（Blender→H3 硬断点）
+
+`generator.js` 的两条执行路径都写成 `Array.isArray(shot.videos)`，
+而镜头卡上**从来没有**这个顶层字段（只有 `shot.refs.videos`）：
+
+- `videoEntries` 恒为空 → 不 stage → `视频1..3` 永远是「未选择」
+- 南风路径更糟：`shotForNanfeng.refs.videos = stagedVideos.map(...)`
+  把**本来正确的 `refs.videos` 覆盖成 `[]`**
+
+后果：3D 预演渲出的白模视频在提示词里写着 `<Video 1>`，
+提交时却根本没有这个素材 —— 用户看到「已挂上」、出片完全不含白模约束。
+
+修法：新增 `resolveMediaEntries()` 统一从 `refs.videos/audios` 解析；
+新增 `warnMissingMedia()` 把丢失的素材写进 `job.warnings`；
+staged 结果**保位不压缩**（避免"第 2 个失败导致第 3 个前移"）。
+
+### ② P0 · 角色卡注入覆写官方英文提示词
+
+`injectCardDefinitions()` 只要"卡名没出现在提示词里"就整段替换
+`subject_definitions:`。而智能分镜用英文名（`Chika`）、角色卡用中文名
+（`三角初华`）—— 判据几乎恒 false，于是**每次生成都会**：
+
+- 把官方英文 `<Subject N> is the visual content referenced from <Picture N>...`
+  整段换成中文「三角初华：外观以 <Picture 1> 为准」
+- 顺带吃掉同段里的 `<Video N>` / `<Audio N>` 定义句
+- 净删数百字符已校验内容，产出中文正文（违反"正文必须英文"铁律）
+
+实测：6280 字符 → 5623，英文 Subject 句消失。
+而 `lintCompiledPrompt` 跑在编译期、注入在提交期，中文没人检查得到 ——
+这是"提示词写得很好、出片却不像"的一个直接来源。
+
+修法：**绝不覆写已有 `subject_definitions`**，只在缺失时前置，
+且新增文本一律英文。
+
+### ③ P0 · 首尾帧顶掉角色参考图
+
+`frameSlotOverrides()` 直接写 `图片1`，而 `buildShotOverrides()` 已经把
+`refs.images` 填进 `图片1..9`。extraParams 优先级最高 → 角色图被 previz 首帧
+顶掉，但提示词里 `<Picture 1>` 仍写着"这是角色外观"。
+南风的 `i2va-needs-one-image` 只查**总数 == 1**，覆盖后仍是 1，约束也拦不住。
+
+修法：新增 `planImageSlots()` —— 首/尾帧占用的槽位从参考图里剔除，
+其余按原顺序补位，并把 `pictureIndexMap` 传给注入层重新编号。
+
+### ④ P0 · 数据丢失：shots.json 损坏时静默清空
+
+`listShots()` 是 `catch { return [] }`，而 `upsertShot()` 紧接着用这个空数组
+重建并**覆盖写** —— 用户的全部镜头卡就此消失，且没有 `.corrupt` 备份。
+
+修法：改走 `json-store.readJson`（解析失败保留 `.corrupt` 并抛
+`CORRUPT_JSON`）；`upsertShot` 的读-改-写整体放进 `updateJson` 串行队列，
+并把 tmp 名从固定的 `${pid}.tmp` 改成"pid + 时间戳 + 随机"，
+消除并发写同一 tmp 互相覆盖的窗口。
+
+### ⑤ P0 · 路径穿越（三处）
+
+| 位置 | 漏洞 | 实测 |
+|---|---|---|
+| `generator.js` 参考图 | `path.isAbsolute(ref)` 直接放行 | `refs:["C:/Windows/win.ini"]` 可读 |
+| `api/index.js` 立绘拆解 | 同上 | 同上 |
+| `blender-service.js` | `jobId` 未过 `safeId` 就拼路径 | `../../../../evil` 写出 dataDir |
+
+修法：全部改走 `security.resolveUserPath` / `safeId`。
+
+### ⑥ P0 · 画布 AI 面板首次打开即崩
+
+`GET /canvas-agent/meta` 返回 `{...meta, permissions: getCanvasPermissions()}`
+—— 把**能力清单数组** `permissions: Perm[]` 覆盖成 `Record<string,boolean>`
+对象，前端 `meta.permissions.map(...)` 直接 TypeError。
+
+修法：改用 `current` 键（前端已按 `m.current ?? m.defaults` 读取，零改动）。
+
+### ⑦ P1 · 其它静默失败
+
+- **中文文件名塌缩**：`safeStem` 把 `立绘.png`/`设定.png`/`侧面图.png` 全变
+  `_____.png` → 多张参考图互相覆盖。改为「ASCII 段 + 内容哈希」
+- **超长提示词硬切**：`slice(0,7000)` 从中间砍断六个字段（`overall_soundscape`
+  与 `non_diegetic_music` 必丢）。改为 `truncatePromptKeepFields()`
+  按字段边界截断，保住全部字段名
+- **`buildRenderPlan(shot, cfg)` 签名错误**：该函数是解构对象入参 →
+  `cards`/`manualImages` 全丢，`mediaNotes` 恒空。改为正确对象入参
+- **`deriveSubjectsFromShot` 不看 9 张上限** → `<Picture 10..12>` 悬空
+- **日志并发丢记录**：`appendLog` 读全量-改-写全量。改走 `updateJson`
+- **续写批次定时器泄漏**：`clearInterval` 只在三个分支里，异常路径会悬挂
+- **`saveBatch` 的 Windows `EPERM` 竞态**：裸 `writeFileSync + renameSync` 且 tmp 名
+  固定为 `${f}.tmp`。冒烟测试实测偶发
+  `EPERM: rename '.../<id>.json.tmp' -> '.../<id>.json'`
+  （杀软扫描 / 句柄未释放），**12 次跑挂 1~2 次**。改为唯一 tmp 名 + 8 轮退避重试，
+  与 `json-store` 同一套写法；修复后 12/12 全绿
+- **body 过大/畸形 URL**：`req.destroy()` 后再 `sendJson(400)` →
+  客户端只看到 ECONNRESET。改为 `req.pause()` / 解码失败返回 400
+- **`studio_shot.save` 忽略 `shotId`** → 每次保存都新建镜头，镜头表爆炸
+- **workshop 任意文件读**：`path.resolve(file)` 不设防。改为限定 dataDir
+- **`/assets/archive` 绕过子目录白名单**：能把 `config.json` 归档进素材库再下载
+
+### ⑧ LoRA 加载器（重写）
+
+**问题**：`ACCEL_PLANS` 里的 `lora` 是写死的文件名；用户换机 / 重命名 /
+只装一个学生时，轻则 `value_not_in_list`，重则被 sanitize 回退成「未选择」
+→ 蒸馏栈变空 → **4/8 步跑在未蒸馏原模型上，能出片但质量悄悄崩**。
+
+**现在**：
+
+1. **启动前探测** ComfyUI 真实 `loras` 目录（`object_info` 是唯一权威）
+2. `classifyAccelLora()` 从文件名识别家族与步数
+3. `resolveAccelForFiles()` 四级匹配 —— 声明名存在 → 同家族同步数 →
+   **同家族不同步数则整套切换方案**（LoRA 与步数必须成套）→ 都没有则明确告警
+4. `planLoraStack()` 装配 8 个槽位：
+   - **LoRA1 = 加速学生，强度恒 1.0**（它是学生本体，不是风格补丁）
+   - LoRA2..8 = 语义 LoRA，按叠加规则衰减（1 个 0.7 / 2 个 0.6 / 3 个 0.5）
+   - 每槽的 `LoRA{n}启用` / `LoRA{n}` / `LoRA{n}强度` **每次生成都显式写死**，
+     杜绝残留
+5. 加速学生必须放槽 1（`_enabled_lora_stack` 按 1→8 串，语义 LoRA 要叠在
+   蒸馏后的权重上）
+
+### ⑨ 人物替换 skill 可用化
+
+原 skill 只在"提示词层"禁音频标签，但 **H3 Ref2VA 会把参考视频自带的音轨
+自动接成 `<Audio j>`**（`nodes_minimax_h3.py:352` 的 `if soundtrack is not None:`）
+—— 音频编号是**素材驱动**的，不写标签 ≠ 没有音频。
+
+- 新增 `POST /post/stripAudio` + `studio_post{op:'stripAudio'}`
+  （视频流 `-c:v copy` 原样复制，无重编码无画质损失）
+- 实测：源 1246004 B 含 aac 音轨 → 产物 1158195 B，流类型 `["video"]`，
+  1056×608 / 5.167s 完全保留
+- skill 升级到 v1.1.0：把「音频必须从素材层剥掉」提到铁律 1，
+  并补上为什么提示词层做不到
+
+### ⑩ 前端与自检
+
+- `motionLoraStrength`（动作 LoRA 强度）从**纯装饰**接线到语义 LoRA 强度；
+  新增「语义 LoRA」列表字段
+- 删除 4 个无后端能力的假开关（`generateAudio` / `returnLastFrame` /
+  `freeVramBeforeRun` / `watermark`）与 `negativePrompt`
+- 画布 `runner.ts` 补 `steps` / `accelPlan`（后端本就支持，画布从不传）
+- 图片节点键名修正：UI 是 `size`、runner 读 `sizeId` → 恒兜底；
+  新增 `pixelToSizeId()` 映射
+- 版本号不再硬编码 `0.1.0`，构建期从 `package.json` 注入 `__APP_VERSION__`
+- **`tools/check-routes.mjs` 重写**：旧实现的兜底条件
+  `bp.split('/')[0] === head` 让**真 404 检出率归零**（实测
+  `/post/doesnotexist`、`/blender/whatever` 全部"一致"）。
+  现在按 (method, path) 双键 + 路由族匹配，并做反向死路由统计
+
+### ⑪ 文档
+
+- **README 全面重写**：从"参数说明书"改成"这个插件解决什么问题"，
+  补 LoRA 分层、DMAD 成套表、人物替换前置条件
+- 光比表补全到 7 项（原缺 `closeup-6-1`，且 `rim-backlit` 标错）
+- 参数体系表述修正为 A/B/C/D 四类（C=47 死 / D=48 缺依赖，共 95 无效）
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 冒烟测试 | **111 / 111** |
+| 路由一致性 | ✅ 三方一致（62 条前端 method+path 全部命中） |
+| 参数审计 | 217 参数 / 95 无效（47 dead + 48 banned） |
+| TypeScript | `tsc --noEmit` **0 错误** |
+| 前端构建 | ✅ 单 bundle，无残留旧产物 |
+| host 全模块语法 | 0 错误 |
+| `apply()` 真跑 | 3 条路由 + 13 个工具全部注册 |
+| 路径穿越 | 4 组恶意路径全部拒绝 |
+| `stripAudio` | 真跑验证，音轨移除、视频流无损 |
+| 11 个 skill | 全部被发现，含 `h3-character-replace` |
+
+---
+
 ## 2.8.1 — 成片移出版本控制（2026-11-18）
 
 > 生成的成片与抽帧不应出现在 GitHub 上。

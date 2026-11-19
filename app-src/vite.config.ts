@@ -1,5 +1,7 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import fs from 'node:fs';
+import path from 'node:path';
 
 /**
  * 九章工作室 SPA 构建配置。
@@ -23,10 +25,30 @@ const DEV_HOST_PORT = process.env.DSH_PORT || process.env.DSH_HOST_PORT || '7983
 /** 配置文件自身所在目录 = app-src（Node 20.11+ / 24 均支持 import.meta.dirname） */
 const APP_ROOT = import.meta.dirname;
 
+/**
+ * 读插件根目录 package.json 的 version，构建时注入 `__APP_VERSION__`。
+ *
+ * ⚠️ 为什么要在构建期注入：
+ *    设置页「关于」以前把版本号**硬编码**成 '0.1.0'，而 package.json 早已是
+ *    2.x —— 界面显示的版本落后两个大版本，用户报 bug 时给的是错版本号。
+ *    版本号只有一个真源（package.json），这里读它、不让人手抄。
+ */
+function pluginVersion(): string {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(APP_ROOT, '..', 'package.json'), 'utf8'));
+    return String(pkg.version || '0.0.0');
+  } catch {
+    return '0.0.0';
+  }
+}
+
 export default defineConfig({
   root: APP_ROOT,
   base: './',
   plugins: [react()],
+  define: {
+    __APP_VERSION__: JSON.stringify(pluginVersion()),
+  },
   build: {
     outDir: '../app-dist',
     assetsDir: 'assets',

@@ -38,6 +38,7 @@ import {
 } from '../components/NanfengParams';
 import { AssetPicker, type AssetItem, type PickedMedia } from '../components/AssetPicker';
 import { ContinuationPanel } from '../components/ContinuationPanel';
+import { LoraPicker, type LoraChoice } from '../components/LoraPicker';
 
 /** 生成模式 */
 const MODES: Array<{ id: string; label: string }> = [
@@ -107,10 +108,18 @@ export function RenderPage() {
   const [durationSec, setDurationSec] = useState('5');
   const [seed, setSeed] = useState('');
   const [overrides, setOverrides] = useState<Record<string, unknown>>({});
+  const [loras, setLoras] = useState<LoraChoice[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
   // ---- 画风 / 打光 / 加速（正交通道）----
-  const [styleId, setStyleId] = useState('ova90s');
+  /**
+   * 画风默认值是 `none`（不指定），不是 ova90s。
+   *
+   * 理由：默认塞一个画风串会让"用画风 LoRA"这条正常路径必然冲突 ——
+   * 用户选了 claymation LoRA，提示词里还带着 90 年代 OVA 的整串描述，
+   * 两个通道互相拉扯。默认不指定，需要时再挑，才是正确默认。
+   */
+  const [styleId, setStyleId] = useState('none');
   const [lightingId, setLightingId] = useState('none');
   const [accelPlanId, setAccelPlanId] = useState('dmad8');
 
@@ -259,9 +268,17 @@ export function RenderPage() {
     setAudios((s.refs?.audios ?? []).map(asPicked));
 
     // 南风预设 + 单镜覆盖
-    const nf = (s as { nanfeng?: { presets?: unknown; overrides?: Record<string, unknown> } }).nanfeng;
+    const nf = (s as {
+      nanfeng?: {
+        presets?: unknown;
+        overrides?: Record<string, unknown>;
+        loras?: LoraChoice[];
+      };
+    }).nanfeng;
     if (typeof nf?.presets === 'string') setPresetId(nf.presets);
     setOverrides(nf?.overrides && typeof nf.overrides === 'object' ? nf.overrides : {});
+    // LoRA 栈跟着镜头卡走 —— 换镜头要看到那个镜头自己的选择
+    setLoras(Array.isArray(nf?.loras) ? nf.loras : []);
   }, [shotId, shots]);
 
   /* ------------------------------ 计算 ------------------------------ */
@@ -318,6 +335,8 @@ export function RenderPage() {
         nanfeng: {
           presets: presetId,
           overrides,
+          // LoRA 栈随镜头卡一起存：换镜头能恢复、生成时按分类求解
+          loras,
         },
       });
 
@@ -343,7 +362,7 @@ export function RenderPage() {
     } finally {
       setSubmitting(false);
     }
-  }, [currentProjectId, shotId, prompt, durationSec, mode, images, videos, audios, presetId, overrides, seed, toast, loadShots, styleId, lightingId, accelPlanId]);
+  }, [currentProjectId, shotId, prompt, durationSec, mode, images, videos, audios, presetId, overrides, loras, seed, toast, loadShots, styleId, lightingId, accelPlanId]);
 
   /* ------------------------------ 渲染 ------------------------------ */
 
@@ -512,6 +531,23 @@ export function RenderPage() {
               画布：{String(effectiveValues['百万像素'])} MP · {String(effectiveValues['画面比例'])}
             </div>
           </Panel>
+
+          {/* LoRA 选择器：按功能分类选，单选类自动替换，多挂类自动衰减 */}
+          <LoraPicker value={loras} onChange={setLoras} maxSlots={8} />
+
+          {/*
+            ⚠️ 画风冲突提示。
+            画风有两条通道：内置画风串（提示词）和画风 LoRA（权重）。
+            同时开会让模型收到两个矛盾的美学指令，产出"两边都不像"的中间态。
+            这里不强行改用户的选择，但必须让他看见。
+          */}
+          {styleId !== 'none' && loras.some((l) => /[\\/]30_style[\\/]/.test(l.name)) ? (
+            <Alert tone="warn">
+              已选内置画风「{styles.find((s) => s.id === styleId)?.name ?? styleId}」，
+              同时挂了画风 LoRA。两者会互相拉扯 ——
+              建议把画风改成「不指定（交给 LoRA）」，让权重决定风格。
+            </Alert>
+          ) : null}
 
           <ContinuationPanel
             projectId={currentProjectId}

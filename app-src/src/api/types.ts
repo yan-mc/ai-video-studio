@@ -202,6 +202,14 @@ export interface ShotNanfeng {
   presets?: string | { inherit?: string; chain?: string[]; overrides?: Record<string, unknown> };
   /** 单镜参数覆盖（217 个南风参数里的任意子集，最高优先级） */
   overrides?: Record<string, unknown>;
+  /**
+   * 这个镜头要挂的语义 LoRA（加速学生由 `accelPlan` 决定，不在这里）。
+   *
+   * 生成时后端会跑 `solveLoraStack`：单选类只留一个、多挂类按 stackDecay 衰减、
+   * 总强度超阈值会告警或剔除。所以这里存的是**用户意图**，
+   * 实际生效值看 `job.params.loraStack`。
+   */
+  loras?: Array<{ name: string; strength?: number }>;
 }
 
 /**
@@ -384,6 +392,67 @@ export interface AccelPlan {
   shift: { video: string } | null;
   hint: string;
   isDefault: boolean;
+}
+
+/* -------------------------------- LoRA -------------------------------- */
+
+/**
+ * LoRA 分类。
+ *
+ * `mode` 决定前端的选择器形态：
+ *   single → 每类只能选 1 个（换选时自动替换）
+ *   multi  → 可多选，但按 `stackDecay` 递减强度
+ *
+ * `signed` 为真表示滑块类：0 = 不生效，正负是反方向，范围可能是 -5..5。
+ */
+export interface LoraCategory {
+  folder: string;
+  id: string;
+  label: string;
+  mode: 'single' | 'multi';
+  strength: { def: number; min: number; max: number; step: number };
+  stackDecay: number;
+  signed?: boolean;
+  defaultOnSelect?: number;
+  why: string;
+}
+
+/** 一个装在 ComfyUI `models/loras` 里的文件（`name` 含子目录前缀） */
+export interface LoraItem {
+  name: string;
+  base: string;
+  folder: string;
+  categoryId: string;
+  categoryLabel: string;
+  mode: 'single' | 'multi';
+  /** folder = 按子目录判定；name = 按文件名推断；fallback = 未分类 */
+  categorySource: 'folder' | 'name' | 'fallback';
+}
+
+/** 一条被接受的 LoRA（含衰减后的实际强度） */
+export interface LoraAccepted {
+  name: string;
+  base: string;
+  folder: string;
+  categoryId: string;
+  categoryLabel: string;
+  mode: 'single' | 'multi';
+  signed: boolean;
+  userStrength: number | null;
+  /** 求解后真正提交的强度 */
+  appliedStrength: number;
+  role: 'accelerator' | 'semantic';
+}
+
+export interface LoraSolveResult {
+  ok: boolean;
+  accepted: LoraAccepted[];
+  rejected: Array<{ name: string; reason: string }>;
+  replaced: Array<{ name: string; by: string; category: string }>;
+  degraded: Array<{ name: string; from: number; to: number; reason: string }>;
+  /** 不含加速学生的强度总和 */
+  totalStrength: number;
+  warnings: string[];
 }
 
 /* ------------------------------- H3 工坊 ------------------------------ */

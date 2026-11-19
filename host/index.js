@@ -153,7 +153,7 @@ export function apply(ctx) {
   const h3 = createH3Workshop({ root, cfg, getCfg });
   const post = createPostService({ cfg, getCfg });
   const assets = createAssetService({ cfg, getCfg });
-        const vault = createVaultService({ cfg, getCfg });
+  const vault = createVaultService({ cfg, getCfg });
   const canvasAgent = createCanvasAgent({
     cfg,
     getCfg,

@@ -104,30 +104,144 @@ for (const k of caseSet) {
 
 /* --------------------------------------------------- 5. 后端 API 交叉 */
 
-// 前端 client.ts 里调用的路径 vs 后端 index.js 里声明的路径
+// 前端 client.ts 里调用的（方法 + 路径），以及后端 index.js 里声明的（方法 + 路径）
 const clientTs = read('app-src/src/api/client.ts');
 const apiSrc = read('host/api/index.js');
 
-const fePaths = new Set(
-  [...clientTs.matchAll(/request<[^>]*>\(\s*'(?:GET|POST|PUT|PATCH|DELETE)'\s*,\s*[`']\/([a-zA-Z0-9_\-/]*)/g)]
-    .map((m) => '/' + m[1].replace(/\/$/, '')),
-);
-const bePaths = new Set(
-  [...apiSrc.matchAll(/route\s*===\s*'(\/[a-zA-Z0-9_\-/]+)'/g)].map((m) => m[1]),
-);
-// 正则/前缀路由（/projects/:id/shots 之类）单独收
-const bePrefixes = [...apiSrc.matchAll(/route\.match\(\s*\/\^\\\/([a-zA-Z0-9_\-\\\/]+)/g)].map((m) => m[1]);
+/**
+ * ⚠️ 旧实现有三个致命缺陷，导致这个脚本**对真 404 的检出率为 0**：
+ *
+ *  1) 匹配条件里有 `bp.split('/')[0] === head` —— 只要**首段同名**就算通过。
+ *     于是 `/post/doesnotexist`、`/blender/whatever`、`/assets/archiveKKK`
+ *     全部"一致"，而它们在真实后端都是 404。
+ *  2) 正则 `request<[^>]*>` 遇到含 `>` 的泛型（`Record<string, unknown>`）
+ *     就提前截断，漏掉 6 条真实路径。
+ *  3) 不校验 HTTP 方法 —— `bePaths` 只有路径，没有任何 method 信息。
+ *
+ * 现在的做法：
+ *  · 前端按**整行**匹配，取引号/反引号包住的那一段路径（平衡匹配，不截断）；
+ *  · 模板插值 `${...}` 折叠成 `:id`，查询串 `?x=y` 整段剥掉；
+ *  · 后端同时收「精确路由」「(method||method) 路由」「正则路由」「startsWith 前缀」；
+ *  · 比对时允许"前端路径落在后端某个路由族下"（参数化路由的正则无法静态还原成
+ *    单一模板，按族判断是唯一可靠的近似）；
+ *  · **不再**按首段兜底——那一步把检出率变成了 0。
+ */
 
-notes.push(`前端调用路径（${fePaths.size}），后端精确路由（${bePaths.size}），后端正则路由（${bePrefixes.length}）`);
+/** 前端路径归一：`${...}` → :id，去查询串、去尾斜杠 */
+function normalizeFePath(p) {
+  return p
+    .replace(/\$\{[^}]*\}/g, ':id')
+    .replace(/\?.*$/, '')
+    .replace(/\/+$/, '') || '/';
+}
 
-// 只报"前端调用了、后端完全没有同名前缀"的，避免大量误报
-for (const p of fePaths) {
-  if (!p) continue;
-  const head = p.split('/').filter(Boolean)[0] || '';
-  const hit = [...bePaths].some((bp) => bp === p || bp.startsWith(p + '/') || p.startsWith(bp + '/'))
-    || bePrefixes.some((pre) => pre.replace(/\\\//g, '/').startsWith(head))
-    || [...bePaths].some((bp) => bp.split('/').filter(Boolean)[0] === head);
-  if (!hit) problems.push(`前端调用 ${p}，后端未找到对应路由。`);
+/** 把 `/projects/abc/shots` 归一成 `/projects/:id/shots` */
+function normalizePath(p) {
+  return p
+    .replace(/\/[A-Za-z0-9_-]{8,}(?=\/|$)/g, '/:id')
+    .replace(/\/:[A-Za-z0-9_]+/g, '/:id');
+}
+
+/** 该路径是否落在某个后端路由"族"下（/projects/:id/shots ⊂ /projects/:id） */
+function underRouteFamily(fePath, bePath) {
+  const a = fePath.split('/').filter(Boolean);
+  const b = bePath.split('/').filter(Boolean);
+  if (!b.length) return false;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i += 1) {
+    const seg = b[i];
+    if (seg.startsWith(':') || seg.startsWith('(')) continue;   // 后端参数段：任意值都算匹配
+    if (a[i] !== seg) return false;
+  }
+  return true;
+}
+
+const feRoutes = new Map();
+for (const line of clientTs.split(/\r?\n/)) {
+  const m = /request<[\s\S]*?>\(\s*'(GET|POST|PUT|PATCH|DELETE)'\s*,\s*(`[^`]*`|'[^']*')/.exec(line);
+  if (!m) continue;
+  const raw = m[2].slice(1, -1);
+  if (!raw.startsWith('/')) continue;
+  const path = normalizeFePath(raw);
+  feRoutes.set(`${m[1]} ${normalizePath(path)}`, `${m[1]} ${path}`);
+}
+// 模板字符串 / 直连 URL（/file、/events 等）单独收
+for (const m of clientTs.matchAll(/`\$\{base\}\(\/[a-zA-Z0-9_\-/]+/g)) {
+  const raw = m[0].slice(m[0].indexOf('(') + 1);
+  feRoutes.set(`GET ${normalizePath(raw)}`, `GET ${raw}`);
+}
+
+const beRoutes = new Map();   // "METHOD /path" -> 原始
+{
+  // 精确路由：`if (req.method === 'GET' && route === '/x')`
+  for (const m of apiSrc.matchAll(/req\.method\s*===\s*'(GET|POST|PUT|PATCH|DELETE)'\s*&&\s*route\s*===\s*'(\/[a-zA-Z0-9_\-/]+)'/g)) {
+    beRoutes.set(`${m[1]} ${m[2]}`, `${m[1]} ${m[2]}`);
+  }
+  // OR 合并的方法：`(req.method === 'GET' || req.method === 'HEAD') && route === '/file'`
+  for (const m of apiSrc.matchAll(/\((?:req\.method\s*===\s*'(\w+)'\s*\|\|\s*)+req\.method\s*===\s*'(\w+)'\)\s*&&\s*route\s*===\s*'(\/[a-zA-Z0-9_\-/]+)'/g)) {
+    for (const meth of m[1] ? [m[1], m[2]] : [m[2]]) {
+      beRoutes.set(`${meth} ${m[3]}`, `${meth} ${m[3]}`);
+    }
+  }
+  // 参数化路由：`route.match(/^\/projects\/([^/]+)$/)` + 内部按 method 分支
+  for (const m of apiSrc.matchAll(/route\.match\(\s*\/\^\\\/([a-zA-Z0-9_\-\\\/]+)/g)) {
+    const tpl = normalizePath('/' + m[1].replace(/\\\//g, '/').replace(/\(\?:.*?\)/g, ':id').replace(/\(\^\|\$\)/g, ''));
+    for (const meth of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']) {
+      beRoutes.set(`${meth} ${tpl}`, `${meth} ${tpl}（正则路由）`);
+    }
+  }
+  // startsWith 型前缀路由（/nanfeng/presets/:id 之类）
+  for (const m of apiSrc.matchAll(/route\.startsWith\('(\/[a-zA-Z0-9_\-/]+)'\)/g)) {
+    for (const meth of ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']) {
+      beRoutes.set(`${meth} ${normalizePath(m[1])}`, `${meth} ${m[1]}（前缀路由）`);
+    }
+  }
+}
+
+notes.push(`前端调用（${feRoutes.size} 条 method+path），后端路由（${beRoutes.size} 条）`);
+
+/**
+ * A 类：前端调用了、后端没有（真 404）。
+ *
+ * 匹配顺序：① (method, path) 完全一致 → ② 落在某个后端路由族下
+ * （参数化路由无法静态还原成单一模板，按族判断）。
+ */
+const feKeys = [...feRoutes.entries()];
+const beByMethod = new Map();
+for (const [key, raw] of beRoutes) {
+  const [meth, path] = key.split(' ');
+  if (!beByMethod.has(meth)) beByMethod.set(meth, []);
+  beByMethod.get(meth).push({ path, raw });
+}
+
+for (const [key, raw] of feKeys) {
+  if (beRoutes.has(key)) continue;
+  const [meth, fePath] = key.split(' ');
+  const family = (beByMethod.get(meth) ?? []).find((b) => underRouteFamily(fePath, b.path));
+  if (!family) {
+    problems.push(`前端调用 ${raw}，后端没有对应的 ${meth} 路由（也没有可归属的路由族）。`);
+  }
+}
+
+// B 类：后端有、前端与 Agent 工具都没用（潜在死路由，只提示不报错）
+const toolsSrc = read('host/tools.js');
+const shadowed = new Set();
+for (const [key, raw] of feRoutes) {
+  if (beRoutes.has(key)) shadowed.add(key);
+}
+const deadRoutes = [];
+for (const [key, raw] of beRoutes) {
+  if (shadowed.has(key)) continue;
+  // 路径文本是否在 tools.js 里出现过（Agent 工具直接调 service，不经过 REST，
+  // 这里只做"名字是否被提及"的弱检查）
+  const pathOnly = key.split(' ')[1];
+  if (pathOnly.includes(':id')) continue;          // 参数化路由无法可靠判定
+  if (toolsSrc.includes(pathOnly)) continue;
+  deadRoutes.push(raw);
+}
+if (deadRoutes.length) {
+  notes.push(`后端有、前端与工具都不直接调用的路由（${deadRoutes.length} 条，仅供外部脚本/诊断）：`
+    + deadRoutes.slice(0, 8).join('、') + (deadRoutes.length > 8 ? ' …' : ''));
 }
 
 /* ------------------------------------------------------------- 输出 */

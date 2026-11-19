@@ -9,11 +9,12 @@ import fs from 'node:fs';
 import { createHash } from 'node:crypto';
 import { loadConfig } from '../config.js';
 import { PROFILES, resolutionFor, h3Length } from '../store/models.js';
-import { safeJoin } from '../security.js';
+import { safeJoin, resolveUserPath } from '../security.js';
 import * as comfy from './comfy-client.js';
 import { decideRefImageSize } from './render-plan.js';
 import { NodeGraph } from './h3-graph.js';
-import { planForShot, accelPlanOf, checkSteps, DEFAULT_ACCEL_PLAN } from './accel-plan.js';
+import { planForShot, resolveAccelForFiles, accelPlanOf, checkSteps, DEFAULT_ACCEL_PLAN } from './accel-plan.js';
+import { solveLoraStack, baseNameOf } from './lora-catalog.js';
 
 /** 内联图片落盘用短哈希，同图复用同一文件 */
 function hashShort(text) {
@@ -144,7 +145,24 @@ export function resolveRefImages(shot, cfg = loadConfig(), opts = {}) {
         } catch { /* ignore */ }
         return '';
       }
-      if (path.isAbsolute(ref)) return fs.existsSync(ref) ? ref : '';
+      /**
+       * ⚠️ 绝对路径**必须**限定在 dataDir 内。
+       *
+       * 历史漏洞（安全级）：这里是 `return fs.existsSync(ref) ? ref : ''` ——
+       * 绝对路径**完全放行**。于是
+       *   POST /image/generate    {"refImages":["C:/Windows/win.ini"]}
+       *   POST /breakdown/generate{"refImages":["C:/Users/x/.ssh/id_rsa"]}
+       * 都能把任意本机文件读出来送进模型 / 复制进素材库。
+       *
+       * security.js 的注释里已经写明"所有接受路径的入口都必须走 resolveUserPath，
+       * 历史审计发现 6 处各写各的，其中 5 处漏掉绝对路径分支" ——
+       * 这里正是漏改的一处。
+       */
+      if (path.isAbsolute(ref)) {
+        try {
+          return resolveUserPath({ root: cfg.dataDir, input: ref, mustExist: true });
+        } catch { return ''; }
+      }
       try {
         const a = safeJoin(cfg.dataDir, ref);
         if (fs.existsSync(a)) return a;
@@ -152,7 +170,11 @@ export function resolveRefImages(shot, cfg = loadConfig(), opts = {}) {
       return '';
     }
     if (ref && typeof ref === 'object') {
-      if (ref.absPath && fs.existsSync(ref.absPath)) return ref.absPath;
+      if (ref.absPath) {
+        try {
+          return resolveUserPath({ root: cfg.dataDir, input: ref.absPath, mustExist: true });
+        } catch { return ''; }
+      }
       if (ref.rel) {
         try {
           const a = safeJoin(cfg.dataDir, ref.rel);
@@ -211,6 +233,72 @@ export function resolveRefImages(shot, cfg = loadConfig(), opts = {}) {
   return out;
 }
 
+/**
+ * 解析镜头的参考视频 / 参考音频 → `[{ rel, abs, key, index }]`。
+ *
+ * ============================================================================
+ * 为什么必须是单独一个函数
+ * ============================================================================
+ *
+ * 镜头卡上**只有** `shot.refs.videos` / `shot.refs.audios`（见 store/models.js 的
+ * `newShot()`），顶层从来没有 `shot.videos` / `shot.audios` 这两个字段。
+ *
+ * 但 generator.js 的两条执行路径（runH3Local / runH3Nanfeng）都写成了
+ * `Array.isArray(shot.videos)` —— 恒为 false，于是：
+ *
+ *   · videoEntries 恒为空 → stage 不上传 → `视频1..3` 永远是「未选择」
+ *   · 南风路径更糟：`shotForNanfeng.refs.videos = stagedVideos.map(...)` 把
+ *     **本来正确的 refs.videos 覆盖成 []**
+ *
+ * 结果是 3D 预演渲出的白模视频在提示词里被写成 `<Video 1>`，
+ * 提交时却根本没有这个素材 —— 用户看到"已挂上"、出片却不含白模约束。
+ *
+ * 这里统一从 `refs.videos` / `refs.audios` 取，并解析成绝对路径（与
+ * resolveRefImages 用同一套 safeJoin 规则）。
+ *
+ * 兼容三种历史形态：字符串 rel、`{ rel }`、`{ abs }`。
+ */
+export function resolveMediaEntries(list, cfg = loadConfig()) {
+  const out = [];
+  for (const item of (Array.isArray(list) ? list : [])) {
+    const rel = typeof item === 'string' ? item : (item?.rel ?? '');
+    let abs = '';
+    if (typeof item === 'object' && item?.abs && fs.existsSync(item.abs)) {
+      abs = item.abs;
+    } else if (rel) {
+      try {
+        const a = safeJoin(cfg.dataDir, rel);
+        if (fs.existsSync(a)) abs = a;
+      } catch { /* 越界 / 不存在 → 交给调用方告警 */ }
+    }
+    // 解析不到的也要保留占位，否则编号会整体前移（<Video 2> 变成 <Video 1>）
+    out.push({
+      rel: rel || '',
+      abs,
+      name: (typeof item === 'object' && item.name) || (rel ? path.basename(rel) : ''),
+      hasAudio: typeof item === 'object' && typeof item.hasAudio === 'boolean' ? item.hasAudio : null,
+      missing: !abs,
+    });
+  }
+  return out;
+}
+
+/**
+ * 参考视频 / 音频解析失败时写一条 job 警告（不静默）。
+ *
+ * 静默丢素材是这个仓库历史上最顽固的失败模式：用户看到镜头上"已挂上"、
+ * 提示词里也有 `<Video 1>`，出片却完全不受它约束，且任何日志都不说。
+ */
+function warnMissingMedia(job, shot) {
+  const miss = [
+    ...resolveMediaEntries(shot.refs?.videos).filter((v) => v.missing && v.rel).map((v) => `视频 ${v.rel}`),
+    ...resolveMediaEntries(shot.refs?.audios).filter((a) => a.missing && a.rel).map((a) => `音频 ${a.rel}`),
+  ];
+  if (!miss.length) return;
+  job.warnings = [...(job.warnings ?? []),
+    `以下参考素材在 dataDir 内找不到，已跳过（提示词里的引用会变成悬空）：${miss.join('、')}`];
+}
+
 /** 从镜头卡 previz 绑定解析首尾帧 */
 export function resolvePrevizArtifacts(shot, cfg = loadConfig()) {
   const out = {};
@@ -229,77 +317,143 @@ export function resolvePrevizArtifacts(shot, cfg = loadConfig()) {
 }
 
 /**
+ * 规划最终的 `图片1..9` 槽位分配。
+ *
+ * ============================================================================
+ * 为什么需要单独一层
+ * ============================================================================
+ *
+ * 南风节点的 `图片1..9` 是**固定编号槽位**，而首尾帧模式要求：
+ *   · 图生视频（i2va）：image_count 必须 == 1，且那一张就是首帧
+ *   · 首尾帧（fl2va）：image_count 必须 == 2，图片1=首帧、图片2=尾帧
+ *
+ * 参考图（角色卡 / 手工图）与首尾帧**抢同一批槽位**。历史实现直接让首/尾帧
+ * 覆盖 `图片1/图片2`，参考图被静默顶掉，而提示词里的 `<Picture N>` 仍按
+ * "参考图第 N 张"写 —— 指令与实物对不上。
+ *
+ * 这里统一决策，并返回：
+ *   · images          —— 最终要填进 图片1..9 的参考图文件名（**已避开保留槽位**）
+ *   · frameSlots      —— 首/尾帧要写的槽位
+ *   · reserved        —— 被占用的槽位号（1-based）
+ *   · pictureIndexMap —— 参考图原始下标（0-based）→ 最终 `<Picture N>` 编号
+ *   · dropped         —— 因槽位不足被丢弃的参考图
+ *
+ * @param {string} mode
+ * @param {string[]} refImages  staged 后的参考图文件名（保序，可含空串）
+ * @param {string} first        staged 后的首帧文件名
+ * @param {string} last         staged 后的尾帧文件名
+ */
+export function planImageSlots(mode, refImages, first, last) {
+  const m = String(mode ?? '');
+  const refs = (Array.isArray(refImages) ? refImages : []).filter(Boolean);
+  const frameSlots = {};
+  const reserved = [];
+
+  if (m === 'i2va' && first) {
+    frameSlots['图片1'] = first;
+    reserved.push(1);
+  } else if (m === 'fl2va') {
+    if (first) { frameSlots['图片1'] = first; reserved.push(1); }
+    if (last) { frameSlots['图片2'] = last; reserved.push(2); }
+  }
+
+  // 参考图按原顺序填充到未被占用的槽位
+  const images = [];
+  const pictureIndexMap = new Map();
+  const dropped = [];
+  let slot = 1;
+  for (let i = 0; i < refs.length; i += 1) {
+    while (reserved.includes(slot)) slot += 1;
+    if (slot > 9) { dropped.push(refs[i]); continue; }
+    pictureIndexMap.set(i, slot);
+    images.push(refs[i]);
+    slot += 1;
+  }
+
+  return { images, frameSlots, reserved, pictureIndexMap, dropped };
+}
+
+
+/**
  * 把角色卡的文字设定注入提示词。
  *
- * 为什么需要：参考图只告诉模型"长什么样"，不告诉它"这是谁、叫什么、
- * 在画面里该是什么性格"。多角色同框时更容易串脸。
+ * 为什么需要：参考图只告诉模型"长什么样"，不告诉它"这是谁、叫什么"。
+ * 多角色同框时更容易串脸。
  *
  * 编号规则（必须与 ComfyUI 的呈现一致）：
  *   Ref2VA 里参考图按 ref_images 的顺序编号为 <Picture 1>..<Picture N>，
  *   我们的 refList 就是提交顺序，所以第 i 张（1-based）对应 <Picture i>。
+ *   但首/尾帧会占用一部分槽位（见 planImageSlots），所以最终编号要用
+ *   `pictureIndexMap` 换算，不能直接用 i+1。
  *
- * ⚠️ 编号**只能**来自 refList（真实提交顺序），不能来自"第几张卡"。
- *    之前用 `pictureIndex = 卡序号`：一旦某张卡没有图、或有手工图插进来，
- *    编号就整体错位，提示词里的 <Picture N> 指向别人的图 —— 表现为角色串脸。
- *    现在 refList 里每张图都带 cardId（见 resolveRefImages 的 push(..., 'vault-card', {cardId})），
- *    这里按 cardId 反查它在 refList 中的真实位置。
+ * ============================================================================
+ * 铁律：绝不覆写模型已经写好的 subject_definitions
+ * ============================================================================
  *
- * ⚠️ 只写身份与编号，不复述像素级外观：
- *    外观由图片本身承载，文字重复描述反而会与图片冲突。
+ * 历史实现（P0）只要"卡名没出现在提示词里"就整段替换 `subject_definitions:`，
+ * 而智能分镜用英文名（`Chika`）、角色卡用中文名（`三角初华`）——
+ * 判据几乎恒 false，于是**每一次生成都会**：
+ *
+ *   · 把官方英文 `<Subject N> is the visual content referenced from <Picture N>...`
+ *     整段替换成中文「三角初华：外观以 <Picture 1> 为准」
+ *   · 顺带吃掉同一段里的 `<Video N>` / `<Audio N>` 定义句
+ *   · 净删数百字符已校验过的官方内容，产出中文正文
+ *     （违反 h3-prompt.js 的第 1 条铁律：正文必须英文）
+ *
+ * 而 `lintCompiledPrompt` 跑在**编译期**，注入发生在**提交期**，
+ * 中文没人检查得到 —— 这是"提示词明明写得很好、出片却不像"的一个直接来源。
+ *
+ * 现在的规则：
+ *   1. 提示词里**已有** `subject_definitions:` → 一个字都不动，只在缺失卡时
+ *      追加一行英文 `Additional reference:`。
+ *   2. 完全没有这个字段 → 前置一段**英文**定义。
+ *   3. 所有新增文本一律英文，与 h3-prompt 的输出语言保持一致。
  */
-function injectCardDefinitions(prompt, refList, shot) {
+function injectCardDefinitions(prompt, refList, shot, pictureIndexMap = null) {
   const text = String(prompt ?? '');
-  const cardById = new Map((shot.characterCards ?? []).map((c) => [c.id, c]));
-  if (!cardById.size) return text;
+  const cards = Array.isArray(shot.characterCards) ? shot.characterCards : [];
+  if (!cards.length) return text;
 
-  // 从**真实参考图清单**算出每张卡占哪几个编号
+  // 从**真实参考图清单**算出每张卡占哪几个编号（经槽位规划换算）
+  const toPictureNo = (i) => (pictureIndexMap instanceof Map
+    ? (pictureIndexMap.get(i) ?? null)
+    : i + 1);
+
   const byCard = new Map();
   refList.forEach((r, i) => {
     if (!r.cardId) return;
+    const n = toPictureNo(i);
+    if (n == null) return;                    // 该图被槽位规划丢掉了
     if (!byCard.has(r.cardId)) byCard.set(r.cardId, []);
-    byCard.get(r.cardId).push(i + 1);
+    byCard.get(r.cardId).push(n);
   });
 
-  // 已经有正确的 subject_definitions 就不重复注入。
-  // 判据从"提示词里出现过卡名"改为"卡名 + 正确编号都出现过" ——
-  // 旧判据只要名字出现就跳过，于是编译器算错的编号被原样保留下来。
-  const definitionsOk = (shot.characterCards ?? []).every((c) => {
-    if (!c?.name) return true;
-    if (!text.includes(String(c.name))) return false;
-    const pics = byCard.get(c.id) ?? [];
-    if (!pics.length) return true;            // 这张卡没有图，不需要编号
-    return pics.some((n) => text.includes(`<Picture ${n}>`));
-  });
-  if (definitionsOk) return text;
+  const hasDefsField = /^\s*subject_definitions\s*:/im.test(text);
 
-  const cardEntries = [];
-  for (const [id, info] of byCard) {
-    const card = cardById.get(id) ?? { id, name: (shot.characterCards ?? []).find((c) => c.id === id)?.name };
-    if (!card) continue;
-    cardEntries.push({ card, pictureIndex: info[0], allPictures: info });
-  }
-  if (!cardEntries.length) return text;
-
-  const lines = [];
-  for (const { card, pictureIndex, allPictures } of cardEntries) {
+  const cardLines = [];
+  for (const card of cards) {
+    const pics = byCard.get(card.id) ?? [];
     const bits = [];
+    // 中文描述转成"英文可读"的形态：原文保留，但不作为句法主结构
     if (card.description) bits.push(String(card.description).trim().replace(/[。．.；;]\s*$/, ''));
-    if (Array.isArray(card.traits) && card.traits.length) bits.push(card.traits.join('、'));
-    if (card.personality) bits.push(`性格：${card.personality}`);
-    const pics = allPictures.length > 1
-      ? allPictures.map((n) => `<Picture ${n}>`).join(' 与 ')
-      : `<Picture ${pictureIndex}>`;
-    const head = `${card.name}：外观以 ${pics} 为准`;
-    lines.push(bits.length ? `${head}。${bits.join('；')}` : head);
+    if (Array.isArray(card.traits) && card.traits.length) bits.push(card.traits.join(' / '));
+    const where = pics.length === 1
+      ? `<Picture ${pics[0]}>`
+      : pics.length > 1
+        ? pics.map((n) => `<Picture ${n}>`).join(' and ')
+        : '';
+    const head = where
+      ? `<Subject identity: ${card.name}> appearance is carried by ${where}`
+      : `<Subject identity: ${card.name}> has no reference picture; appearance follows the written description`;
+    cardLines.push(bits.length ? `${head}. ${bits.join('; ')}.` : `${head}.`);
   }
-  if (!lines.length) return text;
+  if (!cardLines.length) return text;
 
-  const block = `subject_definitions:\n${lines.join('\n')}`;
-  // 提示词已有 subject_definitions 段就替换，否则前置
-  if (/subject_definitions\s*:/i.test(text)) {
-    return text.replace(/subject_definitions\s*:[\s\S]*?(?=\n[a-zA-Z_]+\s*:|$)/i, block);
+  if (hasDefsField) {
+    // 已有定义段 —— 绝不覆写，只在末尾补一段"补充参考"（英文）
+    return `${text.trimEnd()}\n\nAdditional reference bindings:\n${cardLines.join('\n')}`;
   }
-  return `${block}\n\n${text}`;
+  return `subject_definitions:\n${cardLines.join('\n')}\n\n${text}`;
 }
 
 /**
@@ -334,14 +488,18 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
   //
   // ⚠️ ComfyUI 的 LoadVideo / LoadAudio 和 LoadImage 一样，**只认 input 目录内的文件名**，
   //    传绝对路径会报 Invalid file。所以视频/音频也必须先 stage。
-  const videoEntries = (Array.isArray(shot.videos) ? shot.videos : []).map((v, i) => ({
-    ...v,
-    key: v.key ?? `{{REF_VIDEO_${i + 1}}}`,
-  }));
-  const audioEntries = (Array.isArray(shot.audios) ? shot.audios : []).map((a, i) => ({
-    ...a,
-    key: a.key ?? `{{REF_AUDIO_${i + 1}}}`,
-  }));
+  //
+  // ⚠️ 必须读 `shot.refs.videos` / `shot.refs.audios`。
+  //    历史上这里写的是 `shot.videos`，而镜头卡上从来没有这个顶层字段 ——
+  //    于是视频/音频恒为空，`视频1..3` 永远是「未选择」，
+  //    3D 预演的白模参考视频整条链路在提交阶段被静默丢弃。
+  const videoEntries = resolveMediaEntries(shot.refs?.videos, cfg)
+    .filter((v) => v.abs)
+    .map((v, i) => ({ ...v, key: `{{REF_VIDEO_${i + 1}}}` }));
+  const audioEntries = resolveMediaEntries(shot.refs?.audios, cfg)
+    .filter((a) => a.abs)
+    .map((a, i) => ({ ...a, key: `{{REF_AUDIO_${i + 1}}}` }));
+  warnMissingMedia(job, shot);
 
   const toStage = {
     ...Object.fromEntries(refList.map((r) => [r.key, r.abs])),
@@ -733,7 +891,28 @@ export async function runH3Nanfeng({
     ?? shot.accelPlan
     ?? cfg.accelPlan
     ?? DEFAULT_ACCEL_PLAN;
-  const accel = planForShot(accelId);
+
+  /**
+   * 先问 ComfyUI 真实装了哪些 LoRA，再决定加速方案用哪个文件。
+   *
+   * ⚠️ 为什么要探测而不是直接用写死的文件名：
+   *    方案里的 `lora` 是**导出那一刻的目录快照**。用户换机、重命名、
+   *    或只装了一个学生时，写死的名字在 ComfyUI 里不存在 ——
+   *    轻则 `/prompt` 阶段 value_not_in_list（错误信息只有一个文件名），
+   *    重则 sanitize 把它回退成「未选择」→ 蒸馏栈变空 →
+   *    4/8 步跑在未蒸馏原模型上，**能出片但质量悄悄崩**（最坏的失败模式）。
+   *
+   *    探测失败（ComfyUI 不可达）时返回 null，退回按声明名提交并告警。
+   */
+  let loraFiles = null;
+  try {
+    const comfyMod = await import('./comfy-client.js');
+    const mf = await comfyMod.listModelFiles(cfg);
+    loraFiles = mf?.ok && Array.isArray(mf.loras) && mf.loras.length ? mf.loras : null;
+  } catch { /* 探测失败不影响主流程 */ }
+
+  const accel = resolveAccelForFiles(accelId, loraFiles);
+  const availableFiles = loraFiles;
 
   const wantSteps = job.params?.steps;
   const stepCheck = wantSteps ? checkSteps(accelId, wantSteps) : { ok: true, warning: '' };
@@ -758,33 +937,125 @@ export async function runH3Nanfeng({
    */
   function accelOverrides() {
     const out = {};
-    if (accel.lora) {
-      out['启用LoRA'] = true;
-      out['LoRA1'] = accel.lora;
-      out['LoRA1启用'] = true;
-      // 蒸馏学生在 strength=1.0 是满血；降下来会让低步数去噪不足
-      out['LoRA1强度'] = 1.0;
-    } else {
-      // none 方案：显式关闭，避免沿用镜头上残留的 LoRA
-      out['启用LoRA'] = false;
-      out['LoRA1'] = '未选择';
-      out['LoRA1启用'] = false;
-    }
     out['采样器'] = accel.sampler;
     out['调度器'] = accel.scheduler;
     out['采样步数'] = steps;
+    /**
+     * ⚠️ shift 必须真的传下去。
+     *
+     * DMAD 4step / 8step 都是在 **video shift 12 / audio shift 2** 上训练的
+     * （两个 .safetensors 的 `__metadata__.sampling` 里写着原文，可直接读文件核对）。
+     * 而 ComfyUI 的 `MiniMaxH3` 模型自带 12 比 3 —— 那是未蒸馏原模型的标定值。
+     *
+     * 用错 shift 不会报错，只是整条采样轨迹落在学生没见过的分布外：
+     * 画面能出，但质感与动态会悄悄变差。这是"看起来成功了其实不对"的典型。
+     *
+     * 以前这里没传，因为 vendor 把 sigma 分支写死 False（SigmaShift 节点根本不插）。
+     * 本轮改了 vendor：`启用西格玛调节` 现在真的会插入 MiniMaxH3SigmaShift，
+     * 且 `Sigma策略=原生轨迹` 时**只设 shift、不改步网格** —— 正是蒸馏学生要的形态。
+     */
+    if (accel.shiftVideo != null || accel.shiftAudio != null) {
+      out['启用西格玛调节'] = true;
+      // 必须显式写「原生轨迹」，否则会走进加密/手动序列分支，把步网格改掉
+      out['Sigma策略'] = '原生轨迹（不加步）';
+      out['视频西格玛偏移'] = accel.shiftVideo ?? 12;
+      out['音频西格玛偏移'] = accel.shiftAudio ?? 3;
+    } else {
+      // none 方案：不碰 sigma，用模型自带的 12/3
+      out['启用西格玛调节'] = false;
+    }
     return out;
   }
 
   const accelParams = accelOverrides();
 
-  // shift 无法设置时明确告知（不静默）
-  if (accel.needShiftNode) {
-    job.warnings = [...(job.warnings ?? []), 
-      `加速方案 ${accel.plan.label} 要求 shift ${accel.shiftVideo}/${accel.shiftAudio}，`
-      + '但南风 V15 的 SigmaShift 分支被上游硬编码关闭，实际会用模型自带的 12/3。'
-      + 'LoRA 本身仍然生效；这是已知上游限制。',
-    ];
+  /**
+   * ============================================================================
+   * LoRA 栈装配 —— 加速学生占 1 号槽，其余槽位留给语义 LoRA
+   * ============================================================================
+   *
+   * 南风 V15 有 8 个 LoRA 槽（`LoRA1..LoRA8`），每个有独立的
+   * `LoRA{n}` 文件 + `LoRA{n}启用` 布尔 + `LoRA{n}强度`。
+   * 注意：`启用LoRA` **总开关在 V15 上是死的**
+   * （h3_generator.py:2063 的早退只对 individual=False 生效，V15 恒 individual）。
+   *
+   * 业界做法（已核实）：
+   *   · 加速 LoRA（DMAD/Turbo/PDMD）= **学生本体**，强度恒 1.0，**永不衰减**
+   *     （官方原话 "the LoRA is the distilled student, not a style"）
+   *   · 语义 LoRA（风格/动作/画质/角色）才需要压强度：
+   *       - 单独挂：0.6–1.0（Comfy-Org 官方建议从 0.7 起调）
+   *       - 两个同向（都是锐化/写实）：各 ~0.50
+   *       - 两个正交（一个风格一个动作）：各 ~0.71
+   *     ComfyUI 链式叠加是**加法**，两个 1.0 叠起来会 >1 过曝。
+   *   · 链序：LoRA 全部串完后才进 shift / sampler。
+   *     南风的 GraphBuilder 已经是这个顺序（h3_generator.py:1440-1446 在
+   *     SigmaShift 之前串 LoRA），我们只要保证槽位填对。
+   *
+   * ⚠️ 加速学生必须放 **LoRA1**：
+   *    `_enabled_lora_stack()` 按 1→8 顺序串，而加速学生要对全部后续
+   *    语义 LoRA 的权重偏移都生效（它是新的基座）。放后面会让语义 LoRA
+   *    叠加在"未蒸馏权重"上，再被学生覆盖 —— 语义效果被冲掉。
+   */
+  /**
+   * LoRA 栈：先由 `solveLoraStack` 做**分类 + 互斥 + 衰减 + 总强度看门狗**，
+   * 再把结果摊进 8 个槽位。
+   *
+   * 与旧 `planLoraStack` 的区别：旧版只会"加速学生 + 一串语义 LoRA 按数量衰减"，
+   * 不知道"两个运镜不能同挂""两个画风会互相拉扯"。新版按 `lora-catalog.js`
+   * 的 11 类目建模，单选类后来的替换先来的，多选类按 stackDecay 递减，
+   * 总强度 >1.5 警告、>1.8 剔除。
+   */
+  const requestedLoras = [
+    ...(accel.lora ? [{ name: accel.lora, strength: 1.0, forceRole: 'accelerator' }] : []),
+    ...(Array.isArray(shot.nanfeng?.loras) ? shot.nanfeng.loras : []),
+  ];
+  const solved = solveLoraStack(requestedLoras, { maxSlots: 8, availableFiles });
+
+  // 加速学生必须钉死在槽 1（它是新的基座，要覆盖后续所有语义偏移）
+  const ordered = [
+    ...solved.accepted.filter((a) => a.role === 'accelerator'),
+    ...solved.accepted.filter((a) => a.role !== 'accelerator'),
+  ];
+
+  for (let i = 1; i <= 8; i += 1) {
+    const entry = ordered[i - 1];
+    const on = Boolean(entry);
+    accelParams[`LoRA${i}`] = on ? entry.name : '未选择';
+    accelParams[`LoRA${i}启用`] = on;
+    accelParams[`LoRA${i}强度`] = on ? entry.appliedStrength : 1.0;
+  }
+  // 总开关（对 V15 无效，但保持语义一致便于排查）
+  accelParams['启用LoRA'] = ordered.length > 0;
+
+  // 把求解过程写进 warnings —— 用户必须知道"我填的限制被改了"
+  for (const w of solved.warnings) job.warnings = [...(job.warnings ?? []), w];
+  for (const rp of solved.replaced) {
+    job.warnings = [...(job.warnings ?? []),
+      `「${rp.category}」是单选类：「${baseNameOf(rp.name)}」被「${baseNameOf(rp.by)}」替换（同类只能挂 1 个）。`];
+  }
+  for (const rj of solved.rejected) {
+    job.warnings = [...(job.warnings ?? []), `LoRA「${baseNameOf(rj.name)}」未被使用：${rj.reason}`];
+  }
+  for (const dg of solved.degraded) {
+    job.warnings = [...(job.warnings ?? []),
+      `LoRA「${baseNameOf(dg.name)}」强度 ${dg.from} → ${dg.to}（${dg.reason}）。`];
+  }
+
+  /**
+   * shift 现在**真的会生效**（vendor 的 sigma 分支已放开）。
+   *
+   * 这里不再写"设不了"的警告 —— 那条警告在改 vendor 之后就是假的了。
+   * 但如果 shift 值与学生的训练设定不一致（用户手改了参数），仍要提醒，
+   * 因为偏离训练 shift 属于分布外采样，不报错只是画质变差。
+   */
+  if (accel.needShiftNode && accel.loraMeta?.steps) {
+    const drift = Number(accel.shiftVideo) !== 12 || Number(accel.shiftAudio) !== 2;
+    if (drift) {
+      job.warnings = [...(job.warnings ?? []),
+        `加速方案 ${accel.plan.label} 声明 shift ${accel.shiftVideo}/${accel.shiftAudio}，`
+        + '不是该学生训练时的 12/2 —— 属于分布外采样，能出片但画质与动态会变差。',
+      ];
+    }
   }
 
   job.params = {
@@ -792,26 +1063,31 @@ export async function runH3Nanfeng({
     accelPlan: accel.plan.id,
     accelLabel: accel.plan.label,
     accelFamily: accel.plan.family,
+    accelMatched: accel.matched,
     sampler: accel.sampler,
     scheduler: accel.scheduler,
     steps,
     lora: accel.lora || null,
-    // 记录"shift 设不了"这个事实，前端可据此提示
-    shiftApplied: false,
+    // 最终生效的 LoRA 栈（含分类与衰减后的实际强度），排障时看这一项
+    loraStack: ordered.map((a) => `${a.categoryId}:${a.name}@${a.appliedStrength}`),
+    loraTotalStrength: solved.totalStrength,
+    // shift 现在真的会写进 workflow（见 accelOverrides）
+    shiftApplied: Boolean(accel.needShiftNode),
+    shift: accel.needShiftNode ? { video: accel.shiftVideo, audio: accel.shiftAudio } : null,
   };
 
   // ---------- 2) 解析参考素材并 stage ----------
   const refList = resolveRefImages(shot, cfg);
   const previz = resolvePrevizArtifacts(shot, cfg);
 
-  const videoEntries = (Array.isArray(shot.videos) ? shot.videos : []).map((v, i) => ({
-    ...v,
-    key: v.key ?? `{{REF_VIDEO_${i + 1}}}`,
-  }));
-  const audioEntries = (Array.isArray(shot.audios) ? shot.audios : []).map((a, i) => ({
-    ...a,
-    key: a.key ?? `{{REF_AUDIO_${i + 1}}}`,
-  }));
+  // ⚠️ 必须读 `shot.refs.videos` / `shot.refs.audios` —— 见上方同名注释。
+  const videoEntries = resolveMediaEntries(shot.refs?.videos, cfg)
+    .filter((v) => v.abs)
+    .map((v, i) => ({ ...v, key: `{{REF_VIDEO_${i + 1}}}` }));
+  const audioEntries = resolveMediaEntries(shot.refs?.audios, cfg)
+    .filter((a) => a.abs)
+    .map((a, i) => ({ ...a, key: `{{REF_AUDIO_${i + 1}}}` }));
+  warnMissingMedia(job, shot);
 
   const toStage = {
     ...Object.fromEntries(refList.map((r) => [r.key, r.abs])),
@@ -825,9 +1101,26 @@ export async function runH3Nanfeng({
   //
   // stagedMap: 占位符 key → ComfyUI input 内的文件名
   // 我们要把它翻译成南风的「图片N / 视频N / 音频N」
-  const stagedImages = refList.map((r) => staged[r.key]).filter(Boolean);
-  const stagedVideos = videoEntries.map((v) => staged[v.key]).filter(Boolean);
-  const stagedAudios = audioEntries.map((a) => staged[a.key]).filter(Boolean);
+  //
+  // ⚠️ 顺序必须**保位**：南风按 `视频1..3` / `音频1..3` 的槽位号取素材，
+  //    而 build_native_prompt 又把 `@视频N` 映射成 `<Video N>`。
+  //    用 `.filter(Boolean)` 压缩数组会让"第 2 个 stage 失败"变成
+  //    "第 3 个前移成第 2 个"，提示词里的编号与实物错位且不报错。
+  const stagedSlot = (entries) => entries.map((e) => staged[e.key] ?? '');
+  const stagedImages = stagedSlot(refList);
+  const stagedVideos = stagedSlot(videoEntries);
+  const stagedAudios = stagedSlot(audioEntries);
+
+  {
+    const lost = [
+      ...videoEntries.filter((v, i) => !stagedVideos[i]).map((v) => `视频 ${v.rel}`),
+      ...audioEntries.filter((a, i) => !stagedAudios[i]).map((a) => `音频 ${a.rel}`),
+    ];
+    if (lost.length) {
+      job.warnings = [...(job.warnings ?? []),
+        `以下素材未能上传到 ComfyUI input/，对应槽位会留空：${lost.join('、')}`];
+    }
+  }
 
   /**
    * 首尾帧在**南风路径**上的接线。
@@ -847,29 +1140,40 @@ export async function runH3Nanfeng({
    *      · 南风报"图生视频模式必须上传1张图片"或"首尾帧模式必须上传2张图片"
    *
    *    正确做法：按 mode 把 staged 的首尾帧直接塞进 图片1 / 图片2，
-   *    并且**参考图不得占用这两个槽位**。
+   *    并且**参考图不得占用这两个槽位** —— 见下方 planImageSlots。
    */
-  function frameSlotOverrides(m) {
-    const first = staged['{{FIRST_FRAME}}'] ?? '';
-    const last = staged['{{LAST_FRAME}}'] ?? '';
-    const out = {};
-    if (m === 'i2va') {
-      if (first) out['图片1'] = first;
-    } else if (m === 'fl2va') {
-      if (first) out['图片1'] = first;
-      if (last) out['图片2'] = last;
-    }
-    return out;
+
+  /**
+   * 参考图槽位要**避开**被首尾帧占用的编号。
+   *
+   * ⚠️ 历史缺陷（P0）：`frameSlotOverrides` 直接写 `图片1`，而
+   *    `buildShotOverrides(shot)` 已经把 `refs.images` 填进 `图片1..9`。
+   *    extraParams 优先级最高 → 角色卡图被 previz 首帧顶掉，
+   *    但提示词里 `<Picture 1>` 仍然写着"这是角色外观" ——
+   *    模型拿到的指令与实物完全对不上，表现为串脸 / 丢角色，且全程不报错。
+   *
+   *    南风的 `i2va-needs-one-image` 约束只检查**总数 == 1**，
+   *    覆盖后仍是 1 张，所以约束也拦不住。
+   *
+   * 现在的做法：首/尾帧占用的编号从参考图里剔除，其余按原顺序补位，
+   * 并把最终槽位安排写进 job.params 供排查。
+   */
+  const slotPlan = planImageSlots(mode ?? shot.mode, stagedImages, staged['{{FIRST_FRAME}}'] ?? '', staged['{{LAST_FRAME}}'] ?? '');
+  if (slotPlan.dropped.length) {
+    job.warnings = [...(job.warnings ?? []),
+      `首/尾帧占用了 图片${slotPlan.reserved.join('、图片') || '—'}，`
+      + `参考图被迫减少 ${slotPlan.dropped.length} 张（超出的 ${slotPlan.dropped.length} 张不会进入本次生成）。`
+      + `提示词里的 <Picture N> 已按最终槽位重新编号。`];
   }
 
   const shotForNanfeng = {
     ...shot,
-    // 用 staged 文件名覆盖原始 rel 路径
+    // 用 staged 文件名覆盖原始 rel 路径；空串表示该槽位不填
     refs: {
       ...(shot.refs ?? {}),
-      images: stagedImages,
-      videos: stagedVideos.map((n) => ({ rel: n })),
-      audios: stagedAudios.map((n) => ({ rel: n })),
+      images: slotPlan.images,
+      videos: stagedVideos.filter(Boolean),
+      audios: stagedAudios.filter(Boolean),
     },
   };
 
@@ -892,9 +1196,9 @@ export async function runH3Nanfeng({
     extraParams: {
       ...(extraParams ?? {}),
       // 编译后的提示词优先于镜头卡里的 prompt
-      ...(prompt ? { 提示词: injectCardDefinitions(prompt, refList, shot) } : {}),
-      // 首尾帧占用 图片1/图片2，优先级最高（必须在参考图槽位之后合并）
-      ...frameSlotOverrides(mode ?? shot.mode),
+      ...(prompt ? { 提示词: injectCardDefinitions(prompt, refList, shot, slotPlan.pictureIndexMap) } : {}),
+      // 首/尾帧占用 图片1/图片2（见 planImageSlots），优先级最高
+      ...slotPlan.frameSlots,
       /**
        * ⚠️ 加速方案必须放在**最后**。
        *

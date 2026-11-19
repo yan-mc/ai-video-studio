@@ -16,8 +16,10 @@ import { runJob, cancelJob, runtimeStats, CancelledError } from '../services/job
 import { newJob, jobs as jobsStore, isLocalBackendOf } from '../services/job-store.js';
 import { runH3Local, runH3Nanfeng, runH3ImageLocal, jobKind } from '../services/generator.js';
 import { ACCEL_PLANS, ACCEL_PLAN_IDS, DEFAULT_ACCEL_PLAN } from '../services/accel-plan.js';
+import { LORA_CATEGORIES, STRENGTH_LIMITS, catalogLoras, solveLoraStack } from '../services/lora-catalog.js';
 import { packGraph, unpackGraph, IMG_REF_PREFIX } from '../store/image-pool.js';
-import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, LIGHTING_PRESETS, H3_MODES, H3_LIMITS } from '../services/h3-prompt.js';
+import { readJson, writeJson, updateJson } from '../store/json-store.js';
+import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, LIGHTING_PRESETS, H3_MODES, H3_LIMITS, truncatePromptKeepFields } from '../services/h3-prompt.js';
 import { H3_IMAGE_MODELS, H3_IMAGE_SIZES, IMAGE_VAE, IMAGE_CLIP, IMAGE_SAMPLING, checkImageModels } from '../services/h3-image.js';
 import { BREAKDOWN_LEVELS, BREAKDOWN_SIZES, buildBreakdownPrompt, breakdownLevel, breakdownSize } from '../services/breakdown.js';
 import {
@@ -44,16 +46,30 @@ async function readJsonBody(req, limit = 4 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
+    let stopped = false;
     req.on('data', (c) => {
+      if (stopped) return;
       size += c.length;
       if (size > limit) {
+        stopped = true;
+        /**
+         * ⚠️ 不能先 destroy 再让上层 sendJson。
+         *
+         * 历史缺陷：`reject(...); req.destroy();` —— socket 被销毁后，
+         * 上层 `catch → sendJson(res, 400, ...)` 往一个已销毁的连接写，
+         * 客户端看到的是 ECONNRESET，**永远收不到那个 400**。
+         * "报错但用户看不到报错"是最伤支持成本的一类。
+         *
+         * 现在：暂停读取（不再消耗 body），让上层正常回 413。
+         */
+        try { req.pause(); } catch { /* ignore */ }
         reject(new Error('BODY_TOO_LARGE'));
-        req.destroy();
         return;
       }
       chunks.push(c);
     });
     req.on('end', () => {
+      if (stopped) return;
       const raw = Buffer.concat(chunks).toString('utf8');
       if (!raw.trim()) return resolve({});
       try { resolve(JSON.parse(raw)); } catch (e) { reject(new Error(`BAD_JSON: ${e.message}`)); }
@@ -107,12 +123,20 @@ function readRawBody(req, limit = 256 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
+    let stopped = false;
     req.on('data', (c) => {
+      if (stopped) return;
       size += c.length;
-      if (size > limit) { reject(new Error('BODY_TOO_LARGE')); req.destroy(); return; }
+      if (size > limit) {
+        // 同 readJsonBody：pause 而不是 destroy，否则上层返回的 413 发不出去
+        stopped = true;
+        try { req.pause(); } catch { /* ignore */ }
+        reject(new Error('BODY_TOO_LARGE'));
+        return;
+      }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('end', () => { if (!stopped) resolve(Buffer.concat(chunks)); });
     req.on('error', reject);
   });
 }
@@ -543,28 +567,46 @@ export async function handleApi(req, res) {
                 );
               });
 
-              // 等待这一段真正跑完（runBatch 是串行的，这里必须等）
+              /**
+               * 等待这一段真正跑完（runBatch 是串行的，这里必须等）。
+               *
+               * ⚠️ 定时器必须用 try/finally 兜住。
+               *
+               * 历史缺陷（定时器泄漏）：clearInterval 只写在三个分支里，
+               * 一旦轮询回调本身抛异常（jobsStore().get 之外的路径）、
+               * 或 job 被改成别的状态、或批次被取消，timer 永远不会被清，
+               * 而 `await` 也永远不 settle —— 整个批次函数悬挂，
+               * 后续段再也不会开始，界面上表现为"卡住但没有任何报错"。
+               *
+               * 现在：无论 resolve / reject / 异常，finally 一定清掉 timer。
+               */
               await new Promise((resolve, reject) => {
                 const t0 = Date.now();
+                let settled = false;
+                const finish = (fn, arg) => {
+                  if (settled) return;
+                  settled = true;
+                  clearInterval(timer);
+                  fn(arg);
+                };
                 const timer = setInterval(async () => {
-                  let cur;
+                  if (settled) return;
                   try {
-                    cur = await jobsStore().get(job.id);
-                  } catch { return; /* 读盘抖动，下一轮再试 */ }
-                  const st = cur?.status;
-                  if (st === 'completed') {
-                    clearInterval(timer);
-                    seg.outputRel = cur.outputs?.[0]?.rel ?? null;
-                    seg.frames = cur.outputs?.[0]?.frames ?? null;
-                    resolve();
-                  } else if (st === 'failed' || st === 'cancelled') {
-                    clearInterval(timer);
-                    const e = new Error(cur?.error || `第 ${index} 段${st}`);
-                    e.jobId = job.id;
-                    reject(e);
-                  } else if (Date.now() - t0 > 60 * 60 * 1000) {
-                    clearInterval(timer);
-                    reject(new Error(`第 ${index} 段超时（>1h）`));
+                    const cur = await jobsStore().get(job.id);
+                    const st = cur?.status;
+                    if (st === 'completed') {
+                      seg.outputRel = cur.outputs?.[0]?.rel ?? null;
+                      seg.frames = cur.outputs?.[0]?.frames ?? null;
+                      finish(resolve);
+                    } else if (st === 'failed' || st === 'cancelled') {
+                      const e = new Error(cur?.error || `第 ${index} 段${st}`);
+                      e.jobId = job.id;
+                      finish(reject, e);
+                    } else if (Date.now() - t0 > 60 * 60 * 1000) {
+                      finish(reject, new Error(`第 ${index} 段超时（>1h）`));
+                    }
+                  } catch {
+                    /* 读盘抖动：下一轮再试；但超时判定仍然生效 */
                   }
                 }, 2000);
               });
@@ -739,6 +781,54 @@ export async function handleApi(req, res) {
         plans: accelPlanList(),
       });
     }
+    /**
+     * LoRA 目录 —— 前端 LoRA 选择器的数据源。
+     *
+     * 返回：① 分类定义（单选/多选、强度区间、为什么）② 当前装了哪些 LoRA
+     *       ③ 每个文件的自动归类结果 ④ 每个分类下有几个文件
+     *
+     * 归类依据是 ComfyUI 的 `loras` 列表（`object_info` 是唯一权威），
+     * 而 ComfyUI 会递归扫描子目录，所以 `00_turbo/xxx.safetensors` 这种
+     * 带目录前缀的名字天然带分类信息。
+     *
+     * `?validate=` 可选：传一组 `{name,strength}` 让后端跑一遍约束求解，
+     * 前端在提交前就能看到"哪条会被替换/衰减/剔除"。
+     */
+    if (req.method === 'GET' && route === '/lora/catalog') {
+      let files = null;
+      let probeError = null;
+      try {
+        const comfyMod = await import('../services/comfy-client.js');
+        const mf = await comfyMod.listModelFiles(cfg);
+        if (mf?.ok) files = mf.loras;
+        else probeError = mf?.reason || 'ComfyUI 不可达';
+      } catch (e) {
+        probeError = String(e?.message || e);
+      }
+      const items = catalogLoras(files ?? []);
+      const byCategory = {};
+      for (const it of items) {
+        byCategory[it.categoryId] = (byCategory[it.categoryId] ?? 0) + 1;
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        /** null 表示"没探测到"（ComfyUI 不可达），不是"一个都没装" */
+        probed: files != null,
+        ...(probeError ? { probeError } : {}),
+        categories: LORA_CATEGORIES,
+        limits: STRENGTH_LIMITS,
+        items,
+        byCategory,
+        total: items.length,
+      });
+    }
+    // 把候选 LoRA 摊开校验一遍（前端"将提交"面板用它做实时预演）
+    if (req.method === 'POST' && route === '/lora/solve') {
+      const body = await readJsonBody(req);
+      const requested = Array.isArray(body.items) ? body.items : [];
+      const solved = solveLoraStack(requested, { maxSlots: Number(body.maxSlots) || 8 });
+      return sendJson(res, 200, { ok: true, ...solved });
+    }
     // 工作流诊断：缺文件时告诉用户找过哪里、该怎么配
     if (req.method === 'GET' && route === '/workflows/diagnostics') {
       return sendJson(res, 200, {
@@ -825,7 +915,7 @@ export async function handleApi(req, res) {
         const pid = safeId(decodeURIComponent(m[1]));
         const body = await readJsonBody(req);
         const shot = body.shot || newShot(body);
-        const saved = upsertShot(pid, shot);
+        const saved = await upsertShot(pid, shot);
         return sendJson(res, 200, saved);
       }
     }
@@ -1097,10 +1187,23 @@ export async function handleApi(req, res) {
           //    能把任意本机文件复制进素材库再下载（实测成功读到 Windows hosts）。
           //    /file 有 SERVABLE_DATA_DIRS 白名单挡着，但 archive 是服务端自己
           //    把文件搬进 assets/，天然绕过那层。
+          /**
+           * ⚠️ 必须再收紧一层子目录白名单。
+           *
+           * resolveUserPath 只保证"在 dataDir 内"，而 archive 是**服务端自己
+           * 把文件搬进 assets/** —— 天然绕过 /file 的 SERVABLE_DATA_DIRS 白名单。
+           * 于是：
+           *   POST /assets/archive {"items":[{"path":"config.json"}]}
+           * → 拿到 asset_xxx.json → GET /assets/item?id=... → 读到明文配置
+           * 而 asset-service 的扩展名白名单含 .json/.txt/.md/.svg。
+           *
+           * 只允许那些**本来就是产物/素材**的目录。
+           */
           const abs = resolveUserPath({
             root: cfg.dataDir,
             input: typeof it.path === 'string' && it.path ? it.path : it.rel,
             mustExist: true,
+            allowSubdirs: ['outputs', 'assets', 'previz', 'post', 'tmp-inline', 'inputs'],
           });
           saved.push(await ctx.assets.archiveFile(abs, {
             type: it.type ?? 'general',
@@ -1247,17 +1350,20 @@ export async function handleApi(req, res) {
       for (const r of (Array.isArray(body.refImages) ? body.refImages : [])) {
         const raw = String(r ?? '').trim();
         if (!raw) { badRels.push('（空路径）'); continue; }
-        if (path.isAbsolute(raw)) {
-          if (fs.existsSync(raw)) refAbs.push(raw);
-          else badRels.push(`${raw}（文件不存在）`);
-          continue;
-        }
+        /**
+         * ⚠️ 绝对路径必须限定在 dataDir 内（安全级）。
+         *
+         * 历史实现是 `if (path.isAbsolute(raw)) { if (fs.existsSync(raw)) ... }`
+         * —— 任意本机文件都能读出来送进模型，且会被写进 job.params 与提示词，
+         * 事后无从追责。security.js 的 resolveUserPath 就是为这件事写的，
+         * 只是这三处漏了接线。
+         */
         try {
-          const a = safeJoin(cfg.dataDir, raw);
-          if (fs.existsSync(a)) refAbs.push(a);
-          else badRels.push(`${raw}（文件不存在）`);
+          const a = resolveUserPath({ root: cfg.dataDir, input: raw, mustExist: true });
+          refAbs.push(a);
         } catch (e) {
-          badRels.push(`${raw}（${String(e?.message || e)}）`);
+          const msg = String(e?.message || e);
+          badRels.push(msg === 'FORBIDDEN_PATH' ? `${raw}（不在 dataDir 内，已拒绝）` : `${raw}（文件不存在）`);
         }
       }
       if (!refAbs.length) {
@@ -1363,7 +1469,25 @@ export async function handleApi(req, res) {
     /* ---------------- H3 提示词编译 ---------------- */
     if (req.method === 'GET' && route === '/prompt/meta') {
       return sendJson(res, 200, {
-        styles: STYLE_PRESETS,
+        styles: [
+          /**
+           * ⚠️ 「不指定」必须排在最前面、并且能被前端选中。
+           *
+           * 它不是"没有画风"这条路的开关那么简单 —— 用画风 LoRA 时必须
+           * 选它，否则内置画风串（默认 ova90s）会和 LoRA 互相打架：
+           * 提示词说 OVA、权重说 claymation，两头不到岸。
+           *
+           * 放在列表首位是为了让用户一眼看到"可以先不指定"。
+           */
+          {
+            id: 'none',
+            name: '不指定（交给 LoRA）',
+            category: '无',
+            changesAppearance: false,
+            en: '',
+          },
+          ...STYLE_PRESETS,
+        ],
         /**
          * 打光通道（光比预设）。
          *
@@ -1567,7 +1691,7 @@ export async function handleApi(req, res) {
     }
     if (req.method === 'POST' && route === '/logs') {
       const body = await readJsonBody(req);
-      return sendJson(res, 200, ctx.extras.appendLog(body));
+      return sendJson(res, 200, await ctx.extras.appendLog(body));
     }
 
     /* ---------------- 批量进度 ---------------- */
@@ -1578,7 +1702,21 @@ export async function handleApi(req, res) {
 
     /* ---------------- 画布内置 Agent ---------------- */
     if (req.method === 'GET' && route === '/canvas-agent/meta') {
-      return sendJson(res, 200, { ...ctx.canvasAgent.meta(), permissions: getCanvasPermissions() });
+      /**
+       * ⚠️ 键名必须是 `current`，不能复用 `permissions`。
+       *
+       * meta() 里的 `permissions` 是**能力清单数组**（Perm[]，形如
+       * ['read','write','generate','script']），前端用 `meta.permissions.map(...)`
+       * 渲染开关列表。
+       *
+       * 历史实现写成 `{...meta, permissions: getCanvasPermissions()}`，
+       * 把数组覆盖成 `Record<string, boolean>` 对象 —— 前端 `.map` 直接
+       * TypeError，**画布 AI 面板首次打开即崩**。
+       *
+       * 前端读的是 `m.current ?? m.defaults`，所以用 `current` 即可，
+       * 前端无需改动。
+       */
+      return sendJson(res, 200, { ...ctx.canvasAgent.meta(), current: getCanvasPermissions() });
     }
     /**
      * 授权写入口 —— **修 P0**。
@@ -1821,6 +1959,17 @@ export async function handleApi(req, res) {
       const body = await readJsonBody(req);
       return sendJson(res, 200, await ctx.post.extractAudio(body));
     }
+    /**
+     * 去音轨 —— 人物替换（视频换人）的必备前置。
+     *
+     * H3 Ref2VA 会把参考视频**自带的音轨**作为 <Audio j> 一起送进条件，
+     * 所以源视频带声音时，即使提示词完全不写音频标签，输出音轨仍会被污染。
+     * 换人任务要求「保动作、换皮囊、不生成音频」，必须先把音轨剥掉。
+     */
+    if (req.method === 'POST' && route === '/post/stripAudio') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, await ctx.post.stripAudio(body));
+    }
     if (req.method === 'POST' && route === '/post/qc') {
       const body = await readJsonBody(req);
       return sendJson(res, 200, await ctx.post.qc(body.path ?? body.input));
@@ -2042,33 +2191,57 @@ export function listShots(projectId) {
   let f;
   try { f = shotsFile(projectId); } catch { return []; }   // 非法 id 当作没有镜头，不抛
   if (!fs.existsSync(f)) return [];
-  try {
-    const arr = JSON.parse(fs.readFileSync(f, 'utf8') || '[]');
-    return Array.isArray(arr) ? arr : [];
-  } catch { return []; }
+  /**
+   * ⚠️ 这里**不能** `catch { return [] }`。
+   *
+   * 历史缺陷（数据丢失级）：shots.json 一旦被截断/断电/手工改坏，这个函数
+   * 返回空数组，而 upsertShot 紧接着用这个空数组重建并**覆盖写** ——
+   * 用户的全部镜头卡就此消失，且没有 .corrupt 备份。
+   *
+   * 现在交给 json-store 的 readJson：解析失败会保留 .corrupt 副本并抛
+   * `CORRUPT_JSON`，调用方据此报错而不是把数据静默抹掉。
+   * `file` 不存在 / 空文件仍是正常情况（返回 []）。
+   */
+  const arr = readJson(f, []);
+  return Array.isArray(arr) ? arr : [];
 }
 
-/** 整体写回镜头表（原子写） */
+/**
+ * 整体写回镜头表（原子写 + 串行队列）。
+ *
+ * ⚠️ 以前这里是裸 `writeFileSync(tmp) + renameSync`，tmp 名是
+ *    `${f}.${pid}.tmp` —— **同进程两次并发写用同一个 tmp 路径**，
+ *    后写会覆盖先写的 tmp，再各自 rename，结果一方改动丢失。
+ *    网页自动保存（800ms debounce）与 Agent 的 studio_shot save
+ *    同时发生就能复现。
+ *
+ * 现在统一走 json-store 的 updateJson（每文件一条 Promise 队列 + 唯一 tmp 名）。
+ */
 export function writeShots(projectId, list) {
   const f = shotsFile(projectId);      // 非法 id 在这里抛，调用方必须处理
-  fs.mkdirSync(path.dirname(f), { recursive: true });
-  const tmp = `${f}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(list, null, 2), 'utf8');
-  fs.renameSync(tmp, f);
-  return list;
+  return updateJson(f, [], () => list).then(() => list);
 }
 
-export function upsertShot(projectId, shot) {
+/**
+ * 插入或更新一个镜头卡（**串行 + 原子**）。
+ *
+ * 读-改-写整体在 updateJson 的队列里完成 —— 两个并发的部分保存
+ * 不会各读一份旧数组然后互相覆盖。
+ *
+ * @returns {Promise<object>} 落盘后的完整记录
+ */
+export async function upsertShot(projectId, shot) {
   const f = shotsFile(projectId);      // 非法 id 在这里抛
-  fs.mkdirSync(path.dirname(f), { recursive: true });
-  const list = listShots(projectId);
-  // mode 归一化统一放在**落盘口**：
-  //   REST 可以直接传 body.shot（绕过 newShot），工具也走这里，
-  //   只在 newShot 里归一化覆盖不到这些路径。
-  //
-  // ⚠️ 只归一化**传了的字段**。以前无条件对 actors/props/camera3d 做
-  //    normalize，部分保存（只改 nanfeng/description）会把这些字段
-  //    重置成空数组/null，把镜头卡写坏。
+
+  /**
+   * mode 归一化统一放在**落盘口**：
+   *   REST 可以直接传 body.shot（绕过 newShot），工具也走这里，
+   *   只在 newShot 里归一化覆盖不到这些路径。
+   *
+   * ⚠️ 只归一化**传了的字段**。以前无条件对 actors/props/camera3d 做
+   *    normalize，部分保存（只改 nanfeng/description）会把这些字段
+   *    重置成空数组/null，把镜头卡写坏。
+   */
   const next = {
     ...shot,
     ...(shot.mode !== undefined
@@ -2083,42 +2256,46 @@ export function upsertShot(projectId, shot) {
   };
   if (!next.id) next.id = newShot().id;
 
-  const idx = list.findIndex((s) => s.id === next.id);
-  /**
-   * 先合并出**完整记录**，再校验。
-   *
-   * ⚠️ 顺序很重要：
-   *    1) 部分保存时 next 只有几个字段，直接校验必然报"时长缺失"等假错
-   *    2) 校验和夹取要作用在合并后的完整记录上，写盘后才是合法的镜头卡
-   *
-   * 合并语义：显式传 null 表示"清空"，不传（undefined）表示"保持不变"。
-   * 直接 `{ ...old, ...next }` 会用 undefined 覆盖旧值 —— 只改 nanfeng
-   * 的部分保存会把 durationSec/ratio/refs 全清掉，把镜头卡写坏。
-   */
-  const merged = idx >= 0 ? { ...list[idx] } : {};
-  for (const [k, v] of Object.entries(next)) {
-    if (v !== undefined) merged[k] = v;
-  }
+  const merged = await updateJson(f, [], (cur) => {
+    const list = Array.isArray(cur) ? cur.slice() : [];
+    const idx = list.findIndex((s) => s && s.id === next.id);
 
-  // 落到合法区间（避免下游跑炸），警告挂到记录上
-  const raw = Number(merged.durationSec);
-  if (Number.isFinite(raw)) merged.durationSec = Math.min(15, Math.max(1, raw));
-  if (Array.isArray(merged.refs?.images) && merged.refs.images.length > 9) {
-    merged.refs = { ...merged.refs, images: merged.refs.images.slice(0, 9) };
-  }
-  merged.validation = validateShot(merged);
+    /**
+     * 先合并出**完整记录**，再校验。
+     *
+     * ⚠️ 顺序很重要：
+     *    1) 部分保存时 next 只有几个字段，直接校验必然报"时长缺失"等假错
+     *    2) 校验和夹取要作用在合并后的完整记录上，写盘后才是合法的镜头卡
+     *
+     * 合并语义：显式传 null 表示"清空"，不传（undefined）表示"保持不变"。
+     * 直接 `{ ...old, ...next }` 会用 undefined 覆盖旧值 —— 只改 nanfeng
+     * 的部分保存会把 durationSec/ratio/refs 全清掉，把镜头卡写坏。
+     */
+    const mergedShot = idx >= 0 ? { ...list[idx] } : {};
+    for (const [k, v] of Object.entries(next)) {
+      if (v !== undefined) mergedShot[k] = v;
+    }
 
-  if (idx >= 0) list[idx] = merged;
-  else list.push(merged);
-  const tmp = `${f}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(list, null, 2), 'utf8');
-  fs.renameSync(tmp, f);
+    // 落到合法区间（避免下游跑炸），警告挂到记录上
+    const raw = Number(mergedShot.durationSec);
+    if (Number.isFinite(raw)) mergedShot.durationSec = Math.min(15, Math.max(1, raw));
+    if (Array.isArray(mergedShot.refs?.images) && mergedShot.refs.images.length > 9) {
+      mergedShot.refs = { ...mergedShot.refs, images: mergedShot.refs.images.slice(0, 9) };
+    }
+    mergedShot.validation = validateShot(mergedShot);
+
+    if (idx >= 0) list[idx] = mergedShot;
+    else list.push(mergedShot);
+    return list;
+  });
+
+  const saved = (Array.isArray(merged) ? merged : []).find((s) => s && s.id === next.id) ?? next;
 
   // 广播给浏览器：DSH Agent 改了镜头卡 → 网页表单立即可见
-  emit({ type: 'shot-updated', projectId, shotId: merged.id });
+  emit({ type: 'shot-updated', projectId, shotId: saved.id });
 
   // 返回落盘后的完整记录，而不是只含本次改动字段的 next
-  return merged;
+  return saved;
 }
 
 /**
@@ -2135,7 +2312,7 @@ export { withVaultCards, resolveMediaRefs, writeBackProbe, resolvePictureIndices
  * 镜头卡没给够字段时（无 subjects / 无 shots）退回简单的段落拼接，
  * 保证旧数据仍能生成。
  */
-export function compilePrompt(shot) {
+export function compilePrompt(shot, outWarnings = null) {
   // ⚠️ 手工提示词优先级最高：直接整段使用，不再走编译。
   //
   // 为什么必须放在最前面：用户在渲染页的提示词编辑器里写好的完整六段式，
@@ -2147,7 +2324,8 @@ export function compilePrompt(shot) {
   // 判据：长度超过 200 字符才认为是"用户手写的完整提示词"，
   // 避免老数据里 `prompt: "一句话描述"` 这类简短备注被误当成成品。
   if (typeof shot.prompt === 'string' && shot.prompt.trim().length > 200) {
-    return shot.prompt.trim().slice(0, 7000);
+    // 手写成品同样要守官方硬上限 —— 但按句末截断，不在单词中间切断
+    return truncatePromptKeepFields(shot.prompt.trim(), H3_LIMITS.promptOfficialMaxChars);
   }
 
   // 走官方结构：需要有 mode 或 styleId，或显式给了 subjects。
@@ -2209,16 +2387,47 @@ export function compilePrompt(shot) {
       // `transfer motion only`，"续篇 / 节奏 / 氛围"这三类用途永远表达不出来，
       // 参考音频也拿不到"谁的音色"绑定。
       try {
-        const plan = buildRenderPlan(shot, cfg);
+        // ⚠️ buildRenderPlan 是**解构对象**入参，不是 (shot, cfg)。
+        //    历史实现写成 `buildRenderPlan(shot, cfg)` —— shot 被当成 opts 解构，
+        //    cfg 被整个忽略，于是 cards / manualImages 全部丢失：
+        //      · mediaNotes 里永远没有 <Video 1> / <Audio 2> 定义句
+        //      · compileRef2VA 的 hasProvidedMediaDefs 恒 false → 退到内置默认句
+        //      · 参考视频的「续篇/节奏/氛围」三种用途永远表达不出来
+        const plan = buildRenderPlan({
+          cards: shot.characterCards ?? [],
+          manualImages: shot.refs?.images ?? [],
+          previz: shot.previz ?? null,
+          sceneImages: [...(shot.sceneRefs ?? []), ...(shot.itemRefs ?? [])],
+          videos: shot.refs?.videos ?? [],
+          audios: shot.refs?.audios ?? [],
+          refImageSize: shot.refImageSize ?? 'match',
+        });
         const notes = buildMediaNotes(plan);
         if (Array.isArray(notes) && notes.length) pkg.mediaNotes = notes;
       } catch { /* 构建计划失败不影响编译 */ }
 
       const r = compileH3Prompt(pkg);
-      if (r.prompt && r.prompt.length > 40) return r.prompt.slice(0, 7000);
+      // ⚠️ 不能静默 slice(0,7000)。
+      //
+      //    compileH3Prompt 内部的 lintCompiledPrompt 只**警告**不截断，而这里
+      //    硬切会从中间砍断字段：六段格式被切成两段，detailed_description 与
+      //    non_diegetic_music 整段消失，模型收到的是结构残缺的提示词，
+      //    而且那两条「超过 7000 上游可能拒绝」的警告也随 r.warnings 一起被丢弃。
+      //
+      //    现在：超长时保留完整字段边界地截断，并把 lint 警告交给调用方
+      //    （`outWarnings` 数组，由 generate 写进 job.warnings 让用户看得见）。
+      if (Array.isArray(r.warnings) && r.warnings.length && Array.isArray(outWarnings)) {
+        outWarnings.push(...r.warnings);
+      }
+      if (r.prompt && r.prompt.length > 40) {
+        return r.prompt.length > H3_LIMITS.promptOfficialMaxChars
+          ? truncatePromptKeepFields(r.prompt, H3_LIMITS.promptOfficialMaxChars)
+          : r.prompt;
+      }
     } catch {
       // 结构化编译失败 → 退回简单拼接，不让生成中断
-    }  }
+    }
+  }
   // ==========================================================================
   // 兜底：结构化编译抛错时的极简组装
   // ==========================================================================
@@ -2255,7 +2464,11 @@ export function compilePrompt(shot) {
  *    任何新的预览入口都应调用这里，不要自己再写一份。
  */
 export function deriveSubjectsFromShot(shot) {
-  const imgs = shot.refs?.images ?? [];
+  // ⚠️ 必须与 resolveRefImages 的 9 张上限一致。
+  //    历史实现按 `refs.images` 全量编号，12 张就给到 <Picture 12>，
+  //    而生成时只提交 9 张 —— 提示词里 <Picture 10..12> 是悬空引用，
+  //    模型被指向不存在的素材，且不报错。
+  const imgs = (shot.refs?.images ?? []).slice(0, 9);
   if (!imgs.length) return [];
   return imgs.map((_, i) => ({
     id: `S${i + 1}`,
@@ -2312,7 +2525,12 @@ async function executeBackend(job, shot, ctx, cfg, hooks) {
     }
     : shot;
 
-  const prompt = job.prompt || compilePrompt(shotForCompile);
+  const promptWarnings = [];
+  const prompt = job.prompt || compilePrompt(shotForCompile, promptWarnings);
+  if (promptWarnings.length) {
+    // lint 警告必须让用户看得见 —— 否则「超长被砍」「负面句误报」全被吞掉
+    job.warnings = [...(job.warnings ?? []), ...promptWarnings];
+  }
   const outputsDir = path.join(cfg.dataDir, 'outputs');
   // 提交回调：把 remoteId 尽早落盘，否则"已提交未完成"期间取消无法通知远端
   const onSubmitted = hooks?.onSubmitted;

@@ -101,7 +101,19 @@ function isEtagMatch(req, etag) {
  */
 export async function serveStatic(req, res, { prefix, baseDir, spaFallback = null }) {
   const url = new URL(req.url, 'http://127.0.0.1');
-  let rel = decodeURIComponent(url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : url.pathname);
+  /**
+   * ⚠️ decodeURIComponent 会抛 `URIError: URI malformed`。
+   *
+   * 历史缺陷：畸形百分号编码（如 `/jiuzhang/app/%E4%BD/`）让整个函数 reject，
+   * 上层只有 `.catch(() => res.destroy())` → 客户端收到 ECONNRESET，
+   * 服务器日志里也没有可读错误。这里改成返回 400。
+   */
+  let rel;
+  try {
+    rel = decodeURIComponent(url.pathname.startsWith(prefix) ? url.pathname.slice(prefix.length) : url.pathname);
+  } catch {
+    return notFound(res, 'BAD_PATH');
+  }
   rel = rel.replace(/^\/+/, '');
   if (!rel) rel = 'index.html';
 
@@ -203,7 +215,12 @@ export async function serveSpa(req, res, { prefix, distDir }) {
     return res.end();
   }
 
-  let rel = decodeURIComponent(pathname.startsWith(prefix) ? pathname.slice(prefix.length) : pathname);
+  let rel;
+  try {
+    rel = decodeURIComponent(pathname.startsWith(prefix) ? pathname.slice(prefix.length) : pathname);
+  } catch {
+    return notFound(res, 'BAD_PATH');
+  }
   rel = rel.replace(/^\/+/, '');
   const wantsIndex = !rel || rel === 'index.html' || !path.extname(rel);
 

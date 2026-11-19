@@ -25,7 +25,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { loadConfig } from '../config.js';
-import { safeJoin } from '../security.js';
+import { safeJoin, safeId } from '../security.js';
 import { DEFAULT_CAMERA3D, h3Length } from '../store/models.js';
 
 /**
@@ -561,7 +561,15 @@ export async function renderControl({ mode, spec, cfg = loadConfig(), jobId = ''
   // ⚠️ Blender 的 import 需要绝对路径，所以这里把相对路径解析后写回 spec。
   const prepared = prepareAssetPaths(spec, cfg);
 
-  const stamp = (jobId || 'shot') + '_' + Date.now().toString(36);
+  /**
+   * ⚠️ jobId 必须先过 safeId 再拼路径。
+   *
+   * 历史漏洞（安全级）：`jobId` 直接来自请求体
+   * （`POST /blender/render {"jobId":"../../../../evil"}`），
+   * 拼进 path.join 后 workDir **逃出 dataDir**（实测写到
+   * `F:\AI视频\evil_xxx`），随后整个渲染产物与 scene.json 都落在仓库外。
+   */
+  const stamp = `${safeId(String(jobId || 'shot'))}_${Date.now().toString(36)}`;
   const workDir = path.join(cfg.dataDir, 'previz', 'blender', stamp);
   fs.mkdirSync(workDir, { recursive: true });
 

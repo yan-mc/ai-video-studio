@@ -970,7 +970,33 @@ async function moduleChecks() {
 
   /* -------------------- 角色卡：description 必须进提示词 -------------------- */
 
-  await checkAsync('角色卡：description 会写进 subject_definitions', async () => {
+  /**
+   * ⚠️ 规则在 v2.10 收紧了：**只有英文 description 才嵌进句法**。
+   *
+   * 中文 description（"白发少女"）以前会被原样塞成
+   *   `<Subject 1> is the 白发少女 shown in <Picture 1>`
+   * —— 中英混排，违反「正文必须英文」的铁律。
+   * 现在中文一律不进正文，改为泛化写法（外观由参考图承载）。
+   *
+   * 所以这里要测两件事：英文能进、中文不能进。
+   */
+  await checkAsync('角色卡：英文 description 会写进 subject_definitions', async () => {
+    const h = await import('../host/services/h3-prompt.js');
+    const out = h.compileH3Prompt({
+      mode: 'ref2va',
+      subjects: [
+        { id: 'c1', name: 'Alice', pictureIndex: 1, hasImage: true, description: 'white-haired girl', traits: 'twintails' },
+      ],
+      references: { images: [], videos: [], audios: [] },
+      scenes: [{ index: 1, startSec: 0, description: 'x', dialogue: null }],
+      summary: 'x', durationSec: 5,
+    });
+    // 群友 skill 标准句式：`<Subject N> is the <description> shown in <Picture M>.`
+    assert.match(out.prompt, /<Subject 1> is the white-haired girl shown in <Picture 1>/);
+    assert.match(out.prompt, /with twintails/);
+  });
+
+  await checkAsync('角色卡：中文 description 不进正文（避免中英混排）', async () => {
     const h = await import('../host/services/h3-prompt.js');
     const out = h.compileH3Prompt({
       mode: 'ref2va',
@@ -981,8 +1007,14 @@ async function moduleChecks() {
       scenes: [{ index: 1, startSec: 0, description: 'x', dialogue: null }],
       summary: 'x', durationSec: 5,
     });
-    // 群友 skill 标准句式：`<Subject N> is the <description> shown in <Picture M>.`
-    assert.match(out.prompt, /<Subject 1> is the 白发少女 shown in <Picture 1>/);
+    const subjectLine = out.prompt.split('\n').find((l) => l.startsWith('<Subject 1>')) ?? '';
+    assert.doesNotMatch(subjectLine, /[\u4e00-\u9fa5]/, '主语从句里不能出现中文');
+    // 仍然要有正确编号的绑定，只是改成泛化写法
+    assert.match(subjectLine, /<Picture 1>/);
+    // retention_analysis 也不能混中文
+    const retLine = out.prompt.split('\n').find((l) => l.startsWith('<Subject 1>') && l.includes('fully_preserved'))
+      ?? out.prompt.split('\n').find((l) => l.includes('fully_preserved')) ?? '';
+    assert.doesNotMatch(retLine, /[\u4e00-\u9fa5]/, 'retention 里不能出现中文');
   });
 
   await checkAsync('角色卡：无图角色走 text_only 分支', async () => {

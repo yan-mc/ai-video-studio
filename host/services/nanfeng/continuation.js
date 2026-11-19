@@ -182,11 +182,37 @@ export function batchFile(dataDir, batchId) {
 export function saveBatch(dataDir, batch) {
   const f = batchFile(dataDir, batch.batchId);
   fs.mkdirSync(path.dirname(f), { recursive: true });
-  const tmp = `${f}.tmp`;
+  /**
+   * ⚠️ Windows 上 `renameSync` 覆盖已存在文件会偶发 `EPERM/EBUSY`。
+   *
+   * 这不是理论问题 —— 冒烟测试实测到：
+   *   EPERM: operation not permitted, rename '...runs/<id>.json.tmp' -> '...runs/<id>.json'
+   * 触发条件是杀软扫描 / 句柄尚未释放 / 上一次 rename 刚落盘。
+   *
+   * json-store.js 早就有"唯一 tmp 名 + 多轮退避重试"的正确写法，
+   * 这里是漏改的第二份裸写。现在对齐：
+   *   · tmp 名带 pid + 时间戳 + 随机，两个并发写不会互相覆盖
+   *   · EPERM/EBUSY/EACCES 时短暂自旋重试（最多 8 次）
+   */
   batch.updatedAt = Date.now();
+  const tmp = `${f}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(batch, null, 2), 'utf8');
-  fs.renameSync(tmp, f);
-  return batch;
+
+  let lastError = null;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      fs.renameSync(tmp, f);
+      return batch;
+    } catch (e) {
+      lastError = e;
+      if (!['EPERM', 'EBUSY', 'EACCES'].includes(e.code)) break;
+      try { fs.rmSync(f, { force: true }); } catch { /* ignore */ }
+      const until = Date.now() + 5 + attempt * 10;
+      while (Date.now() < until) { /* 同步自旋，最长约 85ms */ }
+    }
+  }
+  try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
+  throw lastError || new Error('BATCH_SAVE_FAILED');
 }
 
 export function loadBatch(dataDir, batchId) {

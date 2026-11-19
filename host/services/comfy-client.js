@@ -8,6 +8,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { loadConfig } from '../config.js';
 import { cancellableSleep, throwIfCancelled } from './job-runner.js';
 
@@ -264,9 +265,24 @@ export async function listModelFiles(cfg = loadConfig()) {
 }
 
 
-/** 上传名只保留安全字符 —— ComfyUI 会把它当文件名落盘。 */
+/**
+ * 上传名只保留安全字符 —— ComfyUI 会把它当文件名落盘。
+ *
+ * ⚠️ 必须带一个内容哈希后缀。
+ *
+ * 历史缺陷（P1，静默丢图）：纯 `[^A-Za-z0-9_-] → _` 的替换会让所有中文文件名
+ * **塌缩成同一个名字**：
+ *   立绘.png / 设定.png / 侧面图.png → ____.png / ____.png / _____.png
+ * 于是同一批 staged 文件互相覆盖，用户传 3 张参考图实际只用上 2 张，
+ * 而且完全不报错（LoadImage 找到文件就正常跑）。
+ *
+ * 中文名是本插件主用户群的常态，所以这里保留 ASCII 部分 + 短哈希：
+ * 既安全又唯一。
+ */
 function safeStem(text) {
-  return String(text).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80) || 'img';
+  const base = String(text).replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');
+  const hash = createHash('sha1').update(String(text)).digest('hex').slice(0, 8);
+  return `${(base || 'img').slice(0, 56)}_${hash}`;
 }
 
 /**

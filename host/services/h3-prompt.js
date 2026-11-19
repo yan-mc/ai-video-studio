@@ -1035,7 +1035,17 @@ function compileRef2VA(ctx) {
   subjects.forEach((s, i) => {
     const n = i + 1;
     const bits = [];
-    if (s.traits) bits.push(s.traits.replace(/[。．.]\s*$/, ''));
+    /**
+     * ⚠️ traits 可能是中文（角色卡的「外观特征」标签）。
+     *
+     * 中文标签拼进 `, with 银蓝长发、黑色弯羊角` 是中英混排，
+     * 违反「正文必须英文」铁律。外观本来就该由参考图承载，
+     * 所以中文 traits 一律不进正文（英文的仍然保留）。
+     */
+    const traitsText = String(s.traits ?? '').trim().replace(/[。．.]\s*$/, '');
+    const traitsIsAscii = traitsText !== ''
+      && !/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(traitsText);
+    if (traitsIsAscii) bits.push(traitsText);
     if (s.heightCm) bits.push(`${s.heightCm}cm tall`);
     const tail = bits.length ? `, with ${bits.join(', ')}` : '';
     const sid = speakerIds.get(i);
@@ -1052,7 +1062,19 @@ function compileRef2VA(ctx) {
      * 有 description 时用 `is the <description> shown in`，
      * 没有才退回泛化写法。description 里自带冠词/人名都能读通。
      */
-    const desc = String(s.description ?? '').trim().replace(/[。．.]\s*$/, '');
+    /**
+     * ⚠️ 中文 description 不能直接拼进英文句法。
+     *
+     * 角色卡里的中文外观描述（"银蓝色长发及腰、发梢淡紫渐变…"）以前被原样塞进
+     * `<Subject N> is the ... shown in <Picture N>`，产出中英混排的畸形句子，
+     * 直接违反「正文必须英文」铁律。
+     *
+     * 现在：英文照嵌（官方句式）；中文不嵌句法，退回泛化写法 ——
+     * 外观本来就该由参考图承载，文字复述反而会与图片冲突。
+     */
+    const rawDesc = String(s.description ?? '').trim().replace(/[。．.]\s*$/, '');
+    const descIsAscii = !/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(rawDesc);
+    const desc = descIsAscii ? rawDesc : '';
     let where;
     if (s.hasImage) {
       where = desc
@@ -1168,7 +1190,11 @@ function compileRef2VA(ctx) {
       ret.push(`<Subject ${n}>: weak_reference - text_only; appearance follows the written description because no reference picture was supplied for this subject.`);
       return;
     }
-    const what = s.traits ? s.traits.replace(/[。．.]\s*$/, '') : 'face, hairstyle and costume';
+    // ⚠️ traits 可能是中文 —— 同样不能拼进英文句法
+    const rawWhat = String(s.traits ?? '').trim().replace(/[。．.]\s*$/, '');
+    const whatAscii = rawWhat !== ''
+      && !/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/.test(rawWhat);
+    const what = whatAscii ? rawWhat : 'face, hairstyle and costume';
     const shots = shotsForSubject(s);
     // 官方向导：retention_analysis 里**不写** (Sx)
     const where = shots.length ? ` (appears in ${shots.map((k) => `[Shot ${k}]`).join(', ')})` : '';
@@ -1486,6 +1512,72 @@ function scanSuppressionPlacement(prompt) {
  * 为什么在"编译之后"还要再查一遍：格式是靠字符串拼出来的，
  * 拼错了编译器不会报错，只有模型表现变差 —— 属于最难查的一类失效。
  */
+/**
+ * 在**保持字段完整**的前提下把提示词压到上限以内。
+ *
+ * ============================================================================
+ * 为什么不能直接 slice
+ * ============================================================================
+ *
+ * 南风节点接受约 7000 字符，官方是硬拒绝线。历史上 api/index.js 用
+ * `r.prompt.slice(0, 7000)` 硬切，后果是：
+ *   · 六段格式在中间被砍断 → 模型收到残缺结构
+ *   · `overall_soundscape` / `non_diegetic_music` **必丢**（它们永远在最后）
+ *   · 切点在句子中间，产出半个英文单词
+ *
+ * 正确做法：按**字段边界**切。优先砍最不承重的正文，保结构骨架。
+ *
+ * @param {string} prompt
+ * @param {number} [limit]
+ * @returns {string}
+ */
+export function truncatePromptKeepFields(prompt, limit = H3_LIMITS.promptOfficialMaxChars) {
+  const text = String(prompt ?? '');
+  if (text.length <= limit) return text;
+
+  const FIELD_RE = /^(subject_definitions|summary|retention_analysis|detailed_description|integrated_multimodal_description|overall_soundscape|non_diegetic_music)\s*:/gim;
+  const marks = [...text.matchAll(FIELD_RE)];
+  if (marks.length < 2) return truncateAtSentence(text, limit);
+
+  const head = text.slice(0, marks[0].index);
+  const blocks = marks.map((m, i) => ({
+    name: m[1].toLowerCase(),
+    body: text.slice(m.index, i + 1 < marks.length ? marks[i + 1].index : text.length),
+  }));
+
+  // 从少到多试，取"能满足上限的最多句子数"—— 尽量把内容留住
+  let best = null;
+  for (let keep = 4; keep <= 240; keep += 2) {
+    const out = head + blocks.map((b) => limitBlock(b.body, keep)).join('');
+    if (out.length > limit) break;
+    best = out;
+  }
+  if (best) return best;
+
+  const minimal = head + blocks.map((b) => limitBlock(b.body, 1)).join('');
+  return minimal.length <= limit ? minimal : truncateAtSentence(minimal, limit);
+}
+
+/** 把单块按句末截到最多 `maxSentences` 句 */
+function limitBlock(block, maxSentences) {
+  const idx = block.indexOf(':');
+  const label = idx >= 0 ? block.slice(0, idx + 1) : '';
+  const body = idx >= 0 ? block.slice(idx + 1) : block;
+  const sentences = body.match(/[^.!?]+[.!?]+\s*|[^.!?]+$/g) ?? [body];
+  if (sentences.length <= maxSentences) return block;
+  return `${label}\n${sentences.slice(0, maxSentences).join('').trim()}\n\n`;
+}
+
+/** 无字段结构时的兜底：按句末截断，绝不在单词中间切 */
+function truncateAtSentence(text, limit) {
+  if (text.length <= limit) return text;
+  const cut = text.slice(0, limit);
+  const lastStop = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('.\n'), cut.lastIndexOf('! '), cut.lastIndexOf('? '));
+  if (lastStop > limit * 0.5) return cut.slice(0, lastStop + 1);
+  const lastSpace = cut.lastIndexOf(' ');
+  return lastSpace > 0 ? cut.slice(0, lastSpace) : cut;
+}
+
 export function lintCompiledPrompt(prompt, format, warnings = []) {
   let p = String(prompt ?? '');
   const w = warnings;
@@ -1814,6 +1906,21 @@ function resolveStyle(input) {
   }
   if (input.style) {
     return { id: 'custom', name: String(input.style), en: String(input.style), ban: '', changesAppearance: false };
+  }
+  /**
+   * ⚠️ 「不指定画风」必须能真的不注入画风串。
+   *
+   * 以前走到这里一律 `return STYLE_PRESETS[2]`（90 年代 OVA），
+   * 于是「关掉画风、只用画风 LoRA」做不到 —— 你选任何空值都会拿到
+   * 那一整串 OVA 描述，而它会和画风 LoRA 互相打架
+   * （提示词说 OVA、权重说 claymation，两头不到岸）。
+   *
+   * 现在 `styleId: 'none'` 返回一个 `en: ''` 的空画风：
+   * `styleLeadSentence` 检测到空串就不注入任何定调句，
+   * 画风完全交给 LoRA 决定。
+   */
+  if (String(input.styleId ?? '').toLowerCase() === 'none') {
+    return { id: 'none', name: '不指定（交给 LoRA）', en: '', ban: '', changesAppearance: false };
   }
   return STYLE_PRESETS[2];   // 默认 90 年代 OVA
 }

@@ -202,8 +202,24 @@ export function registerTools(ctx) {
       const pid = requireProjectId(args.projectId);
       switch (args.action) {
         case 'list': return (listShots(pid));
+        /**
+         * ⚠️ save 必须认 `shotId`。
+         *
+         * 历史缺陷：`case 'save': return upsertShot(pid, args.shot || {})`
+         * —— `args.shotId` 完全没用。而 upsertShot 里 `if (!next.id) next.id = newShot().id`，
+         * 于是 Agent 按 schema 语义传 `{action:'save', projectId, shotId:'shot_abc', shot:{...}}`
+         * **不会更新 shot_abc，而是每次都新建一个镜头**。重复保存 = 镜头表爆炸。
+         *
+         * 现在把 shotId 合并进 shot 记录，交给 upsertShot 的"有 id 就更新"分支。
+         */
         case 'create': return (upsertShot(pid, newShot(args.shot || {})));
-        case 'save': return (upsertShot(pid, args.shot || {}));
+        case 'save': {
+          const target = {
+            ...(args.shot || {}),
+            ...(args.shotId && !args.shot?.id ? { id: String(args.shotId) } : {}),
+          };
+          return (upsertShot(pid, target));
+        }
         case 'delete': {
           // 修复 G5：原先只算 remaining 不落盘
           const before = listShots(pid);
@@ -533,11 +549,11 @@ export function registerTools(ctx) {
   /* ---------------------------------------------------------- 后处理 */
   disposers.push(reg(tool(
     'studio_post',
-    'ffmpeg 后处理与图像工具：transcode / scale / crop / split（切割分镜）/ annotate（文字标注）/ extractFrame / extractAudio / qc。',
+    'ffmpeg 后处理与图像工具：transcode / scale / crop / split（切割分镜）/ annotate（文字标注）/ extractFrame / extractAudio / stripAudio（去音轨，人物替换的必备前置）/ qc。',
     {
       type: 'object',
       properties: {
-        op: { type: 'string', enum: ['transcode', 'scale', 'crop', 'split', 'annotate', 'extractFrame', 'extractAudio', 'qc'] },
+        op: { type: 'string', enum: ['transcode', 'scale', 'crop', 'split', 'annotate', 'extractFrame', 'extractAudio', 'stripAudio', 'qc'] },
         input: { type: 'string' },
         width: { type: 'number' },
         height: { type: 'number' },
