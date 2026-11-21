@@ -574,6 +574,33 @@ export const api = {
     extraNote?: string;
   }) => request<{ ok: boolean; prompt: string; chars: number }>('POST', '/replace/preview-prompt', input),
 
+  /**
+   * 编译提示词 —— 把用户手写的自由文本整理成规范四段式。
+   *
+   * 三层降级：规则引擎（永远成功）→ 本地 7B 翻译（离线、无拒答）→ 原文兜底。
+   * `useLlm=false` 只跑规则引擎，秒回。
+   */
+  replaceCompilePrompt: (input: { prompt: string; useLlm?: boolean }) =>
+    request<{
+      ok: boolean;
+      prompt: string;
+      chars: number;
+      translated: boolean;
+      needsTranslate: boolean;
+      warnings: string[];
+      parts: Record<string, number>;
+    }>('POST', '/replace/compile-prompt', input),
+
+  /** 本地翻译模型状态（决定「编译」按钮要不要提示下载） */
+  replaceLlmStatus: () => request<{
+    ok: boolean;
+    python: string;
+    script: boolean;
+    modelPresent: boolean;
+    usable: boolean;
+    hint: string;
+  }>('GET', '/replace/llm-status'),
+
   /** 分析源视频：时长、是否有音轨、会切成几段 */
   replacePlan: (input: {
     sourceRel: string;

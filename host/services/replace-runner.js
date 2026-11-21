@@ -94,6 +94,27 @@ export async function runReplaceBatch({ replaceId, cfg = loadConfig(), onProgres
   const warnings = [...(task.warnings ?? [])];
   let current = await emit({ status: 'running', error: null, warnings });
 
+  /**
+   * 按需拉起 ComfyUI。
+   *
+   * 用户常态是「ComfyUI 关着」，只在真要渲染时才需要它。
+   * `ensureComfyRunning` 会区分「本来就在跑」（用户自己开的，结束后不动）
+   * 和「我们拉起的」（结束后关掉释放显存）。
+   *
+   * ⚠️ 放在 try 内：启动失败要落成 failed 状态，不能静默。
+   */
+  const lifecycle = await import('./comfy-lifecycle.js');
+  try {
+    await lifecycle.ensureComfyRunning(cfg, (m) => onProgress({ replaceId, note: m }));
+  } catch (e) {
+    return emit({
+      status: 'failed',
+      error: `无法启动 ComfyUI：${String(e?.message || e).slice(0, 400)}`,
+      finishedAt: Date.now(),
+      warnings,
+    });
+  }
+
   try {
     /* ---------- 阶段 1：规划分段 ---------- */
     const sourceAbs = resolveReplaceInput(current.sourceRel, cfg);
@@ -331,6 +352,31 @@ export async function runReplaceBatch({ replaceId, cfg = loadConfig(), onProgres
           durationSec: seg.durationSec,
           ratio: shot.ratio,
           seed: Number.isFinite(Number(task.seed)) ? Number(task.seed) : 1101,
+          /**
+           * ⚠️ 必须把步数传下去，否则用户设了也没用。
+           *
+           * ==================================================================
+           * 这里漏传过一次，症状是「填 25 步，实际跑 50 步」，而且完全静默
+           * ==================================================================
+           *
+           * `buildOverrides()` 确实算出了 `采样步数: 25` 并写进
+           * `nanfeng.overrides`，看起来没问题。但 `generator.js` 的取值是：
+           *
+           *     const wantSteps = job.params?.steps;   // ← 这里拿到 undefined
+           *     const steps = Number.isFinite(Number(wantSteps))
+           *       ? Number(wantSteps)
+           *       : accel.steps;                       // ← 落到方案默认 50
+           *
+           * 也就是说 `generator` **根本不看 `shot.nanfeng.overrides.采样步数`**，
+           * 它只认 `job.params.steps`。拿不到就退回加速方案的默认步数。
+           *
+           * 更糟的是 `checkSteps` 也没被调用（`wantSteps` 为空直接走 `{ok:true}`
+           * 分支），所以连一条警告都不会有 —— 用户只会觉得「怎么这么慢」。
+           *
+           * 注意这里**只传用户显式给的值**：`task.steps` 为 undefined 时不写这个键，
+           * 让 `generator` 正常走「用方案默认步数」的分支（那是 dmad8=8/none=50 的来源）。
+           */
+          ...(Number.isFinite(Number(task.steps)) ? { steps: Number(task.steps) } : {}),
         },
         mode: 'ref2va',
       });
@@ -395,9 +441,36 @@ export async function runReplaceBatch({ replaceId, cfg = loadConfig(), onProgres
       error: null,
       warnings,
     });
+
+    /**
+     * 全部段完成 + 拼接完成之后才关 ComfyUI。
+     *
+     * 位置很重要：必须在 `emit({status:'completed'})` **之后** ——
+     * 关进程会让后续任何 ComfyUI 调用失败，先落盘状态再关，
+     * 用户刷新页面看到的是「已完成」而不是「卡住」。
+     *
+     * 失败不影响任务结果：任务已经完成了，关不掉只是显存没释放，
+     * 记一条 warning 即可。
+     */
+    try {
+      const r = await lifecycle.releaseComfy((m) => onProgress({ replaceId, note: m }));
+      if (!r.stopped && !r.skipped) warnings.push(`ComfyUI 关闭失败：${r.detail}`);
+    } catch (e) {
+      warnings.push(`ComfyUI 关闭异常：${String(e?.message || e).slice(0, 200)}`);
+    }
+
     return done;
   } catch (err) {
     const msg = String(err?.message || err).slice(0, 800);
+    /**
+     * 失败路径**也要释放** ComfyUI。
+     *
+     * 否则一次失败会把 14GB 显存永久占住，用户下次点编译时
+     * 翻译模型直接 OOM —— 这个连锁反应比原错误更难排查。
+     */
+    try {
+      await lifecycle.releaseComfy(() => {});
+    } catch { /* 失败路径不再叠加错误 */ }
     return emit({ status: 'failed', error: msg, finishedAt: Date.now(), warnings });
   }
 }

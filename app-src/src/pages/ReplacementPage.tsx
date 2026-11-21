@@ -263,6 +263,22 @@ export function ReplacementPage() {
    * 用户不改就用模板（与以前的行为一致），改了就以他写的为准（整段替换）。
    */
   const [promptText, setPromptText] = useState('');
+  /**
+   * 编译相关状态。
+   *
+   * `compileWarnings` 是**必须显示**的 —— 翻译失败时退回规则版本，
+   * 用户看到的提示词是中文的，不告诉他原因会以为是 bug。
+   */
+  const [compiling, setCompiling] = useState(false);
+  const [compileWarnings, setCompileWarnings] = useState<string[]>([]);
+  const [llmStatus, setLlmStatus] = useState<{ usable: boolean; hint: string } | null>(null);
+  /**
+   * 编译结果预览（**不自动应用**）。
+   *
+   * 存 `from` 是为了检测"用户在看预览期间又改了输入框"——
+   * 那种情况下预览已经过期，应用会把他新的改动冲掉。
+   */
+  const [compiled, setCompiled] = useState<{ from: string; to: string; translated: boolean } | null>(null);
   /** 模板原文，用于"恢复默认"和判断用户是否改过 */
   const [promptTemplate, setPromptTemplate] = useState('');
 
@@ -449,6 +465,46 @@ export function ReplacementPage() {
       setTasks(Array.isArray(rows) ? rows : []);
     } catch { /* 列表失败不打断主流程 */ }
   }, []);
+
+  useEffect(() => { void loadTasks(); }, [loadTasks]);
+
+  /** 加载本地翻译模型状态（页面打开时探一次） */
+  useEffect(() => {
+    void (async () => {
+      try {
+        const s = await api.replaceLlmStatus();
+        setLlmStatus({ usable: Boolean(s.usable), hint: String(s.hint ?? '') });
+      } catch { /* 探测失败不影响主流程，按钮会因 usable=false 而禁用 */ }
+    })();
+  }, []);
+
+  /**
+   * 编译提示词。
+   *
+   * ⚠️ **不自动覆盖用户的输入框** —— 编译结果先放出来给他看，
+   *    他确认后才替换。理由：用户写的内容里有 LoRA 触发词这类
+   *    「一个字都不能改」的部分，自动替换一旦出错很难恢复。
+   */
+  const handleCompile = useCallback(async (useLlm: boolean) => {
+    const raw = promptText.trim();
+    if (!raw) return;
+    setCompiling(true);
+    setCompileWarnings([]);
+    try {
+      const r = await api.replaceCompilePrompt({ prompt: raw, useLlm });
+      setCompileWarnings(Array.isArray(r.warnings) ? r.warnings : []);
+      if (r.prompt && r.prompt !== raw) {
+        setCompiled({ from: raw, to: r.prompt, translated: Boolean(r.translated) });
+        toast.ok(r.translated ? '已编译并翻译，请预览后确认' : '已整理结构，请预览后确认');
+      } else {
+        toast.ok('结构已经规范，无需改动');
+      }
+    } catch (e) {
+      toast.error(describeError(e));
+    } finally {
+      setCompiling(false);
+    }
+  }, [promptText, toast]);
 
   useEffect(() => { void loadTasks(); }, [loadTasks]);
 
@@ -729,6 +785,85 @@ export function ReplacementPage() {
                 }}
                 placeholder="在这里写换人提示词…"
               />
+
+              {/*
+                编译按钮 —— 把自由文本整理成规范结构。
+                
+                为什么要单做一个按钮而不是保存时自动编译：
+                  · 模型翻译要拉起 7B（5GB 显存），必须用户主动触发
+                  · 编译结果要让用户**看一眼再决定**，不能偷偷改掉他写的东西
+                  · 规则引擎版本秒回，可反复点；模型版慢，点了有明确反馈
+              */}
+              <div className="jz-row" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={compiling || !promptText.trim()}
+                  onClick={() => void handleCompile(false)}
+                >
+                  {compiling ? '编译中…' : '快速整理（规则）'}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={compiling || !promptText.trim() || !llmStatus?.usable}
+                  onClick={() => void handleCompile(true)}
+                  title={llmStatus?.usable ? '用本地 7B 模型翻译成英文' : (llmStatus?.hint ?? '模型不可用')}
+                >
+                  {compiling ? '编译中…' : '编译 + 英文翻译'}
+                </Button>
+                {llmStatus && !llmStatus.usable ? (
+                  <span className="jz-xs jz-muted">{llmStatus.hint}</span>
+                ) : null}
+                {compileWarnings.length ? (
+                  <span className="jz-xs" style={{ color: 'var(--jz-warn-text, #d97706)' }}>
+                    {compileWarnings[0]}
+                  </span>
+                ) : null}
+              </div>
+
+              {/*
+                编译结果预览。
+                
+                刻意**不自动替换输入框** —— 用户写的触发词一个字都不能改，
+                让他看清楚"要变成什么"再点确认，是唯一安全的做法。
+                过期检测：如果输入框内容已经不是编译时的原文，说明他在预览期间
+                又改了东西，此时"应用"会把新改动冲掉，所以禁用按钮。
+              */}
+              {compiled ? (
+                <div className="jz-col" style={{ gap: 6, padding: 10, border: '1px solid var(--jz-border)', borderRadius: 8 }}>
+                  <div className="jz-row" style={{ gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <b className="jz-sm">编译结果预览</b>
+                    {compiled.translated ? <Badge tone="accent">已翻译</Badge> : <Badge>规则整理</Badge>}
+                    <span className="jz-xs jz-muted">{compiled.to.length} 字</span>
+                  </div>
+                  <pre
+                    className="jz-xs"
+                    style={{
+                      margin: 0, maxHeight: 240, overflow: 'auto', whiteSpace: 'pre-wrap',
+                      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+                      lineHeight: 1.6, background: 'var(--jz-bg-sunken, rgba(0,0,0,0.03))', padding: 8, borderRadius: 6,
+                    }}
+                  >
+                    {compiled.to}
+                  </pre>
+                  <div className="jz-row" style={{ gap: 8 }}>
+                    <Button
+                      size="sm"
+                      disabled={promptText.trim() !== compiled.from.trim()}
+                      onClick={() => {
+                        setPromptText(compiled.to);
+                        setPromptTemplate(compiled.to);
+                        setCompiled(null);
+                        toast.ok('已应用编译结果');
+                      }}
+                    >
+                      {promptText.trim() !== compiled.from.trim() ? '输入框已改动，请重新编译' : '应用到输入框'}
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setCompiled(null)}>放弃</Button>
+                  </div>
+                </div>
+              ) : null}
               <div className="jz-xs jz-muted" style={{ lineHeight: 1.7 }}>
                 这段会<b>原样提交</b>。花括号内容（〔…〕）是给你替换的提示，别忘了改掉。
                 {' '}

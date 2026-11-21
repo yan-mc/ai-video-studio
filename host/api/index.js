@@ -2217,6 +2217,52 @@ export async function handleApi(req, res) {
       }
     }
 
+    /**
+     * 提示词编译 —— 把用户手写的自由文本整理成规范结构。
+     *
+     * 三层降级（见 services/prompt-normalizer.js）：
+     *   ① 规则引擎   永远成功，<10ms
+     *   ② 本地 7B    补翻译，离线、无拒答，首次要下载 ~15GB
+     *   ③ 原文兜底   前两步都失败时原样返回，绝不丢内容
+     *
+     * `useLlm=false` 只跑规则引擎。
+     */
+    if (req.method === 'POST' && route === '/replace/compile-prompt') {
+      const body = await readJsonBody(req);
+      const N = await import('../services/prompt-normalizer.js');
+      const raw = String(body.prompt ?? '');
+      if (!raw.trim()) return sendJson(res, 400, { error: 'EMPTY_PROMPT: 提示词为空' });
+
+      try {
+        const r = await N.normalizePrompt(raw, cfg, { useLlm: body.useLlm !== false });
+        return sendJson(res, 200, {
+          ok: true,
+          prompt: r.prompt,
+          chars: r.prompt.length,
+          translated: r.translated,
+          needsTranslate: r.parts.needsTranslate,
+          warnings: r.warnings,
+          parts: {
+            trigger: r.parts.trigger.length,
+            summary: r.parts.summary.length,
+            subjects: r.parts.subjects.length,
+            video: r.parts.video.length,
+            shots: r.parts.shots.length,
+            guards: r.parts.guards.length,
+            stray: r.parts.stray.length,
+          },
+        });
+      } catch (e) {
+        return sendJson(res, 500, { error: String(e?.message || e) });
+      }
+    }
+
+    /** 本地翻译模型状态（前端据此显示"能不能用模型翻译"） */
+    if (req.method === 'GET' && route === '/replace/llm-status') {
+      const L = await import('../services/prompt-llm.js');
+      return sendJson(res, 200, { ok: true, ...L.llmStatus(cfg) });
+    }
+
     // 分析源视频 → 算分段（用户选完视频就能看到"会切成几段"）
     if (req.method === 'POST' && route === '/replace/plan') {
       const R = await import('../services/replace.js');

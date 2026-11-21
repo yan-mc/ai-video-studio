@@ -364,6 +364,90 @@ async function moduleChecks() {
    * 旧行为 `task.sampler || d.sampler` 会让前端默认的 `lcm` 漏进 `none` 方案，
    * 变成「原模型用 LCM 步进器跑 50 步」—— 不报错，但会糊。
    */
+  /**
+   * 换人：用户设的步数必须真的传下去。
+   *
+   * ==========================================================================
+   * 这条守护的是一个「填了等于没填」的静默缺陷
+   * ==========================================================================
+   *
+   * `buildOverrides()` 会算出正确的 `采样步数: 25` 并写进 `nanfeng.overrides`，
+   * 看起来一切正常。但 `generator.js` 只认 `job.params.steps`：
+   *
+   *     const wantSteps = job.params?.steps;   // 没传 → undefined
+   *     const steps = ... : accel.steps;       // → 退回方案默认 50
+   *
+   * 于是用户设 25 步，实际跑 50 步，耗时翻倍，而且因为 `checkSteps` 也没被调用，
+   * **连一条警告都不会有**。这是用户实测发现的问题（填 25 跑 50）。
+   *
+   * 编译期没法直接测 replace-runner 内部（它要跑真 ffmpeg），
+   * 所以这里做两件事：
+   *   ① 源码层面确认 newJob 的 params 里有 steps 透传
+   *   ② 行为层面确认 generator 拿到 steps 时会用它
+   */
+  /**
+   * 提示词规范化：规则引擎必须能拆分，且**不能碰触发词**。
+   *
+   * 触发词（如 DR34ML4Y 的 "Video depicts a sexual scene..."）是 LoRA 训练时
+   * 绑定的描述句，改一个字效果就废。所以规则引擎要认出它并逐字保留。
+   */
+  await checkAsync('提示词规范化：触发词逐字保留、四段式正确归位', async () => {
+    const N = await import('../host/services/prompt-normalizer.js');
+    const trigger = 'Video depicts a sexual scene between a female central character and a massive, giant partner.';
+    const raw = [
+      trigger,
+      '',
+      '将参考视频1中的黑发猫耳少女替换成参考图1中的蓝发带角少女。完全复刻动作。',
+      '',
+      '<Subject 1> 是 <Picture 1> 中的蓝发带角少女。',
+      '<Video 1> 是源视频，保留其动作。',
+      '',
+      '注意角色表情要一致。',
+      '',
+      '全程保持 <Subject 1> 身份与 <Picture 1> 一致，不添加新角色。',
+    ].join('\n');
+
+    const r = N.normalizeByRules(raw);
+    assert.equal(r.parts.trigger.length, 1, '触发词应被识别为独立块');
+    assert.equal(r.parts.trigger[0], trigger, '触发词必须逐字保留');
+    assert.ok(r.parts.summary.length >= 1, '替换映射句应归入 summary');
+    assert.ok(r.parts.subjects.length >= 1, 'Subject 定义应归入 subjects');
+    assert.ok(r.parts.guards.length >= 1, '防漂移句应归入 guards');
+    // 输出里触发词必须在最前面
+    assert.ok(r.prompt.startsWith(trigger), '触发词必须位于输出开头');
+    assert.ok(r.prompt.includes('<Subject 1>'), '占位符不能被破坏');
+  });
+
+  await checkAsync('提示词规范化：stray 保持原文顺序', async () => {
+    const N = await import('../host/services/prompt-normalizer.js');
+    const raw = [
+      '将 A 替换成 B。',
+      '',
+      '第一句注意表情。',
+      '第二句强调细节。',
+      '第三句普通描述。',
+    ].join('\n');
+    const r = N.normalizeByRules(raw);
+    const i1 = r.parts.stray.findIndex((s) => s.includes('第一句'));
+    const i2 = r.parts.stray.findIndex((s) => s.includes('第二句'));
+    const i3 = r.parts.stray.findIndex((s) => s.includes('第三句'));
+    assert.ok(i1 >= 0 && i2 > i1 && i3 > i2, '散句必须保持书写顺序，不能按关键词重排');
+  });
+
+  await checkAsync('换人：用户设的步数必须透传到 job.params（否则填 25 跑 50）', async () => {
+    const fs = await import('node:fs/promises');
+    const src = await fs.readFile(new URL('../host/services/replace-runner.js', import.meta.url), 'utf8');
+    assert.match(
+      src,
+      /\? \{ steps: Number\(task\.steps\) \} : \{\}/,
+      'newJob 必须把 task.steps 透传进 params',
+    );
+    // 确认 buildOverrides 那层本来就是对的不必再改
+    const { buildOverrides } = await import('../host/services/replace-runner.js');
+    const o = buildOverrides({ accelPlan: 'none', steps: 25, continuation: false });
+    assert.equal(o['采样步数'], 25, 'buildOverrides 必须尊重传入的 25 步');
+  });
+
   await checkAsync('换人：采样器跟随加速方案，不被前端 lcm 污染', async () => {
     const { buildOverrides } = await import('../host/services/replace-runner.js');
     const none = buildOverrides({

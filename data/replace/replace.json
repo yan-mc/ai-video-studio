@@ -2116,5 +2116,114 @@
     "createdAt": 1795253684035,
     "updatedAt": 1795255492579,
     "finishedAt": 1795255492578
+  },
+  {
+    "id": "rp_mwqbx150qxwma",
+    "title": "换人 2026/11/21 19:33:02",
+    "status": "completed",
+    "sourceRel": "assets/asset_mwp3ibliwqnhve.mp4",
+    "sourceHasAudio": true,
+    "sourceWidth": 640,
+    "sourceHeight": 360,
+    "durationSec": 13.541667,
+    "segmentSec": 7,
+    "mode": "continuation",
+    "continuation": {
+      "batchId": "e9122800-421a-42ee-beb8-ed7418fda96b",
+      "contextLength": "22",
+      "contextFolder": "nanfeng_v15_context/79c04473f018ddc9a0cd9e6d922c6e7120c646cb03c5565fa9ef1f7e2c8494ad",
+      "trimFrames": 22
+    },
+    "contextLength": "22",
+    "segmentCount": null,
+    "trimFrames": 22,
+    "overlapSec": 0.9166666666666666,
+    "segments": [
+      {
+        "index": 1,
+        "startSec": 0,
+        "durationSec": 6.583,
+        "requestSec": 6.583,
+        "deliverSec": 6.583,
+        "sampleFrames": 158,
+        "deliverFrames": 158,
+        "overlapSec": 0,
+        "status": "completed",
+        "outputRel": "outputs/job_mwqbx1z6cyajbv.mp4",
+        "jobId": "job_mwqbx1z6cyajbv",
+        "fromCache": false,
+        "warnings": [
+          "SageAttention → disabled（本机未安装 SageAttention，auto 会报 sageattention is not new enough version）",
+          "H3专用注意力 → 关闭（本机未安装 SageAttention，「H3专用Sage加速」会调用 KJNodes 的 Sage Patch 并失败）",
+          "TRT视频解码引擎 → None（TRT 未启用时引擎名必须是 \"None\"，空串会被 ComfyUI 拒绝）",
+          "TRT视频编码引擎 → None（同上）"
+        ]
+      },
+      {
+        "index": 2,
+        "startSec": 5.666,
+        "durationSec": 8,
+        "requestSec": 8,
+        "deliverSec": 7.083,
+        "sampleFrames": 192,
+        "deliverFrames": 170,
+        "overlapSec": 0.9166666666666666,
+        "status": "completed",
+        "outputRel": "outputs/job_mwqdzqqyozgijs.mp4",
+        "jobId": "job_mwqdzqqyozgijs",
+        "fromCache": false,
+        "warnings": [
+          "SageAttention → disabled（本机未安装 SageAttention，auto 会报 sageattention is not new enough version）",
+          "H3专用注意力 → 关闭（本机未安装 SageAttention，「H3专用Sage加速」会调用 KJNodes 的 Sage Patch 并失败）",
+          "TRT视频解码引擎 → None（TRT 未启用时引擎名必须是 \"None\"，空串会被 ComfyUI 拒绝）",
+          "TRT视频编码引擎 → None（同上）"
+        ]
+      }
+    ],
+    "refImages": [
+      {
+        "rel": "assets/asset_mwozpwr8l3nllb.png",
+        "pictureIndex": 1,
+        "name": "asset_mwozpwr8l3nllb.png"
+      }
+    ],
+    "roles": [],
+    "shotBeats": "",
+    "extraNote": "",
+    "prompt": "Video depicts a sexual scene between a female central character and a massive,\ngiant partner that inserts it's giant erect penis into woman vagina\n\n将参考视频1视频中的黑发猫耳少女替换成参考图1中的蓝发带角少女。完全复刻参考视频1内动作。\n\n<Subject 1> 是 <Picture 1> 中的蓝发带角少女，替换原视频中的黑发猫耳少女。\n<Video 1> 是源视频，保留其完整动作、运镜和剪辑节奏。\n\n强调huge insertion + stomach bulge\nhuge insertion要和penis的动作同步\nstomach bulge要和huge insertion相匹配\n精细描绘woman vagina\npenis就是那个绿色的，直的并且进行水平运动\ngiant几乎不出镜，因此不做任何修改，只对少女进行修改\n注意角色表情的细节要和参考视频完全相同\n注意角色身上衣物的细节和立体感，要体现衣物细节的光影变化\n\n全程保持 <Subject 1> 的身份和外观与 <Picture 1> 完全一致。完全复刻 <Video 1> 内动作，不添加新角色。",
+    "accelPlan": "none",
+    "preset": "draft",
+    "sampler": "lcm",
+    "scheduler": "simple",
+    "steps": 25,
+    "megapixels": 0.6,
+    "denoise": 1,
+    "secondPass": false,
+    "taperEnabled": true,
+    "taperAlpha": 0.45,
+    "taperAlphaEnd": 0.1,
+    "taperRampSteps": 2,
+    "styleId": "none",
+    "lightingId": "closeup-6-1",
+    "seed": 1101,
+    "loras": [
+      {
+        "name": "20_motion\\GiantDomIL_FantasySex_H3.safetensors",
+        "strength": 0.1
+      }
+    ],
+    "overrides": {},
+    "warnings": [
+      "续写链条需要源视频约 13.67s，实际只有 13.54s；末尾缺的部分会用最后一帧静态延展补齐。",
+      "续写链条需要源视频约 13.67s，实际只有 13.54s；末尾缺的部分会用最后一帧静态延展补齐。",
+      "源视频带音轨 —— 切段时已自动剥除（换人任务必须无音轨，否则原声会被当作 <Audio 1> 送进条件）。",
+      "续写链路已建立：重叠窗口 22 帧（0.92s），段间通过真实 AV latent 传递，不是靠提示词推断。"
+    ],
+    "finalRel": "replace/joined_mwqgtz3l.mp4",
+    "error": null,
+    "createdAt": 1795260782340,
+    "updatedAt": 1795269037999,
+    "finalBytes": 4798490,
+    "finishedAt": 1795269037999
   }
 ]
