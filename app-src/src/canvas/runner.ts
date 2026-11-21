@@ -194,10 +194,23 @@ export function nodeToShot(node: CanvasFlowNode, projectId: string) {
       ? {
         nanfeng: {
           ...(steps > 0 ? { overrides: { 采样步数: steps, H3一采步数: steps } } : {}),
+          /**
+           * ⚠️ 字段名必须是 `name`，不是 `file`。
+           *
+           * 后端 `solveLoraStack`（host/services/lora-catalog.js）只认
+           * `{ name, strength }`，并且它的入参归一化是
+           *   `.filter((x) => x && typeof x.name === 'string' && x.name.trim())`
+           * —— 传 `{ file }` 的条目会在**静默中**被整条丢弃：
+           * 不报错、不进 rejected、总强度按 0 计，最终只有加速学生上机。
+           * 画布上拖着「语义 LoRA」以为生效了，实际一帧都没用上。
+           *
+           * 这个 bug 在修复前实测：`{file:'20_motion\\X.safetensors'}` →
+           * accepted 为空；换成 `{name:...}` 才正常进 LoRA2 槽。
+           */
           ...(semanticLoras.length
             ? {
               loras: semanticLoras.map((file) => ({
-                file,
+                name: file,
                 ...(motionLora != null ? { strength: motionLora } : {}),
               })),
             }

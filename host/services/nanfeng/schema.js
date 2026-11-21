@@ -44,7 +44,7 @@ export const GROUPS = Object.freeze({
   F: { id: 'F', name: '注意力与加速', desc: 'SLA / SolAttn / T8 / Sigma 策略', count: 37 },
   G: { id: 'G', name: 'LoRA', desc: '最多 8 组', count: 25 },
   H: { id: 'H', name: '小脸修复', desc: '身份参考、全局修复', count: 14 },
-  I: { id: 'I', name: '潜空间续写', desc: '跨镜头 AV latent 续接', count: 7 },
+  I: { id: 'I', name: '潜空间续写', desc: '跨镜头 AV latent 续接 + 换人抗漂移加噪', count: 11 },
   J: { id: 'J', name: '音频驱动', desc: '锁音频、智能音频驱动', count: 13 },
   K: { id: 'K', name: '预览与超分', desc: '实时预览 / RTX / DLSS / TRT', count: 41 },
   L: { id: 'L', name: '南风采样器', desc: 'ER-SDE 求解器参数', count: 5 },
@@ -205,6 +205,17 @@ export const PARAMS = Object.freeze({
   '全局修复范围': { group: 'H', type: 'COMBO', default: '全画面双区', options: ['全画面双区', '仅第一区（横图左/竖图上）', '仅第二区（横图右/竖图下）'] },
   'context_length': { group: 'I', type: 'COMBO', default: '22', options: ['22', '5', '39', '56'] },
   'audio_context_length': { group: 'I', type: 'INT', default: 24 },
+  /**
+   * 换人续写链的抗身份漂移：给上下文注入锥形噪声。
+   *
+   * 默认关闭 —— 叙事续写（非换人）需要干净上下文来保持画面质感，
+   * 换人线才会在 overrides 里把它打开。
+   * 机制与出处见 vendor/nanfeng/context_taper_noise.py。
+   */
+  '启用续写上下文加噪': { group: 'I', type: 'BOOLEAN', default: false },
+  '续写加噪强度': { group: 'I', type: 'FLOAT', default: 0.45 },
+  '续写加噪末档强度': { group: 'I', type: 'FLOAT', default: 0.1 },
+  '续写加噪斜坡步数': { group: 'I', type: 'INT', default: 2 },
   '启用续写音频精修': { group: 'I', type: 'BOOLEAN', default: false },
   '续写音频降噪强度': { group: 'I', type: 'FLOAT', default: 0.3 },
   '续写音频精修步数': { group: 'I', type: 'INT', default: 4 },

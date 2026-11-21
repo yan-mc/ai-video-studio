@@ -66,9 +66,34 @@ const { token } = await (await fetch(`http://127.0.0.1:${port}/jiuzhang/api/toke
 | `studio_h3_workshop` | `action: analyze\|import`, `text`/`dir`, `episode` | 剧本 → 分段 + 资产 |
 | `studio_blender` | `action: health\|assets\|actions\|render\|spec`, `mode`, `projectId`, `shotId`, `assetRel` | **Blender 预演**：渲灰模参考视频 / 列资产 / 读动作名 |
 | `studio_storyboard` | `action: meta\|analyze\|generate`, `imageRels[]`, `mode`, `count` | **智能分镜**：DSH 模型看图 + 写分镜 |
+| `studio_edit` | `op: probe\|trim\|concat\|audio\|render\|clips\|projects`, `input`/`inputs[]`, `startSec`/`endSec`, `transitionSec`, `audioOp`, `projectId` | **视频剪辑**：裁切 / 拼接 / 音轨 / 出片 |
 
 > ⚠️ `studio_script` / `studio_mw` 已随剧本页、模特工坊一并删除，不再存在。
-> 当前注册的工具**恰好 13 个**，以上四张表合起来就是全部。
+> 当前注册的工具**恰好 14 个**，以上五张表合起来就是全部。
+
+### 视频剪辑（studio_edit）
+
+最常用的三条链路：
+
+```
+# 1) 掐掉头尾，得到一段
+studio_edit { op:'trim', input:'outputs/job_xxx.mp4', startSec:1.5, endSec:8 }
+
+# 2) 按顺序把几段接起来（硬切快、带转场需重编码）
+studio_edit { op:'concat', inputs:['outputs/a.mp4','outputs/b.mp4'], transitionSec:0.5 }
+
+# 3) 一条命令从片段列表直接出片（带 BGM 替换）
+studio_edit { op:'render',
+  clips:[{rel:'outputs/a.mp4',startSec:0,endSec:2},{rel:'outputs/b.mp4',startSec:1}],
+  audio:{mode:'bgm', bgmRel:'assets/bgm.mp3', bgmVolume:0.5, replaceOriginal:true},
+  transitionSec:0.4 }
+```
+
+要点：
+- 工具里音轨子操作用 **`audioOp`**（顶层 `op` 已被占用），取值 `strip|volume|bgm`。
+- 只接受 `dataDir` 内的路径；外部素材先走素材库上传。
+- `concat` 会自动判断能否流复制：形状一致才 copy，否则重编码（避免花静默屏）。
+- 产物写 `data/edit/outputs/`，返回 `{rel, bytes, meta}`；用 `probe` 复核时长。
 
 ---
 
@@ -130,12 +155,38 @@ POST /jiuzhang/api/image/generate     {prompt, sizeId, seed, refImages[], projec
 ### 2.5 立绘拆解
 
 ```
-GET  /jiuzhang/api/breakdown/meta
-POST /jiuzhang/api/breakdown/preview  {character, outfit[], parts[], views[], expressions[], level}
-POST /jiuzhang/api/breakdown/generate 同上 + refImages[] + sizeId
+GET  /jiuzhang/api/breakdown/meta       → {defaultPrompt, maxChars, size}
+POST /jiuzhang/api/breakdown/preview    {prompt}                 → {prompt, chars, isDefault}
+POST /jiuzhang/api/breakdown/generate   {prompt, refImages[]}    → {id, refCount, chars}
 ```
 
-**level**：`standard`（三视图+服装+部件）/ `full`（与 standard 同内容，表情差分已移除）/ `parts`（纯部件）
+**只有一个可调项：`prompt`（整段提示词）。**
+
+- 不传 / 传空串 → 用 `meta.defaultPrompt`（三视图角色设定卡）
+- 用户改什么就提交什么：后端**不拼装、不改写、不追加**，只 `trim`
+- 超 `maxChars`（4096）→ **400 `PROMPT_TOO_LONG`**，不静默截断
+- 尺寸固定横版 2368×1776（4.2MP），没有 sizeId
+
+> ⚠️ 档位（`level`）与结构化字段（`character` / `outfit` / `parts` / `views` /
+> `notes` / `expressions` / `sizeId`）**已作废**：传了不报错，但不影响提示词，
+> 响应里回 `legacyFieldsIgnored` 提醒调用方改直接写 `prompt`。
+
+**换装类改动必须有授权句**：默认提示词里写着「文字里明确写出的要求优先于参考图」，
+用自定义提示词时也要保留同义的一句，否则参考图会把你的改动盖回去。
+
+**页面**：`#/breakdown` 首屏直接落在「② 改提示词」，参考图在加载时自动选中
+第一张可用的大图。提示词面板右上角有五个按钮：
+
+| 按钮 | 作用 |
+|---|---|
+| 复制默认值 | 复制后端下发的默认提示词（不受输入框当前内容影响）|
+| 复制当前 | 复制输入框里这段（= 实际提交的那段）；框为空时回落默认值 |
+| 恢复默认 | 把输入框覆盖回默认提示词 |
+| 清空 | 清空输入框（提交时后端回落默认值）|
+| 校验 | 走 `preview`，回报提交用词字符数 |
+
+> ⚠️ 复制走的剪贴板在 Windows 上会把 `\n` 规范化为 `\r\n`（平台约定），
+> 复制结果的字节数会比页面显示的多，内容是一样的。
 
 ### 2.6 提示词编译
 
@@ -325,13 +376,19 @@ GET  /jiuzhang/api/post/fonts
 ### 4.3 做角色卡（立绘 → 拆解 → 入库）
 
 ```
-1) GET  /assets?type=character                                       → 选立绘
-2) POST /breakdown/preview {character, outfit[], parts[], level}    → 先看提示词
-3) POST /breakdown/generate 同上 + refImages + sizeId               → 出设定卡图
-4) POST /assets/archive {items:[{rel, type:'character_sheet'}]}     → 设定卡入库
-5) POST /vault/cards {name, traits, images:{sheet:[rel], origin:[rel]},
-                      refPolicy:{mode:'sheet-first', maxImages:1}}  → 建卡
+1) GET  /assets                                                     → 选立绘（拿 rel）
+2) GET  /breakdown/meta                                             → 取默认提示词
+   （要换装/加视角：在默认提示词上改，再把整段作为 prompt 提交）
+3) POST /breakdown/preview  {prompt}                                → 先看提交用词
+4) POST /breakdown/generate {prompt, refImages:[rel]}                → 出设定卡图
+5) POST /assets/archive {items:[{rel, type:'character_sheet'}]}      → 设定卡入库
+6) POST /vault/cards {name, traits, images:{sheet:[rel], origin:[rel]},
+                      refPolicy:{mode:'sheet-first', maxImages:1}}   → 建卡
 ```
+
+**提示词即唯一输入**：不传 `prompt` 就是用默认三视图设定卡。
+想让角色换一套衣服，直接改提示词里对应的服装段落 —— 但必须保留
+「文字里明确写出的要求优先于参考图」这条授权句，否则参考图会盖掉改动。
 
 ### 4.4 长视频：续写批次（替代已删除的剧本/漫画流水线）
 

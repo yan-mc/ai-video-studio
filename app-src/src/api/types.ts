@@ -375,6 +375,33 @@ export interface HealthPayload {
 }
 
 /**
+ * ComfyUI 进程状态（顶栏启停按钮）。
+ *
+ * `running` 以「端口是否真的能连上」为准，不是靠进程名猜 ——
+ * 机器上可能有多个 python，也可能用户在别的终端起了一个。
+ */
+export interface ComfyStatus {
+  ok?: boolean;
+  running: boolean;
+  port: number;
+  url: string;
+  /** ai-runtime 目录；为空表示找不到 start-h3.ps1，界面上应禁用启停 */
+  runtimeDir: string;
+  canControl: boolean;
+  detail: string;
+}
+
+export interface ComfyControlResult {
+  ok: boolean;
+  detail: string;
+  alreadyRunning?: boolean;
+  alreadyStopped?: boolean;
+  port?: number;
+  pid?: number;
+  phase?: 'stop' | 'start';
+}
+
+/**
  * 加速方案选项。
  *
  * 每个方案对应一组 (LoRA, 采样器, 调度器, 步数, shift)，

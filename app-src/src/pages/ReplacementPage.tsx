@@ -47,7 +47,18 @@ interface ReplaceMeta {
   presets: Array<{ id: string; label: string; desc: string }>;
   styles: Array<{ id: string; name: string; category: string }>;
   lightings: Array<{ id: string; name: string; ratio: string | null; zh: string }>;
-  accelPlans: Array<{ id: string; label: string; steps: number; hint: string; isDefault: boolean }>;
+  /**
+   * `stepsRange` 存在 = 该方案的步数**用户可调**（目前只有 `none`）。
+   * 蒸馏学生没有这个字段：它的步数是训练配置，改了就是分布外。
+   */
+  accelPlans: Array<{
+    id: string;
+    label: string;
+    steps: number;
+    stepsRange?: { min: number; max: number; step: number };
+    hint: string;
+    isDefault: boolean;
+  }>;
   contextLengths: Array<{ id: string; label: string; seg: number }>;
   limits: { segmentSec: number; maxSourceSec: number; maxSegments: number; refImages: number };
 }
@@ -377,20 +388,59 @@ export function ReplacementPage() {
   }, [accelPlan, meta, stepsTouched]);
 
   /**
-   * 当前方案与步数是否匹配。
+   * 当前方案的步数配置，以及「填的值是否合适」。
    *
-   * 只做提示，不强制改 —— 用户可能有意跑非推荐步数（比如用 dmad8 但想要
-   * 12 步的折中效果）。但 `none` 方案步数太低必须明确警告：那不是折中，
-   * 是没跑完去噪。
+   * ==========================================================================
+   * 两种方案，两套规则
+   * ==========================================================================
+   *
+   * ① **蒸馏学生**（dmad8 / dmad4）：步数是训练设定，不是可调参数。
+   *    偏离推荐值属于「分布外」—— 能跑，质量下滑，但不会出废片。
+   *
+   * ② **原模型**（none）：步数是自由变量，有 `stepsRange`。
+   *    · 低于 min → 去噪没跑完，**废片**
+   *    · 高于 max → 能跑但只是烧时间
+   *    · 区间内   → 正常，不提示
+   *
+   * 所以这里只对「不合法」的情况返回提示对象，合法时返回 null。
    */
   const stepMismatch = useMemo(() => {
     const plan = (meta?.accelPlans ?? []).find((p) => p.id === accelPlan);
     if (!plan) return null;
     const want = Number(plan.steps) || 0;
     const got = Number(steps) || 0;
-    if (!want || !got || want === got) return null;
-    const severe = accelPlan === 'none' && got < Math.ceil(want * 0.5);
-    return { want, got, severe, label: plan.label };
+    if (!want || !got) return null;
+
+    const range = plan.stepsRange;
+    if (range) {
+      // 可调方案：只在不合法区间提示，区间内一律放行
+      if (got < range.min) {
+        return {
+          want, got, severe: true, label: plan.label, range,
+          message: `不加速却只跑 ${got} 步 —— 原模型建议 ${want} 步，低于 ${range.min} 步去噪远未完成，出片会明显模糊。`,
+          fixLabel: `改为 ${Math.min(want, range.max)} 步`,
+          fixValue: Math.min(want, range.max),
+        };
+      }
+      if (got > range.max) {
+        return {
+          want, got, severe: false, label: plan.label, range,
+          message: `跑 ${got} 步超过建议上限 ${range.max} 步 —— 能跑，但收益递减、耗时线性增长。`,
+          fixLabel: `改为 ${range.max} 步`,
+          fixValue: range.max,
+        };
+      }
+      return null;   // 区间内正常
+    }
+
+    // 蒸馏学生：偏离即分布外
+    if (want === got) return null;
+    return {
+      want, got, severe: false, label: plan.label, range: undefined,
+      message: `「${plan.label}」按 ${want} 步训练，你填了 ${got} 步 —— 可以跑，但属于分布外，质量不保证。`,
+      fixLabel: `改为 ${want} 步`,
+      fixValue: want,
+    };
   }, [meta, accelPlan, steps]);
 
   const loadTasks = useCallback(async () => {
@@ -845,16 +895,26 @@ export function ReplacementPage() {
                     />
                   </Field>
                   <Field
-                    label="采样步数"
+                    label={
+                      stepMismatch?.range
+                        ? `采样步数（可调 ${stepMismatch.range.min}–${stepMismatch.range.max}）`
+                        : '采样步数'
+                    }
                     hint={
-                      stepMismatch
-                        ? `当前方案「${stepMismatch.label}」推荐 ${stepMismatch.want} 步，你填了 ${stepMismatch.got} 步`
-                        : '与加速方案成套：切方案会自动同步推荐步数，手动改过后不再自动覆盖'
+                      stepMismatch?.range
+                        ? `原模型步数自由可调。默认 ${stepMismatch.want} 步是质量优先，`
+                          + `想快可以先试 ${stepMismatch.range.min + 5}–${stepMismatch.range.min + 10} 步。`
+                        : stepMismatch
+                          ? `当前方案「${stepMismatch.label}」推荐 ${stepMismatch.want} 步，你填了 ${stepMismatch.got} 步`
+                          : '与加速方案成套：切方案会自动同步推荐步数，手动改过后不再自动覆盖'
                     }
                   >
                     <Input
                       type="number"
                       value={steps}
+                      min={stepMismatch?.range?.min}
+                      max={stepMismatch?.range?.max}
+                      step={stepMismatch?.range?.step ?? 1}
                       onChange={(e) => {
                         setStepsTouched(true);
                         setSteps((e.target as HTMLInputElement).value);
@@ -863,23 +923,25 @@ export function ReplacementPage() {
                   </Field>
 
                   {/*
-                    步数不匹配提示。
-                    `none` 方案步数太低是**废片级**问题（原模型没跑完去噪），
-                    必须红色告警；其他方案只是分布外，给黄色提示就够。
+                    只有在「不合法」时才提示：
+                      · none 低于 min  → 红色（废片级：去噪没跑完）
+                      · none 高于 max  → 黄色（烧时间）
+                      · 蒸馏偏离训练步数 → 黄色（分布外）
+                    区间内不打扰用户。
                   */}
                   {stepMismatch ? (
                     <Alert tone={stepMismatch.severe ? 'danger' : 'warn'}>
-                      {stepMismatch.severe
-                        ? `不加速却只跑 ${stepMismatch.got} 步 —— 原模型在 ${stepMismatch.got} 步下去噪远未完成，出片会明显模糊。`
-                          + `建议 ${stepMismatch.want} 步，至少不要低于 ${Math.ceil(stepMismatch.want * 0.5)} 步。`
-                        : `「${stepMismatch.label}」按 ${stepMismatch.want} 步设计，你填了 ${stepMismatch.got} 步 —— 可以跑，但属于分布外，质量不保证。`}
+                      {stepMismatch.message}
                       <div style={{ marginTop: 6 }}>
                         <Button
                           size="sm"
                           variant="ghost"
-                          onClick={() => { setStepsTouched(false); setSteps(String(stepMismatch.want)); }}
+                          onClick={() => {
+                            setStepsTouched(false);
+                            setSteps(String(stepMismatch.fixValue));
+                          }}
                         >
-                          改为 {stepMismatch.want} 步
+                          {stepMismatch.fixLabel}
                         </Button>
                       </div>
                     </Alert>

@@ -20,11 +20,11 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
  */
 export const ROUTES = [
   // 制作
-  'render', 'storyboard', 'workshop',
+  'render', 'replace', 'storyboard', 'workshop',
   // 资源
   'assets', 'vault', 'projects',
   // 工具
-  'breakdown', 'previz', 'canvas', 'image',
+  'edit', 'breakdown', 'previz', 'canvas', 'image',
   // 系统
   'jobs', 'settings',
 ] as const;

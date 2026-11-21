@@ -16,6 +16,8 @@ import type {
   Asset,
   AssetQuery,
   CancelResult,
+  ComfyControlResult,
+  ComfyStatus,
   GenerateInput,
   H3Analysis,
   H3AnalyzeInput,
@@ -242,6 +244,12 @@ export const api = {
   meta: () => request<MetaPayload>('GET', '/meta'),
   health: () => request<HealthPayload>('GET', '/health'),
   monitor: () => request<MonitorPayload>('GET', '/monitor'),
+
+  /* ComfyUI 进程控制（顶栏启停按钮） */
+  comfyStatus: () => request<ComfyStatus>('GET', '/comfy/status'),
+  comfyStart: () => request<ComfyControlResult>('POST', '/comfy/start', {}),
+  comfyStop: () => request<ComfyControlResult>('POST', '/comfy/stop', {}),
+  comfyRestart: () => request<ComfyControlResult>('POST', '/comfy/restart', {}),
 
   /* 配置 */
   getConfig: () => request<AppConfig>('GET', '/config'),
@@ -517,6 +525,101 @@ export const api = {
   /** 把候选 LoRA 摊开校验（单选替换 / 同类衰减 / 总强度看门狗） */
   loraSolve: (input: { items: Array<{ name: string; strength?: number }>; maxSlots?: number }) =>
     request<LoraSolveResult>('POST', '/lora/solve', input),
+
+  /* ------------------------- 角色替换（换人） ------------------------- */
+
+  /**
+   * 换人页元信息：默认参数、提示词可改字段、预设/画风/打光/加速方案。
+   *
+   * 这条业务线与常规渲染**完全隔离** —— 它不读项目、不读镜头卡、不读角色卡，
+   * 参数也独立成一份。见 host/services/replace.js 的文件头注释。
+   */
+  replaceMeta: () => request<{
+    ok: boolean;
+    defaults: Record<string, unknown>;
+    promptFields: Array<{
+      key: string;
+      label: string;
+      hint: string;
+      example: string;
+      required: boolean;
+      multiline?: boolean;
+    }>;
+    presets: Array<{ id: string; label: string; desc: string }>;
+    styles: Array<{ id: string; name: string; category: string }>;
+    lightings: Array<{ id: string; name: string; ratio: string | null; zh: string }>;
+    accelPlans: Array<{ id: string; label: string; steps: number; hint: string; isDefault: boolean }>;
+    contextLengths: Array<{ id: string; label: string; seg: number }>;
+    limits: { segmentSec: number; maxSourceSec: number; maxSegments: number; refImages: number };
+  }>('GET', '/replace/meta'),
+
+  /**
+   * 换人提示词模板 —— 前端那一个可编辑框的预填内容。
+   *
+   * `refCount` 决定模板里生成几组 `<Subject N>` / `<Picture N>`，
+   * 与参考图选择数量一致。用户拿到后可以任意改（加角色、删角色、
+   * 补充约束），提交时整段原样使用。
+   */
+  replacePromptTemplate: (refCount: number) =>
+    request<{ ok: boolean; prompt: string; chars: number; refCount: number }>(
+      'POST',
+      '/replace/prompt-template',
+      { refCount },
+    ),
+
+  /** 预览换人提示词（不改状态）—— 保留给结构化路径与旧调用 */
+  replacePreviewPrompt: (input: {
+    roles: Array<{ sourceDesc: string; targetDesc: string; pictureIndex?: number }>;
+    shotBeats?: string;
+    extraNote?: string;
+  }) => request<{ ok: boolean; prompt: string; chars: number }>('POST', '/replace/preview-prompt', input),
+
+  /** 分析源视频：时长、是否有音轨、会切成几段 */
+  replacePlan: (input: {
+    sourceRel: string;
+    segmentSec?: number;
+    /** 续写链：段间用真实 AV latent 衔接 */
+    continuation?: boolean;
+    /** 续写重叠窗口（'5'|'22'|'39'|'56'） */
+    contextLength?: string;
+  }) =>
+    request<{
+      ok: boolean;
+      durationSec: number;
+      hasAudio: boolean;
+      width: number;
+      height: number;
+      fps: number;
+      segments: Array<{
+        index: number; startSec: number; durationSec: number;
+        deliverSec?: number; requestSec?: number; overlapSec?: number;
+      }>;
+      warnings: string[];
+      mode?: string;
+      contextLength?: string;
+      trimFrames?: number;
+      overlapSec?: number;
+      plannedTotalSec?: number;
+    }>('POST', '/replace/plan', input),
+
+  replaceList: () => request<unknown[]>('GET', '/replace/tasks'),
+
+  replaceCreate: (input: Record<string, unknown>) =>
+    request<Record<string, unknown>>('POST', '/replace/tasks', input),
+
+  replaceGet: (id: string) =>
+    request<Record<string, unknown>>('GET', `/replace/tasks/${encodeURIComponent(id)}`),
+
+  replaceRemove: (id: string) =>
+    request<{ ok: boolean; removed: string }>('DELETE', `/replace/tasks/${encodeURIComponent(id)}`),
+
+  /** 启动批次（异步；进度靠 replaceGet 轮询） */
+  replaceRun: (id: string) =>
+    request<{ ok: boolean; replaceId: string; status: string }>(
+      'POST',
+      `/replace/run/${encodeURIComponent(id)}`,
+      {},
+    ),
 
   /* ------------------------- 南风续写批次 ------------------------- */
 

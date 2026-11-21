@@ -320,15 +320,42 @@ async function moduleChecks() {
    * 现在的规则：低于推荐步数 50%（50 → 25）判为不可用（ok:false），
    * generator 会回退到推荐步数并写明「已忽略你填的 X 步」。
    */
-  await checkAsync('加速方案：none 步数过低必须判为不可用（否则出废片不报错）', async () => {
-    const { checkSteps } = await import('../host/services/accel-plan.js');
-    assert.equal(checkSteps('none', 8).ok, false, '8 步跑原模型必须被拒');
-    assert.equal(checkSteps('none', 20).ok, false, '20 步仍远低于 50 步，应被拒');
-    assert.equal(checkSteps('none', 25).ok, true, '50% 是下限，25 步放行');
-    assert.equal(checkSteps('none', 50).ok, true, '推荐值必须放行');
+  await checkAsync('加速方案：none 步数按 stepsRange 校验（低于 min 拒绝）', async () => {
+    const { checkSteps, planForShot } = await import('../host/services/accel-plan.js');
+    const p = planForShot('none');
+    const range = p.plan.stepsRange;
+    assert.ok(range, 'none 方案必须带 stepsRange');
+    assert.equal(checkSteps('none', 8).ok, false, '8 步远低于下限必须被拒');
+    assert.equal(checkSteps('none', range.min - 1).ok, false, `低于 ${range.min} 必须被拒`);
+    assert.equal(checkSteps('none', range.min).ok, true, `等于下限 ${range.min} 放行`);
+    assert.equal(checkSteps('none', 30).ok, true, '中间值放行（用户常用的折中档）');
+    assert.equal(checkSteps('none', 50).ok, true, '推荐值放行');
+    assert.equal(checkSteps('none', range.max + 10).ok, true, '超上限只是警告不是拒绝');
+    assert.match(checkSteps('none', range.max + 10).warning, /收益递减/);
     // 蒸馏学生仍然只警告不拒绝（它是分布外而非没跑完）
     assert.equal(checkSteps('dmad8', 20).ok, true);
     assert.match(checkSteps('dmad8', 20).warning, /分布外/);
+  });
+
+  /**
+   * 超时必须按截止时间算，不能是固定轮询次数。
+   *
+   * 旧实现 `MAX_POLL=600 × 3000ms` = 硬上限 30 分钟 —— 不加速方案跑不完，
+   * 被打断时 ComfyUI 还在继续跑，GPU 白烧。
+   */
+  await checkAsync('ComfyUI 等待：超时按截止时间算，且可配置', async () => {
+    const src = await (await import('node:fs/promises'))
+      .readFile(new URL('../host/services/comfy-client.js', import.meta.url), 'utf8');
+    assert.match(src, /deadline/, '必须用 deadline 判断超时');
+    assert.doesNotMatch(src, /for \(let i = 0; i < MAX_POLL/, '不应再用固定轮询次数');
+    assert.match(src, /JZ_COMFY_TIMEOUT_MIN/, '支持环境变量调大超时');
+    assert.match(src, /comfyTimeoutMin/, '支持配置项调大超时');
+
+    const C = await import('../host/config.js');
+    const cfg = C.loadConfig();
+    assert.equal(typeof cfg.comfyTimeoutMin, 'number');
+    assert.ok(cfg.comfyTimeoutMin >= 60, '默认超时至少要能覆盖 50 步长片');
+    assert.ok(C.WRITABLE_CONFIG_KEYS.includes('comfyTimeoutMin'), '必须可通过配置 API 修改');
   });
 
   /**

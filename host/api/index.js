@@ -11,6 +11,7 @@ import { loadConfig, saveConfig, maskConfig, sanitizeConfigPatch, resetConfigCac
 import { guard, safeId, safeJoin, resolveUserPath, getWriteToken, isSameOrigin as _isSameOrigin, isLoopbackHost as _isLoopbackHost } from '../security.js';
 import { dirs, projects, newProject, newShot, validateShot, PROFILES, resolutionFor, h3Length, H3_MODEL_SLOTS, NODE_TYPES, NODE_LABELS, ASSET_TYPES, ASSET_TYPE_LABELS, PROJECT_CATEGORY_LABELS, normalizeMode, normalizeActors, normalizeProps, normalizeCamera3d, listActionCatalog } from '../store/models.js';
 import * as comfy from '../services/comfy-client.js';
+import * as comfyControl from '../services/comfy-control.js';
 import * as mockBackend from '../services/mock-backend.js';
 import { runJob, cancelJob, runtimeStats, CancelledError } from '../services/job-runner.js';
 import { newJob, jobs as jobsStore, isLocalBackendOf } from '../services/job-store.js';
@@ -21,7 +22,10 @@ import { packGraph, unpackGraph, IMG_REF_PREFIX } from '../store/image-pool.js';
 import { readJson, writeJson, updateJson } from '../store/json-store.js';
 import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, LIGHTING_PRESETS, H3_MODES, H3_LIMITS, truncatePromptKeepFields } from '../services/h3-prompt.js';
 import { H3_IMAGE_MODELS, H3_IMAGE_SIZES, IMAGE_VAE, IMAGE_CLIP, IMAGE_SAMPLING, checkImageModels } from '../services/h3-image.js';
-import { BREAKDOWN_LEVELS, BREAKDOWN_SIZES, buildBreakdownPrompt, breakdownLevel, breakdownSize } from '../services/breakdown.js';
+import {
+  BREAKDOWN_PROMPT_MAX_CHARS, BREAKDOWN_SIZE, DEFAULT_BREAKDOWN_PROMPT,
+  buildBreakdownPrompt, isDefaultBreakdownPrompt, legacyBreakdownFields, breakdownSize,
+} from '../services/breakdown.js';
 import {
   readProjectCards, writeProjectCards,
 } from '../services/character-vault.js';
@@ -97,6 +101,14 @@ function accelPlanList() {
       label: p.label,
       family: p.family,
       steps: p.steps,
+      /**
+       * 步数可调范围。没有这个字段的方案 = 步数由训练设定决定，不可调
+       * （蒸馏学生的步数是它的训练配置，改了就是分布外）。
+       *
+       * `none` 方案有它 —— 原模型步数是自由变量，前端据此渲染输入框的
+       * min/max/step，并给出「25–30 是折中档」之类的提示。
+       */
+      ...(p.stepsRange ? { stepsRange: p.stepsRange } : {}),
       sampler: p.sampler,
       scheduler: p.scheduler,
       shift: p.shiftVideo != null
@@ -773,6 +785,35 @@ export async function handleApi(req, res) {
         events: { clients: clientCount() },
       });
     }
+    /* ---------------------------------------------------- ComfyUI 进程控制 */
+
+    /**
+     * 顶栏那个「启动/关闭 ComfyUI」按钮用的三个路由。
+     *
+     * 为什么需要它：本地「取消」只对正在跑的那一单发 /interrupt，
+     * 已经排进 ComfyUI 队列、还没开始的任务不会被清掉 —— 用户看到界面停了，
+     * 但 ComfyUI 侧还挂着上一单的段，下一单提交后仍会依次执行，
+     * 表现就是"前面的续写还在"。重启进程能一次性清掉队列、显存碎片与节点缓存。
+     */
+    if (req.method === 'GET' && route === '/comfy/status') {
+      return sendJson(res, 200, { ok: true, ...(await comfyControl.comfyStatus()) });
+    }
+
+    if (req.method === 'POST' && route === '/comfy/stop') {
+      const r = await comfyControl.withLock(() => comfyControl.stopComfy());
+      return sendJson(res, r.ok ? 200 : 500, r);
+    }
+
+    if (req.method === 'POST' && route === '/comfy/start') {
+      const r = await comfyControl.withLock(() => comfyControl.startComfy());
+      return sendJson(res, r.ok ? 200 : 500, r);
+    }
+
+    if (req.method === 'POST' && route === '/comfy/restart') {
+      const r = await comfyControl.withLock(() => comfyControl.restartComfy());
+      return sendJson(res, r.ok ? 200 : 500, r);
+    }
+
     // 加速方案列表（含每个方案的实际参数，便于前端展示与排障）
     if (req.method === 'GET' && route === '/accel/plans') {
       return sendJson(res, 200, {
@@ -1307,22 +1348,47 @@ export async function handleApi(req, res) {
       });
     }
 
-    /* ---------------- 拆解图 / 人设卡 ---------------- */
+    /* ---------------- 立绘拆解 / 角色设定卡 ---------------- */
+    /**
+     * 这一组路由**只有一个可调项：提示词**。
+     *
+     * 档位（level）与尺寸（sizeId）已从产品里移除：
+     *   · 档位里 `full` 与 `standard` 逐字相同（表情差分区 1.0.2 已移除），
+     *     在卖一个不存在的差异；
+     *   · 尺寸里能真正跑稳的只有横版这一档（2048² 已经吃满 12GB 卡的显存）。
+     * 结构化字段（character / outfit / parts / views / notes）同样作废 ——
+     * 它们把正文拼死了，用户想换衣服/加视角时改不动，见 breakdown.js 文件头。
+     *
+     * 现在前端与后端对提示词是**同一份字符串**：前端原样展示默认值，
+     * 用户改完原样提交，后端不做任何拼装。
+     */
     if (req.method === 'GET' && route === '/breakdown/meta') {
       return sendJson(res, 200, {
-        levels: BREAKDOWN_LEVELS,
-        sizes: BREAKDOWN_SIZES,
+        // 默认提示词 —— 前端用它初始化那个大输入框
+        defaultPrompt: DEFAULT_BREAKDOWN_PROMPT,
+        maxChars: BREAKDOWN_PROMPT_MAX_CHARS,
+        // 固定输出尺寸（只读，不再作为可选项）
+        size: BREAKDOWN_SIZE,
+        /** 已移除的旧字段；前端据此显示"这些不再影响提示词" */
+        removedFields: ['character', 'outfit', 'parts', 'views', 'notes', 'level', 'sizeId'],
       });
     }
     if (req.method === 'POST' && route === '/breakdown/preview') {
       const body = await readJsonBody(req);
-      const lv = breakdownLevel(body.level ?? 'standard');
-      // 只构建一次：以前 preview 和 chars 各调一次，纯性能浪费
-      const prompt = buildBreakdownPrompt(body, lv.id);
+      const prompt = buildBreakdownPrompt(body);
+      const legacyUsed = legacyBreakdownFields(body);
       return sendJson(res, 200, {
-        level: lv.id,
         prompt,
         chars: prompt.length,
+        maxChars: BREAKDOWN_PROMPT_MAX_CHARS,
+        isDefault: isDefaultBreakdownPrompt(prompt),
+        size: BREAKDOWN_SIZE,
+        ...(legacyUsed.length
+          ? {
+            legacyFieldsIgnored: legacyUsed,
+            note: `字段 ${legacyUsed.join(' / ')} 已不再影响提示词，请直接改写 prompt。`,
+          }
+          : {}),
       });
     }
     if (req.method === 'POST' && route === '/breakdown/generate') {
@@ -1331,9 +1397,26 @@ export async function handleApi(req, res) {
       const wf = loadImageWorkflow();
       if (!wf) return sendJson(res, 500, { error: 'WORKFLOW_MISSING' });
 
-      const lv = breakdownLevel(body.level ?? 'standard');
-      const size = breakdownSize(body.sizeId ?? 'square');
-      const prompt = buildBreakdownPrompt(body, lv.id);
+      const prompt = buildBreakdownPrompt(body);
+      const size = breakdownSize();
+      const legacyUsed = legacyBreakdownFields(body);
+
+      /**
+       * 超长在**请求期**就挡住，而不是让 downstream 的
+       * `normalizeImagePrompt` 静默 `slice(0, 4096)`。
+       *
+       * 静默截断是"改了提示词却没生效"最隐蔽的一种：用户在末尾加的
+       * "换成红色礼裙"如果刚好被截掉，出图没变化，没有任何报错可查。
+       */
+      if (prompt.length > BREAKDOWN_PROMPT_MAX_CHARS) {
+        return sendJson(res, 400, {
+          error: 'PROMPT_TOO_LONG',
+          detail: `提示词 ${prompt.length} 字符，超过上限 ${BREAKDOWN_PROMPT_MAX_CHARS}。`
+            + '请精简后再提交（不会静默截断，以免你写的要求被悄悄丢掉）。',
+          chars: prompt.length,
+          maxChars: BREAKDOWN_PROMPT_MAX_CHARS,
+        });
+      }
 
       /**
        * 参考图：绝对路径或 dataDir 相对路径。
@@ -1375,14 +1458,19 @@ export async function handleApi(req, res) {
         });
       }
 
-      // 尺寸超限在**请求期**就挡住，而不是等任务跑起来才在异步里炸
+      /**
+       * 尺寸固定，但**仍然做请求期校验**：`imageMaxMP` 是用户可改的配置，
+       * 有人把它调到 3.0 之后，这一档就该被显式拒绝，而不是等 ComfyUI OOM。
+       */
       const mp = (size.w * size.h) / 1e6;
       const maxMp = Number(cfg.imageMaxMP) || 4.3;
       if (mp > maxMp) {
         return sendJson(res, 400, {
           error: 'IMAGE_SIZE_TOO_LARGE',
-          detail: `${size.w}×${size.h} ≈ ${mp.toFixed(2)}MP，超过上限 ${maxMp}MP。`,
-          sizes: BREAKDOWN_SIZES,
+          detail: `${size.w}×${size.h} ≈ ${mp.toFixed(2)}MP，超过上限 ${maxMp}MP。`
+            + '立绘拆解固定用这一档尺寸；要出图请调大设置里的「单张出图面积上限」。',
+          size,
+          maxMP: maxMp,
         });
       }
 
@@ -1396,7 +1484,7 @@ export async function handleApi(req, res) {
           // 标记这是立绘拆解任务 —— 图像页的「最近任务」要把它排除，
           // 否则两类任务混在一起看不出哪个是哪个（它们 backendId 相同）。
           breakdown: true,
-          imageSizeId: body.sizeId ?? 'square',
+          imageSizeId: size.id,
           width: size.w,
           height: size.h,
           seed: body.seed ?? Math.floor(Math.random() * 2147483647),
@@ -1410,12 +1498,18 @@ export async function handleApi(req, res) {
         workflow: wf,
         job: running,
         prompt,
-        shot: { refs: { images: refAbs }, imageSizeId: body.sizeId },
+        shot: { refs: { images: refAbs }, imageSizeId: size.id },
         cfg,
       }), ctx).catch(() => {});
 
       return sendJson(res, 200, {
-        ...job, refCount: refAbs.length, level: lv.id, badRels,
+        ...job,
+        refCount: refAbs.length,
+        chars: prompt.length,
+        size,
+        badRels,
+        // 老脚本传了结构化字段 → 明确指出它们已不生效，不让调用方蒙在鼓里
+        ...(legacyUsed.length ? { legacyFieldsIgnored: legacyUsed } : {}),
       });
     }
 
@@ -1898,7 +1992,7 @@ export async function handleApi(req, res) {
       if (!isServableDataPath(cfg.dataDir, abs)) {
         return sendJson(res, 403, {
           error: 'FORBIDDEN_PATH',
-          detail: '只允许读取产物与素材子目录（outputs/assets/previz/post/comic/workflows）',
+          detail: '只允许读取产物与素材子目录（outputs/assets/previz/post/edit/workflows）',
           path: rel,
         });
       }
@@ -1978,6 +2072,221 @@ export async function handleApi(req, res) {
       return sendJson(res, 200, { fonts: listChineseFonts() });
     }
 
+    /* ==================================================================
+     * 视频剪辑 —— 裁切 / 拼接 / 音轨
+     * ==================================================================
+     *
+     * 与 /h3/film/render 的分工：
+     *   · film/render 是「成片合成」的一步式动作（给一串路径就拼出来）；
+     *   · /edit/* 是「可反复编辑的工程」——片段有序列表 + 裁剪区间 + 音轨设置，
+     *     能存盘、能改、能只重渲一次。
+     * 两者共用同一套 ffmpeg 基础（ffmpeg-tools），但工程模型不同，不强行合并。
+     *
+     * 全部写方法都要 X-JZ-Token（由上面的 guard 统一校验），
+     * 路径一律走 services/edit.js 的 resolveInput（dataDir 边界）。
+     */
+    if (req.method === 'GET' && route === '/edit/clips') {
+      return sendJson(res, 200, ctx.edit.listClips());
+    }
+    if (req.method === 'POST' && route === '/edit/probe') {
+      const body = await readJsonBody(req);
+      if (!body.input) return sendJson(res, 400, { error: 'INPUT_REQUIRED' });
+      return sendJson(res, 200, await ctx.edit.probe(body.input));
+    }
+    if (req.method === 'POST' && route === '/edit/trim') {
+      const body = await readJsonBody(req);
+      if (!body.input) return sendJson(res, 400, { error: 'INPUT_REQUIRED' });
+      return sendJson(res, 200, await ctx.edit.trim(body));
+    }
+    if (req.method === 'POST' && route === '/edit/concat') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, await ctx.edit.concat(body));
+    }
+    if (req.method === 'POST' && route === '/edit/audio') {
+      const body = await readJsonBody(req);
+      if (!body.input) return sendJson(res, 400, { error: 'INPUT_REQUIRED' });
+      return sendJson(res, 200, await ctx.edit.audio(body));
+    }
+    if (req.method === 'POST' && route === '/edit/render') {
+      const body = await readJsonBody(req);
+      return sendJson(res, 200, await ctx.edit.render(body));
+    }
+    if (req.method === 'GET' && route === '/edit/projects') {
+      return sendJson(res, 200, await ctx.edit.listProjects());
+    }
+    if (req.method === 'POST' && route === '/edit/projects') {
+      const body = await readJsonBody(req);
+      const id = safeId(String(body.id || `edit_${Date.now().toString(36)}`));
+      return sendJson(res, 200, { ok: true, project: ctx.edit.saveProject(id, body) });
+    }
+    // 参数化：/edit/projects/:id —— 与 /projects/:id 同理，用 match 而非 ===
+    {
+      const m = route.match(/^\/edit\/projects\/([^/]+)$/);
+      if (m) {
+        const id = m[1];
+        if (req.method === 'GET') {
+          return sendJson(res, 200, { ok: true, project: ctx.edit.getProject(id) });
+        }
+        if (req.method === 'DELETE') {
+          return sendJson(res, 200, ctx.edit.deleteProject(id));
+        }
+        if (req.method === 'POST' || req.method === 'PATCH' || req.method === 'PUT') {
+          const body = await readJsonBody(req);
+          return sendJson(res, 200, { ok: true, project: ctx.edit.saveProject(id, body) });
+        }
+      }
+    }
+
+    /* ==================================================================
+     * 角色替换（换人）—— 独立业务线，与常规渲染不共享任何数据
+     * ==================================================================
+     *
+     * 为什么整套 API 都挂在 /replace/* 下、且**完全不读** projects/ 与 shots/：
+     * 见 services/replace.js 的文件头注释（角色卡会顶掉手工参考图编号）。
+     * 这条线只有三个概念：源视频、参考图、提示词。少一层就少一类静默故障。
+     */
+    if (req.method === 'GET' && route === '/replace/meta') {
+      const R = await import('../services/replace.js');
+      const presets = await import('../services/nanfeng/presets.js');
+      return sendJson(res, 200, {
+        ok: true,
+        defaults: R.REPLACE_DEFAULTS,
+        promptFields: R.PROMPT_FIELDS,
+        presets: presets.listBuiltinPresets(),
+        styles: (await import('../services/h3-prompt.js')).STYLE_PRESETS
+          .map((s) => ({ id: s.id, name: s.name, category: s.category })),
+        lightings: (await import('../services/h3-prompt.js')).LIGHTING_PRESETS
+          .map((l) => ({ id: l.id, name: l.name, ratio: l.ratio, zh: l.zh })),
+        accelPlans: accelPlanList(),
+        contextLengths: [
+          { id: '5', label: '5 帧 · 0.21s', seg: 0.21 },
+          { id: '22', label: '22 帧 · 0.92s', seg: 0.92 },
+          { id: '39', label: '39 帧 · 1.63s', seg: 1.63 },
+          { id: '56', label: '56 帧 · 2.33s（最大）', seg: 2.33 },
+        ],
+        limits: {
+          segmentSec: R.REPLACE_DEFAULTS.segmentSec,
+          maxSourceSec: R.REPLACE_DEFAULTS.maxSourceSec,
+          maxSegments: R.REPLACE_DEFAULTS.maxSegments,
+          refImages: 9,
+        },
+      });
+    }
+
+    /**
+     * 提示词模板 —— 前端那个**唯一的可编辑框**打开时预填的内容。
+     *
+     * 为什么把「谁换成谁」也并进这一个框：占位符表单只能表达一对一替换，
+     * 而真实需求常有多角色、某角色只在某几段出现、某配角保持不动等情况。
+     * 与其把表单做得越来越复杂，不如直接给一段改得动的文本 ——
+     * 模板里 `<Picture N>` 的编号与参考图选择顺序一一对应，
+     * 用户加一行就是多一个人，删一行就是少一个。
+     */
+    if (req.method === 'POST' && route === '/replace/prompt-template') {
+      const R = await import('../services/replace.js');
+      const body = await readJsonBody(req);
+      const refCount = Math.max(1, Math.min(9, Number(body.refCount) || 1));
+      const templates = [];
+      for (let i = 0; i < refCount; i += 1) {
+        templates.push({
+          pictureIndex: i + 1,
+          sourceDesc: `〔原角色${refCount > 1 ? i + 1 : ''}特征：发色/发型/服装/配饰〕`,
+          targetDesc: `〔目标角色${refCount > 1 ? i + 1 : ''}特征：发色/发型/服装/配饰〕`,
+        });
+      }
+      const prompt = R.buildReplacePrompt({
+        roles: templates,
+        shotBeats: '〔分段动作可选。每行一个 [Shot N]，不写就整段复刻原视频。〕',
+      });
+      return sendJson(res, 200, { ok: true, prompt, chars: prompt.length, refCount });
+    }
+
+    // 预览提示词（不改状态）—— 前端"可改字段"面板实时调用
+    if (req.method === 'POST' && route === '/replace/preview-prompt') {
+      const R = await import('../services/replace.js');
+      const body = await readJsonBody(req);
+      try {
+        const prompt = R.buildReplacePrompt({
+          roles: body.roles ?? [],
+          shotBeats: body.shotBeats ?? '',
+          extraNote: body.extraNote ?? '',
+        });
+        return sendJson(res, 200, { ok: true, prompt, chars: prompt.length });
+      } catch (e) {
+        return sendJson(res, 400, { error: String(e?.message || e) });
+      }
+    }
+
+    // 分析源视频 → 算分段（用户选完视频就能看到"会切成几段"）
+    if (req.method === 'POST' && route === '/replace/plan') {
+      const R = await import('../services/replace.js');
+      const body = await readJsonBody(req);
+      const abs = R.resolveReplaceInput(body.sourceRel, cfg);
+      const useCont = Boolean(body.continuation);
+      const plan = await R.planSegments(abs, cfg, {
+        segmentSec: Number(body.segmentSec) || undefined,
+        // 续写模式必须一起传下去 —— 漏了会让预览显示"独立重绘"的分段，
+        // 与实际执行（续写）完全对不上，用户看到的段数和交付时长全是错的
+        continuation: useCont,
+        contextLength: useCont ? String(body.contextLength ?? R.REPLACE_DEFAULTS.contextLength) : undefined,
+        segmentCount: Number(body.segmentCount) || undefined,
+      });
+      return sendJson(res, 200, { ok: true, ...plan });
+    }
+
+    if (req.method === 'GET' && route === '/replace/tasks') {
+      const R = await import('../services/replace.js');
+      const list = await R.replaceStore(cfg).list();
+      return sendJson(res, 200, list.slice().sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0)));
+    }
+
+    if (req.method === 'POST' && route === '/replace/tasks') {
+      const R = await import('../services/replace.js');
+      const body = await readJsonBody(req);
+      const task = await createReplaceTask(body, cfg);
+      return sendJson(res, 200, task);
+    }
+
+    if (req.method === 'DELETE' && route.startsWith('/replace/tasks/')) {
+      const id = safeId(decodeURIComponent(route.slice('/replace/tasks/'.length)));
+      const R = await import('../services/replace.js');
+      await R.replaceStore(cfg).remove(id);
+      return sendJson(res, 200, { ok: true, removed: id });
+    }
+
+    if (req.method === 'GET' && route.startsWith('/replace/tasks/')) {
+      const rest = route.slice('/replace/tasks/'.length);
+      const id = safeId(decodeURIComponent(rest.split('/')[0] ?? ''));
+      const R = await import('../services/replace.js');
+      const task = await R.replaceStore(cfg).get(id);
+      if (!task) return sendJson(res, 404, { error: 'REPLACE_NOT_FOUND' });
+      return sendJson(res, 200, task);
+    }
+
+    // 启动执行（异步：立刻返回，进度靠轮询 GET /replace/tasks/:id）
+    if (req.method === 'POST' && route.startsWith('/replace/run/')) {
+      const id = safeId(decodeURIComponent(route.slice('/replace/run/'.length)));
+      const R = await import('../services/replace.js');
+      const store = R.replaceStore(cfg);
+      const task = await store.get(id);
+      if (!task) return sendJson(res, 404, { error: 'REPLACE_NOT_FOUND' });
+      if (task.status === 'running' || task.status === 'cutting' || task.status === 'joining') {
+        return sendJson(res, 409, { error: 'REPLACE_ALREADY_RUNNING' });
+      }
+
+      const { runReplaceBatch } = await import('../services/replace-runner.js');
+      await store.upsert({ ...task, status: 'queued', error: null, updatedAt: Date.now() });
+      // 不 await：批次要跑几十分钟，HTTP 不能挂着
+      void runReplaceBatch({
+        replaceId: id,
+        cfg,
+        onProgress: (evt) => emit({ type: 'replace-progress', replaceId: id, ...evt }),
+      }).catch((e) => {
+        ctx.logger?.warn?.(`[jiuzhang] 换人批次失败 ${id}: ${String(e?.message || e)}`);
+      });
+      return sendJson(res, 200, { ok: true, replaceId: id, status: 'queued' });
+    }
+
     return sendJson(res, 404, { error: `UNKNOWN_ROUTE: ${req.method} ${route}` });
   } catch (err) {
     // 参数校验类错误应当回 400，而不是把所有异常都算成 500。
@@ -1991,6 +2300,142 @@ export async function handleApi(req, res) {
 }
 
 /* ------------------------------------------------------------ 辅助实现 */
+
+/**
+ * 创建一个换人任务（只是建记录，不启动）。
+ *
+ * 校验放在这里而不是等执行时：换人是长流程（切段 + N×8 分钟生成），
+ * 参数错了要尽量在**提交那一秒**报出来，而不是跑了半小时才发现
+ * 「参考图路径不存在」。
+ *
+ * @returns {Promise<object>} 落盘后的任务记录
+ */
+async function createReplaceTask(body, cfg) {
+  const R = await import('../services/replace.js');
+
+  const sourceRel = String(body.sourceRel ?? '').trim();
+  if (!sourceRel) throw new Error('PATH_REQUIRED: 必须指定源视频');
+  const sourceAbs = R.resolveReplaceInput(sourceRel, cfg, true);
+
+  /**
+   * 参考图：保持用户选择的顺序，**不做任何重排**。
+   *
+   * 这是换人线存在的核心理由 —— 常规渲染里角色卡会插队，
+   * 用户看到的 `<Picture 1>` 与实际提交的可能不是同一张。
+   * 这里 `refs.images` 的数组下标 +1 就是提示词里的 `<Picture N>`。
+   */
+  const refImages = (Array.isArray(body.refImages) ? body.refImages : [])
+    .map((r, i) => {
+      const rel = String(typeof r === 'string' ? r : (r?.rel ?? '')).trim();
+      if (!rel) return null;
+      return { rel, pictureIndex: i + 1, name: String(r?.name ?? rel.split('/').pop()) };
+    })
+    .filter(Boolean);
+  if (!refImages.length) throw new Error('REPLACE_REFS_REQUIRED: 至少需要一张目标角色参考图');
+  if (refImages.length > 9) throw new Error(`TOO_MANY_REFS: 最多 9 张参考图，收到 ${refImages.length}`);
+  // 逐张确认文件真的在（换人最贵，不能跑到一半才 FILE_NOT_FOUND）
+  for (const r of refImages) R.resolveReplaceInput(r.rel, cfg, true);
+
+  /**
+   * 提示词：**两种来源，整段优先**。
+   *
+   *  - `body.prompt` 非空 → 直接用它（用户在前端那一个可编辑框里改过的内容）
+   *  - 否则用结构化字段（roles / shotBeats / extraNote）现场拼一段
+   *
+   * 为什么要支持整段：占位符表单只能表达「一对一替换」。真实需求里
+   * 常有多角色、指定某个角色只出现在某几段、要求某个配角保持不动等等，
+   * 这些都没法用三个输入框表达。让用户直接改整段提示词是唯一不设上限的做法，
+   * 同时也保留了「不想改就别改」的默认体验（打开就是填好的模板）。
+   */
+  const prompt = String(body.prompt ?? '').trim()
+    || R.buildReplacePrompt({
+      roles: body.roles ?? [],
+      shotBeats: body.shotBeats ?? '',
+      extraNote: body.extraNote ?? '',
+    });
+
+  /**
+   * 分段模式。
+   *
+   * `continuation=true` 走续写链路：段间用真实 AV latent 衔接，
+   * 段与段在源视频上有 `contextLength` 帧的重叠，采完裁掉。
+   * 这是解决「独立重绘段间跳变」的正解 —— 但代价是严格串行、
+   * 必须关二采、且任何一段失败后面全废。
+   */
+  const useContinuation = Boolean(body.continuation);
+  const contextLength = useContinuation
+    ? String(body.contextLength ?? R.REPLACE_DEFAULTS.contextLength)
+    : null;
+
+  const plan = await R.planSegments(sourceAbs, cfg, {
+    segmentSec: Number(body.segmentSec) || undefined,
+    continuation: useContinuation,
+    contextLength: contextLength ?? undefined,
+    segmentCount: Number(body.segmentCount) || undefined,
+  });
+
+  const now = Date.now();
+  const task = {
+    id: R.newReplaceId(),
+    title: String(body.title ?? '').trim() || `换人 ${new Date(now).toLocaleString('zh-CN')}`,
+    status: 'draft',
+    sourceRel,
+    sourceHasAudio: plan.hasAudio,
+    sourceWidth: plan.width,
+    sourceHeight: plan.height,
+    durationSec: plan.durationSec,
+    segmentSec: Number(body.segmentSec) || R.REPLACE_DEFAULTS.segmentSec,
+    /** 分段模式：independent（默认）| continuation */
+    mode: plan.mode,
+    continuation: useContinuation,
+    contextLength,
+    segmentCount: Number(body.segmentCount) || null,
+    trimFrames: plan.trimFrames ?? null,
+    overlapSec: plan.overlapSec ?? null,
+    segments: plan.segments.map((s) => ({ ...s, status: 'pending', outputRel: null, jobId: null })),
+    refImages,
+    roles: body.roles ?? [],
+    shotBeats: body.shotBeats ?? '',
+    extraNote: body.extraNote ?? '',
+    prompt,
+    // 渲染参数：用户在页面上没改就是这一套
+    accelPlan: body.accelPlan ?? R.REPLACE_DEFAULTS.accelPlan,
+    preset: body.preset ?? R.REPLACE_DEFAULTS.preset,
+    sampler: body.sampler ?? R.REPLACE_DEFAULTS.sampler,
+    scheduler: body.scheduler ?? R.REPLACE_DEFAULTS.scheduler,
+    steps: Number.isFinite(Number(body.steps)) ? Number(body.steps) : R.REPLACE_DEFAULTS.steps,
+    megapixels: Number.isFinite(Number(body.megapixels)) ? Number(body.megapixels) : R.REPLACE_DEFAULTS.megapixels,
+    denoise: Number.isFinite(Number(body.denoise)) ? Number(body.denoise) : R.REPLACE_DEFAULTS.denoise,
+    secondPass: Boolean(body.secondPass ?? R.REPLACE_DEFAULTS.secondPass),
+    continuation: Boolean(body.continuation ?? R.REPLACE_DEFAULTS.continuation),
+    /**
+     * 续写链的抗身份漂移配方。
+     *
+     * `taperEnabled` 只有两种取值：true（用下面三个数）或 false（完全不接线，
+     * 退回"干净上下文"的老行为 —— 画面会抄上一段外观，但接缝更顺）。
+     * 后端读到 false 时会把 `启用续写上下文加噪` 传成 false。
+     */
+    taperEnabled: Boolean(body.taperEnabled ?? true),
+    taperAlpha: Number.isFinite(Number(body.taperAlpha))
+      ? Number(body.taperAlpha) : R.REPLACE_DEFAULTS.taperAlpha,
+    taperAlphaEnd: Number.isFinite(Number(body.taperAlphaEnd))
+      ? Number(body.taperAlphaEnd) : R.REPLACE_DEFAULTS.taperAlphaEnd,
+    taperRampSteps: Number.isFinite(Number(body.taperRampSteps))
+      ? Number(body.taperRampSteps) : R.REPLACE_DEFAULTS.taperRampSteps,
+    styleId: body.styleId ?? R.REPLACE_DEFAULTS.styleId,
+    lightingId: body.lightingId ?? R.REPLACE_DEFAULTS.lightingId,
+    seed: Number.isFinite(Number(body.seed)) ? Number(body.seed) : 1101,
+    loras: Array.isArray(body.loras) ? body.loras : [],
+    overrides: body.overrides && typeof body.overrides === 'object' ? body.overrides : {},
+    warnings: plan.warnings,
+    finalRel: null,
+    error: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  return R.replaceStore(cfg).upsert(task);
+}
 
 /**
  * 跑一个任务，成功后把产物**自动归档进素材库**。
@@ -2089,6 +2534,17 @@ function listChineseFonts() {
 // 白名单而非黑名单：新增运行时文件时默认不会被读到。
 const SERVABLE_DATA_DIRS = Object.freeze([
   'outputs', 'assets', 'previz', 'previz-shots', 'post', 'comic', 'tmp-inline', 'inputs',
+  /**
+   * 剪辑产物与工程。
+   *
+   * 必须在这里：剪辑页要用 <video src="/file?path=edit/outputs/xxx.mp4"> 内联
+   * 预览成片，白名单里没有 'edit' 会拿到 403 FORBIDDEN_PATH，
+   * 表现为"出片成功但播放器一片空白"——是最容易被误判成前端 bug 的形态。
+   *
+   * 代价：data/edit/*.json 工程文件也变成可读的了。可以接受 ——
+   * 工程里只有片段相对路径与音轨设置，没有任何凭据。
+   */
+  'edit',
 ]);
 
 /**
@@ -2369,8 +2825,35 @@ export function compilePrompt(shot, outWarnings = null) {
       // 完整的用户提示词已在函数开头直接返回；能走到这里的 `prompt`
       // 只可能是不足 200 字的简短备注，把它当场景补充说明更合理，
       // 所以限制为短文本，避免长文本重复灌入导致提示词畸形。
-      if (shot.prompt && String(shot.prompt).trim().length <= 200) {
-        pkg.sceneLayout = `${pkg.sceneLayout}\n${String(shot.prompt).trim()}`;
+      //
+      // ⚠️ 但它**不能只写进 sceneLayout**（历史缺陷，已实测复现）：
+      //    compileRef2VA 的分支是
+      //        if (scenes.length) { …逐镜头… } else { layout = sceneLayout … }
+      //    （见 h3-prompt.js 的 detailed_description 段），而
+      //    toShotInputPackage **永远**会造一个默认 shots 数组（shots: opts.scenes ?? [{…}]）。
+      //    于是 scenes 恒非空 → sceneLayout 分支恒不执行 →
+      //    只写 sceneLayout 等于把这句话扔进死字段。
+      //
+      //    实测后果：`prompt: "Video depicts a sexual scene between …"`（146 字）
+      //    提交后提示词里**一个字都没有**，模型收到的是 description 编译出来的骨架。
+      //    LoRA 的触发词往往就是这么一句短中文/短英文，正好全落在 200 字以下 ——
+      //    用户以为挂上了 LoRA 就能出效果，实际触发词根本没进提示词。
+      //
+      //    修法：同时追加进 scenes 的第一个镜头 action（那才是真正被读取的字段），
+      //    并做一次去重，避免与 description 相同时重复两遍。
+      const shortPrompt = shot.prompt ? String(shot.prompt).trim() : '';
+      if (shortPrompt && shortPrompt.length <= 200) {
+        const desc = String(pkg.sceneLayout ?? '').trim();
+        const dup = desc.includes(shortPrompt)
+          || (Array.isArray(pkg.shots) && pkg.shots.some((s) => String(s?.action ?? '').includes(shortPrompt)));
+        if (!dup) {
+          pkg.sceneLayout = `${pkg.sceneLayout}\n${shortPrompt}`;
+          // 真正会被 compileRef2VA 读到的位置
+          if (Array.isArray(pkg.shots) && pkg.shots.length) {
+            const first = pkg.shots[0];
+            first.action = `${String(first.action ?? '').trim()} ${shortPrompt}`.trim();
+          }
+        }
       }
 
       // ⚠️ 环境声/配乐要显式带过去。

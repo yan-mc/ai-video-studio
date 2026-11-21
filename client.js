@@ -37,6 +37,7 @@ window.__ModuleLoader__.load({
       openInTab: '新标签页',
       refresh: '刷新',
       render: '渲染页',
+      replace: '角色替换',
       storyboard: '智能分镜',
       workshop: 'H3 工坊',
       canvas: '画布工作台',
@@ -46,6 +47,7 @@ window.__ModuleLoader__.load({
       breakdown: '立绘拆解',
       image: '图像生成',
       previz: '3D 预演',
+      edit: '视频剪辑',
       jobs: '任务',
       settings: '设置',
       monBackend: '生成后端',
@@ -262,6 +264,7 @@ window.__ModuleLoader__.load({
       const entries = [
         // 制作
         { key: 'render', label: T.render, desc: '提示词→成片' },
+        { key: 'replace', label: T.replace, desc: '源视频换人' },
         { key: 'storyboard', label: T.storyboard, desc: '看图+写分镜' },
         { key: 'workshop', label: T.workshop, desc: '剧本→分段' },
         // 资源
@@ -269,6 +272,7 @@ window.__ModuleLoader__.load({
         { key: 'vault', label: T.vault, desc: '一致性锚点' },
         { key: 'projects', label: T.projects, desc: '导入/新建' },
         // 工具
+        { key: 'edit', label: T.edit, desc: '裁切/拼接/音轨' },
         { key: 'breakdown', label: T.breakdown, desc: '立绘→设定卡' },
         { key: 'previz', label: T.previz, desc: 'Blender 灰模' },
         { key: 'canvas', label: T.canvas, desc: '26 节点' },

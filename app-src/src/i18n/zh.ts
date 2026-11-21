@@ -48,6 +48,7 @@ export const zh = {
   /* -------------------------------- 导航 -------------------------------- */
   nav: {
     render: '渲染',
+    replace: '角色替换',
     storyboard: '智能分镜',
     workshop: 'H3 工坊',
     canvas: '画布',
@@ -59,6 +60,7 @@ export const zh = {
     image: '图像',
     breakdown: '立绘拆解',
     vault: '角色卡',
+    edit: '视频剪辑',
     collapse: '收起侧栏',
     expand: '展开侧栏',
     theme: '切换主题',
@@ -78,6 +80,24 @@ export const zh = {
     density: '界面密度',
     densityComfort: '舒适',
     densityCompact: '紧凑',
+  },
+
+  /* ---------------------------- ComfyUI 启停 ---------------------------- */
+  comfy: {
+    start: '启动 ComfyUI',
+    stop: '关闭 ComfyUI',
+    restart: '重启 ComfyUI',
+    startHint: '启动本地 ComfyUI（首次约 30~60 秒，需加载模型时会久一点）',
+    restartHint:
+      '重启 ComfyUI：清空队列、显存碎片与节点缓存。'
+      + '换下一个项目前建议点一次 —— 本地取消不会清掉已排队的任务，'
+      + '那些段仍会在下一单里被执行。',
+    statusRunning: '运行中',
+    statusStopped: '未运行',
+    statusUnknown: '状态未知',
+    starting: '启动中…',
+    stopping: '停止中…',
+    restarting: '重启中…',
   },
 
   /* -------------------------------- 画布 -------------------------------- */
@@ -237,6 +257,22 @@ export const zh = {
     healthBlender: 'Blender 预演',
     about: '九章工作室 · 本地 AI 视频/图像工作室，数据不出本机',
     aboutModules: '画布 · 素材 · 项目 · H3 工坊 · 任务中心',
+  },
+
+  /* ------------------------------ 视频剪辑 ------------------------------ */
+  edit: {
+    title: '视频剪辑',
+    subtitle: '裁切 · 拼接 · 音轨',
+    tabEdit: '剪辑',
+    tabProjects: '剪辑工程',
+    render: '出片',
+    renderDone: '出片完成',
+    emptyMedia: '没有可剪辑的视频',
+    emptyMediaHint: '先在「渲染」页生成镜头，产物会自动出现在这里。',
+    emptySeq: '序列还是空的',
+    emptySeqHint: '从左边点「加入」挑选片段；顺序就是成片顺序，可用箭头调整。',
+    emptyProjects: '还没有剪辑工程',
+    emptyProjectsHint: '在「剪辑」页拼好片段后保存，工程会出现在这里。',
   },
 
   /* -------------------------------- 任务 -------------------------------- */

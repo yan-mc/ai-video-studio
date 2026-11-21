@@ -19,8 +19,8 @@ version: 1.0.0
 ┌───────────────────────────────────────────────────────────────────┐
 │ ① DSH Host 进程（Node ESM）                                        │
 │    host/index.js         插件入口：注册路由 + 工具 + 启动编排        │
-│    host/tools.js         13 个 studio_* Agent 工具                  │
-│    host/api/index.js     92 条 REST 路由（/jiuzhang/api/*）         │
+│    host/tools.js         14 个 studio_* Agent 工具                  │
+│    host/api/index.js     102 条 REST 路由（/jiuzhang/api/*）         │
 │    host/services/*       业务服务层（南风桥接 / Blender / 素材 …）    │
 │    host/blender/*.py     Blender 子进程脚本                         │
 └────────────────┬──────────────────────────────────┬───────────────┘
@@ -54,7 +54,7 @@ dsh-jiuzhang-studio/
 │  ├─ security.js               guard / safeJoin / resolveUserPath / 写令牌
 │  ├─ static.js                 SPA + 静态文件（Range/ETag/301 补斜杠）
 │  ├─ runtime.js                模块级单例（Host 服务挂载）
-│  ├─ tools.js                  13 个 Agent 工具定义
+│  ├─ tools.js                  14 个 Agent 工具定义
 │  ├─ api/
 │  │  ├─ index.js               REST 路由总表
 │  │  └─ events.js              SSE 事件总线
@@ -72,7 +72,7 @@ dsh-jiuzhang-studio/
 │  │  ├─ comfy-client.js        ComfyUI 客户端（探测/上传/轮询/取消）
 │  │  ├─ blender-service.js     Blender 子进程编排
 │  │  ├─ character-vault.js     角色卡仓库
-│  │  ├─ breakdown.js           立绘拆解提示词
+│  │  ├─ breakdown.js           立绘拆解：默认三视图提示词（唯一可编辑输入）
 │  │  ├─ render-plan.js         渲染计划（参考图编号权威）
 │  │  ├─ shot-context.js        入参准备（REST 与工具共用）
 │  │  ├─ job-runner.js          任务队列 + 并发闸门
@@ -83,8 +83,8 @@ dsh-jiuzhang-studio/
 │
 ├─ app-src/                     ← ② SPA 源码
 │  ├─ src/App.tsx               壳（顶栏 + 侧导航 + 路由出口）
-│  ├─ src/router.tsx            hash 路由表（12 条）
-│  ├─ src/pages/                12 个页面
+│  ├─ src/router.tsx            hash 路由表（14 条）
+│  ├─ src/pages/                15 个页面
 │  ├─ src/canvas/               26 节点画布（最大模块）
 │  ├─ src/components/           NanfengParams / AssetPicker / ContinuationPanel
 │  ├─ src/api/                  REST 客户端 + SSE
@@ -291,9 +291,9 @@ POST /blender/render {mode, projectId, shotId}
 | GET | `/vault/cards/:id` | 单卡 |
 | POST | `/vault/cards/delete` | 删卡 |
 | GET | `/vault/plan` | 参考图预算规划（≤9 张约束）|
-| GET | `/breakdown/meta` | 拆解档位（standard / full / parts）|
-| POST | `/breakdown/preview` | 预览拆解提示词 |
-| POST | `/breakdown/generate` | 出拆解图（**无参考图直接 400**）|
+| GET | `/breakdown/meta` | 默认提示词 + 上限字符数 + 固定尺寸 |
+| POST | `/breakdown/preview` | 回显提交用提示词（**不拼装**）|
+| POST | `/breakdown/generate` | 出拆解图（**无参考图直接 400**；超长 400 `PROMPT_TOO_LONG`）|
 | GET | `/image/meta` | H3-Image 模型状态 + 12 种尺寸 |
 | POST | `/image/generate` | H3-Image 出图 |
 
@@ -362,14 +362,31 @@ POST /blender/render {mode, projectId, shotId}
 | GET | `/canvas-agent/meta` | 画布 Agent 17 工具 + 4 权限位 |
 | POST | `/canvas-agent/exec` | 执行画布 Agent 动作 |
 
-### 4.11 已删除的路由（不存在，别照旧文档调用）
+### 4.11 视频剪辑
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/edit/clips` | 可剪辑素材（outputs / assets / edit/outputs）|
+| POST | `/edit/probe` | 探测时长 / 分辨率 / 帧率 / 音轨 |
+| POST | `/edit/trim` | 裁切（输入端粗 seek + 输出端精 trim）|
+| POST | `/edit/concat` | 拼接（形状一致走流复制，否则滤镜重编码；可带 xfade 转场）|
+| POST | `/edit/audio` | 音轨：`strip` / `volume` / `bgm`（可替换或混音，带淡入淡出）|
+| POST | `/edit/render` | 按工程出片（逐段裁切 → 拼接 → 应用音轨）|
+| GET · POST | `/edit/projects` | 工程列表 / 保存 |
+| GET · POST · DELETE | `/edit/projects/:id` | 单工程 CRUD |
+
+> 编辑模型是**有序片段列表**，不是多轨时间轴 —— 理由见 `host/services/edit.js` 文件头。
+> 产物写 `data/edit/outputs/`，工程写 `data/edit/*.json`；
+> `edit` 已在 `/file` 的 `SERVABLE_DATA_DIRS` 白名单里（内联播放依赖它）。
+
+### 4.12 已删除的路由（不存在，别照旧文档调用）
 
 `/script/*`、`/comic/*`、`/mw/*` 共 30+ 条已在 2.0.0 随页面删除。
 剧本类需求改用 `/h3/workshop/*`（只产文本）。
 
 ---
 
-## 五、13 个 Agent 工具
+## 五、14 个 Agent 工具
 
 | 工具 | 作用 | 关键限制 |
 |---|---|---|
@@ -383,6 +400,7 @@ POST /blender/render {mode, projectId, shotId}
 | `studio_h3_workshop` | 剧本 → 分段 + 资产 | **只产文本**，不出图 |
 | `studio_blender` | Blender 预演 | `render` 会启子进程（~21s）|
 | `studio_post` | 图像/视频后处理 | `qc` 的入参形状与 REST 不同 |
+| `studio_edit` | 视频剪辑：probe/trim/concat/audio/render/clips/projects | 音轨子操作走 `audioOp`（顶层 `op` 已被占用）|
 | `studio_toolbox` | 模板/服化道/清理/日志 | `batchProgress` 只支持 `list` |
 | `studio_image` | H3-Image 出图 | 无负面提示词 |
 | `studio_storyboard` | 智能分镜 | 走 DSH 内部 LLM，零凭据 |
@@ -446,6 +464,8 @@ POST /blender/render {mode, projectId, shotId}
 | 智能分镜的 LLM 提示词 | `skills/prompt/h3-*/SKILL.md` |
 | 生成执行器 | `host/services/generator.js` |
 | ComfyUI 通信 | `host/services/comfy-client.js` |
+| 剪辑（裁切/拼接/音轨）| `host/services/edit.js` |
+| 剪辑页 UI | `app-src/src/pages/EditPage.tsx` + `app-src/src/api/edit.ts` |
 | Blender 脚本 | `host/blender/render_shot.py` |
 | REST 路由 | `host/api/index.js` |
 | Agent 工具 | `host/tools.js` |
@@ -460,9 +480,10 @@ POST /blender/render {mode, projectId, shotId}
 
 ```powershell
 npm run build          # 构建 SPA（tsc --noEmit && vite build）
-npm test               # 冒烟测试（105 项真执行）
+npm test               # 冒烟测试（165 项真执行）
 npm run typecheck      # 仅类型检查
 npm run check:routes   # SPA/NAV/client 三方路由一致性
+node tools/verify-edit.mjs   # 剪辑功能验收（需 DSH 已重启并加载新路由）
 npm run audit:params   # 217 参数有效性审计
 npm run preview        # 独立预览服务器（不启动 DSH）
 ```

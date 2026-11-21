@@ -5,7 +5,7 @@
  *  - 这里只做"壳"：导航高亮、后端状态灯、主题/外观入口；
  *  - 具体页面在 src/pages/*，画布在 src/canvas/*（由另一路并行实现）。
  */
-import { useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { CanvasPage } from './pages/CanvasPage';
 import { AssetsPage } from './pages/AssetsPage';
@@ -17,15 +17,19 @@ import { ImagePage } from './pages/ImagePage';
 import { BreakdownPage } from './pages/BreakdownPage';
 import { VaultPage } from './pages/VaultPage';
 import { RenderPage } from './pages/RenderPage';
+import { EditPage } from './pages/EditPage';
+import { ReplacementPage } from './pages/ReplacementPage';
 import { StoryboardPage } from './pages/StoryboardPage';
 import { ScriptAnalyzerPanel } from './pages/H3Page';
 
 import { useRouter } from './router';
 import type { RouteId } from './router';
 import { useJobsStore, useProjectStore, useUiStore } from './store';
-import { Icon, ThemeProvider, Toaster, useT, ErrorBoundary } from './ui';
+import { Icon, ThemeProvider, Toaster, useT, useToast, ErrorBoundary } from './ui';
 import { useTheme } from './ui/theme';
 import type { IconName } from './ui/Icon';
+import { api, describeError } from './api/client';
+import type { ComfyStatus } from './api/types';
 
 /* ------------------------------------------------------------- 导航定义 */
 
@@ -50,6 +54,7 @@ interface NavEntry {
 const NAV: ReadonlyArray<NavEntry> = [
   // ---- 制作 ----
   { key: 'render', icon: 'video', labelKey: 'nav.render', groupBefore: '制作' },
+  { key: 'replace', icon: 'swap', labelKey: 'nav.replace' },
   { key: 'storyboard', icon: 'text', labelKey: 'nav.storyboard' },
   { key: 'workshop', icon: 'text', labelKey: 'nav.workshop' },
   // ---- 资源 ----
@@ -57,7 +62,8 @@ const NAV: ReadonlyArray<NavEntry> = [
   { key: 'vault', icon: 'users', labelKey: 'nav.vault' },
   { key: 'projects', icon: 'projects', labelKey: 'nav.projects' },
   // ---- 工具 ----
-  { key: 'breakdown', icon: 'image', labelKey: 'nav.breakdown', groupBefore: '工具' },
+  { key: 'edit', icon: 'scissors', labelKey: 'nav.edit', groupBefore: '工具' },
+  { key: 'breakdown', icon: 'image', labelKey: 'nav.breakdown' },
   { key: 'previz', icon: 'cube', labelKey: 'nav.previz' },
   { key: 'canvas', icon: 'canvas', labelKey: 'nav.canvas' },
   { key: 'image', icon: 'image', labelKey: 'nav.image' },
@@ -118,6 +124,100 @@ function AppearanceMenu() {
   );
 }
 
+/* --------------------------------------------------------- ComfyUI 电源 */
+
+/**
+ * 顶栏的 ComfyUI 启停按钮。
+ *
+ * 为什么需要它（不是"顺手做个开关"）：
+ *   本地「取消」只对正在跑的那一单发 /interrupt，**已经排进 ComfyUI 队列
+ *   但还没开始的任务不会被清掉**。用户看到界面停了，ComfyUI 侧后面还挂着
+ *   上一单的段 —— 下一单提交后那些段仍会依次执行，表现就是
+ *   "前面的续写还在"。重启进程能一次性清掉队列 + 显存碎片 + 节点缓存。
+ *
+ * 交互取舍：
+ *   · **只在运行时才显示「重启」**。这是最常用的动作，但重启要等 30~180 秒，
+ *     所以必须有进行中的禁用态和明确的 toast，不能让人以为卡住了。
+ *   · 未运行时按钮是「启动」，一句话说清"点了会等一会儿"。
+ *   · 状态每 10 秒自刷新一次 —— ComfyUI 可能被别处启停，按钮不能显示陈旧状态。
+ */
+function ComfyPowerButton() {
+  const t = useT();
+  const [status, setStatus] = useState<ComfyStatus | null>(null);
+  const [busy, setBusy] = useState<'' | 'start' | 'stop' | 'restart'>('');
+  const toast = useToast();
+
+  const refresh = useCallback(async () => {
+    try {
+      setStatus(await api.comfyStatus());
+    } catch {
+      // 状态查不到不等于 ComfyUI 挂了（可能是 Host 在重启），保持上一次的值
+    }
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      if (!alive) return;
+      await refresh();
+    };
+    void tick();
+    const id = window.setInterval(tick, 10000);
+    return () => { alive = false; window.clearInterval(id); };
+  }, [refresh]);
+
+  const act = useCallback(async (kind: 'start' | 'stop' | 'restart') => {
+    if (busy) return;
+    setBusy(kind);
+    try {
+      const r = kind === 'start'
+        ? await api.comfyStart()
+        : kind === 'stop'
+          ? await api.comfyStop()
+          : await api.comfyRestart();
+      if (r.ok) toast.ok(r.detail);
+      else toast.error(r.detail);
+      await refresh();
+    } catch (e) {
+      toast.error(describeError(e));
+    } finally {
+      setBusy('');
+    }
+  }, [busy, refresh, toast]);
+
+  const running = status?.running === true;
+  const canControl = status?.canControl !== false;
+  const label = busy === 'start' ? '启动中…'
+    : busy === 'stop' ? '停止中…'
+      : busy === 'restart' ? '重启中…'
+        : running ? '重启' : '启动';
+
+  return (
+    <button
+      type="button"
+      className="jz-btn jz-btn--sm jz-btn--ghost"
+      disabled={Boolean(busy) || !canControl}
+      onClick={() => void act(running ? 'restart' : 'start')}
+      title={
+        !canControl
+          ? (status?.detail ?? '找不到 ai-runtime 目录，无法从界面启停')
+          : running
+            ? `${t('comfy.restartHint')}（端口 ${status?.port}）`
+            : t('comfy.startHint')
+      }
+      aria-label={running ? t('comfy.restart') : t('comfy.start')}
+      style={{ gap: 6, opacity: canControl ? 1 : 0.5 }}
+    >
+      <span
+        className={running ? 'jz-dot jz-dot--ok' : 'jz-dot jz-dot--bad'}
+        style={{ marginRight: 2 }}
+      />
+      <Icon name={running ? 'refresh' : 'play'} size={14} />
+      {label}
+    </button>
+  );
+}
+
 /* --------------------------------------------------------------- 顶栏 */
 
 function TopBar({ route }: { route: RouteId }) {
@@ -164,6 +264,8 @@ function TopBar({ route }: { route: RouteId }) {
           {t('settings.healthBlender')}
         </span>
       </div>
+
+      <ComfyPowerButton />
 
       <AppearanceMenu />
     </header>
@@ -230,6 +332,8 @@ function RouteView({ route }: { route: RouteId }) {
   switch (route) {
     case 'render':
       return <RenderPage />;
+    case 'replace':
+      return <ReplacementPage />;
     case 'storyboard':
       return <StoryboardPage />;
     case 'workshop':
@@ -248,6 +352,8 @@ function RouteView({ route }: { route: RouteId }) {
       return <ImagePage />;
     case 'breakdown':
       return <BreakdownPage />;
+    case 'edit':
+      return <EditPage />;
     case 'vault':
       return <VaultPage />;
     case 'canvas':

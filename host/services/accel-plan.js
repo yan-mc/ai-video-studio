@@ -92,19 +92,37 @@ export const ACCEL_PLANS = Object.freeze({
   // 仅在边缘锐度上略好，视频理解明显弱于 DMAD。本项目只维护 DMAD 一条线，
   // 旧配置里若还写着 lightx2v，accelPlanOf() 会告警并回退到 dmad8。
 
-  /** 不做加速：原模型 50 步。极慢，仅供对照与排障。 */
+  /**
+   * 不做加速：用**原模型**跑，步数由用户决定。
+   *
+   * ==========================================================================
+   * 为什么 `steps` 不再是固定 50
+   * ==========================================================================
+   *
+   * 50 步是原模型的「参考默认值」，不是硬性要求 —— 它是按照
+   * 「质量优先」给的保守数字。但 50 步在 5 秒片上也确实慢到接近
+   * 半小时级别，很多人想要的其实是 25～30 步的折中。
+   *
+   * 所以这里的 50 只作为**推荐值**（`defaultSteps`）用于前端预填与校验基准，
+   * 真正提交的步数由 `task.steps` / `job.params.steps` 决定。
+   * `minSteps` 是不能低于的安全线 —— 低于它去噪根本没收敛
+   * （见 `checkSteps()` 里对 `family==='none'` 的判定）。
+   */
   'none': {
     id: 'none',
-    label: '不加速（原模型 50 步）',
+    label: '不加速（原模型，步数可调）',
     family: 'none',
     lora: '',
     sampler: 'euler',
     scheduler: 'simple',
+    /** 推荐步数（前端预填、`checkSteps` 校验基准） */
     steps: 50,
+    /** 步数可调范围 —— 前端据此渲染输入框的 min/max */
+    stepsRange: { min: 20, max: 80, step: 1 },
     shiftVideo: null,
     shiftAudio: null,
     strictSteps: false,
-    hint: '不挂 LoRA，用 50 步原模型。单镜数十分钟，仅供对照。',
+    hint: '不挂 LoRA，用原模型。步数可调（默认 50，建议 25–30 起试），单镜较慢。',
   },
 });
 
@@ -377,10 +395,10 @@ export function checkSteps(planId, steps) {
   }
 
   /**
-   * 不加速（`none`）时的步数校验。
+   * 不加速（`none`）时的步数校验 —— 现在按 `stepsRange` 判定，不再硬编码 50%。
    *
    * ==========================================================================
-   * 为什么这条必须补
+   * 为什么必须校验，以及为什么阈值来自方案定义
    * ==========================================================================
    *
    * 以前这里直接 `return { ok: true, warning: '' }` —— 不加速方案**不校验步数**。
@@ -390,15 +408,30 @@ export function checkSteps(planId, steps) {
    * 而这不是「分布外」那么轻：蒸馏学生在 8 步是**训练设定**，
    * 原模型在 8 步是**没跑完**。前者质量下滑，后者是废片。
    *
-   * 阈值取 50%（默认 50 步 → 25 步）：低于这个量级基本不可能收敛。
+   * 现在步数可调，安全线来自 `plan.stepsRange.min`（默认 20）：
+   *   · 低于 min → 拒绝（没跑完去噪）
+   *   · 高于 max → 只警告（能跑，但收益递减、耗时线性增长）
+   *   · 中间区间 → 放行
    */
-  if (plan.family === 'none' && n < Math.ceil(plan.steps * 0.5)) {
-    return {
-      ok: false,
-      warning: `不加速却只跑 ${n} 步 —— 原模型默认 ${plan.steps} 步，`
-        + `低于 ${Math.ceil(plan.steps * 0.5)} 步去噪远未完成，出片会明显模糊。`
-        + '要么把步数提到推荐值，要么改回 DMAD 加速方案。',
-    };
+  if (plan.family === 'none') {
+    const min = plan.stepsRange?.min ?? Math.ceil(plan.steps * 0.5);
+    const max = plan.stepsRange?.max ?? plan.steps * 2;
+    if (n < min) {
+      return {
+        ok: false,
+        warning: `不加速却只跑 ${n} 步 —— 原模型建议 ${plan.steps} 步，`
+          + `低于 ${min} 步去噪远未完成，出片会明显模糊。`
+          + '要么把步数提到推荐值，要么改回 DMAD 加速方案。',
+      };
+    }
+    if (n > max) {
+      return {
+        ok: true,
+        warning: `不加速跑 ${n} 步超过了建议上限 ${max} 步 —— 能跑，但收益递减、`
+          + '耗时线性增长，超出部分基本只是在烧时间。',
+      };
+    }
+    return { ok: true, warning: '' };
   }
   return { ok: true, warning: '' };
 }

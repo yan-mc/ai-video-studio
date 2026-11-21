@@ -591,6 +591,120 @@ export function registerTools(ctx) {
     },
   )));
 
+  /* ---------------------------------------------------------- 视频剪辑 */
+  disposers.push(reg(tool(
+    'studio_edit',
+    '视频剪辑：probe（探测时长/分辨率/音轨）/ trim（按时间裁切）/ concat（多段拼接，可带转场）'
+    + '/ audio（strip 剥原声 / volume 调音量 / bgm 换或混 BGM）/ render（按工程出片）'
+    + '/ clips（列出可剪辑素材）/ projects（剪辑工程增删查改）。',
+    {
+      type: 'object',
+      properties: {
+        op: {
+          type: 'string',
+          enum: ['probe', 'trim', 'concat', 'audio', 'render', 'clips', 'projects'],
+        },
+        // ---- 通用 ----
+        input: { type: 'string', description: '单个媒体路径（相对 dataDir 或 dataDir 内的绝对路径）' },
+        inputs: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'concat 的片段列表，按拼接顺序排列',
+        },
+        // ---- trim ----
+        startSec: { type: 'number', description: 'trim 的起点（秒）' },
+        endSec: { type: 'number', description: 'trim 的终点（秒），不填则到片尾' },
+        // ---- concat ----
+        transitionSec: { type: 'number', description: 'concat 的淡入淡出转场时长（秒），0 为硬切' },
+        reencode: { type: 'boolean', description: 'concat 是否强制重编码；不填则自动判断' },
+        // ---- audio ----
+        audioOp: {
+          type: 'string',
+          enum: ['strip', 'volume', 'bgm'],
+          description: 'audio 的子操作；与 input 一起使用',
+        },
+        bgmInput: { type: 'string', description: 'audio/bgm 的背景音乐路径' },
+        replaceOriginal: { type: 'boolean', description: 'audio/bgm 是否完全替换原声（false 则混音）' },
+        bgmVolume: { type: 'number', description: 'BGM 音量 0~4' },
+        originalVolume: { type: 'number', description: '原声音量 0~4' },
+        fadeInSec: { type: 'number' },
+        fadeOutSec: { type: 'number' },
+        // ---- render / projects ----
+        projectId: { type: 'string', description: '剪辑工程 id' },
+        name: { type: 'string' },
+        clips: {
+          type: 'array',
+          description: 'render/projects 的片段列表',
+          items: {
+            type: 'object',
+            properties: {
+              rel: { type: 'string' },
+              name: { type: 'string' },
+              startSec: { type: 'number' },
+              endSec: { type: 'number' },
+            },
+            required: ['rel'],
+          },
+        },
+        audio: {
+          type: 'object',
+          description: 'render 的音轨设置（mode: original/strip/bgm/volume）',
+          additionalProperties: true,
+        },
+      },
+      required: ['op'],
+      additionalProperties: false,
+    },
+    async (a) => {
+      const { op } = a;
+      if (op === 'clips') return z.edit.listClips();
+      if (op === 'probe') {
+        if (!a.input) throw new Error('INPUT_REQUIRED: probe 需要 input');
+        return z.edit.probe(a.input);
+      }
+      if (op === 'trim') {
+        if (!a.input) throw new Error('INPUT_REQUIRED: trim 需要 input');
+        return z.edit.trim({ input: a.input, startSec: a.startSec, endSec: a.endSec });
+      }
+      if (op === 'concat') return z.edit.concat({ inputs: a.inputs, transitionSec: a.transitionSec, reencode: a.reencode });
+      if (op === 'audio') {
+        if (!a.input) throw new Error('INPUT_REQUIRED: audio 需要 input');
+        /**
+         * ⚠️ 工具入参里“子操作”不能也叫 op（会和顶层的 op 撞名）。
+         * 这里用 audioOp 收，再映射成服务层的 op —— 服务层只看自己的语义，
+         * 不要为了迁就工具 schema 改服务的形状。
+         */
+        if (!a.audioOp) throw new Error('AUDIO_OP_REQUIRED: audio 需要 audioOp（strip/volume/bgm）');
+        return z.edit.audio({
+          input: a.input,
+          op: a.audioOp,
+          bgmInput: a.bgmInput,
+          replaceOriginal: a.replaceOriginal,
+          bgmVolume: a.bgmVolume,
+          originalVolume: a.originalVolume,
+          fadeInSec: a.fadeInSec,
+          fadeOutSec: a.fadeOutSec,
+        });
+      }
+      if (op === 'render') {
+        return z.edit.render({
+          id: a.projectId,
+          clips: a.clips,
+          audio: a.audio,
+          transitionSec: a.transitionSec,
+          reencode: a.reencode,
+          name: a.name,
+        });
+      }
+      if (op === 'projects') {
+        // 无 projectId = 列表；有 = 单工程详情
+        if (!a.projectId) return z.edit.listProjects();
+        return { ok: true, project: z.edit.getProject(a.projectId) };
+      }
+      throw new Error(`UNKNOWN_EDIT_OP: ${op}`);
+    },
+  )));
+
   /* ---------------------------------------------------------- 剧本 */
 
   /* ---------------------------------------------------------- 模特工作台 */

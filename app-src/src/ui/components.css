@@ -1176,3 +1176,133 @@ textarea.jz-select {
 .jz-nf-row__def code {
   font-family: var(--jz-font-mono, ui-monospace, monospace);
 }
+
+/* ============================================================
+ * 视频剪辑页 —— 三栏布局（素材池 / 序列 / 设置）
+ *
+ * 只消费已有主题令牌，不引入任何新的颜色字面量：
+ * 换主题（墨夜 ↔ 宣纸）与切换强调色时这里必须跟着走，
+ * 写死 #hex 会让页面在浅色主题下变成不可读的补丁块。
+ * ============================================================ */
+
+.jz-edit {
+  display: grid;
+  grid-template-columns: minmax(200px, 240px) minmax(300px, 1fr) minmax(240px, 300px);
+  gap: var(--jz-sp-3);
+  align-items: start;
+  min-height: 0;
+}
+
+@media (max-width: 1100px) {
+  .jz-edit {
+    grid-template-columns: 1fr;
+  }
+}
+
+.jz-edit__col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* 序列列表：固定高度 + 内部滚动，避免片段多了把整页拉长 */
+.jz-edit__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--jz-sp-2);
+  max-height: 52vh;
+  overflow: auto;
+  padding: 2px;
+}
+
+.jz-edit__media {
+  display: flex;
+  align-items: center;
+  gap: var(--jz-sp-2);
+  padding: var(--jz-sp-2);
+  border: 1px solid var(--jz-border);
+  border-radius: var(--jz-r-md);
+  background: var(--jz-bg-sunken);
+}
+
+.jz-edit__clip {
+  display: flex;
+  align-items: center;
+  gap: var(--jz-sp-2);
+  padding: var(--jz-sp-2);
+  border: 1px solid var(--jz-border);
+  border-radius: var(--jz-r-md);
+  background: var(--jz-bg-sunken);
+  cursor: pointer;
+  transition: border-color .12s, background .12s;
+}
+
+.jz-edit__clip:hover {
+  background: var(--jz-bg-hover);
+}
+
+/* 选中态用强调色的「线」而不是整块填充 —— 列表里多选高亮会很吵 */
+.jz-edit__clip--active {
+  border-color: var(--jz-accent-line);
+  background: var(--jz-accent-soft);
+}
+
+.jz-edit__idx {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: var(--jz-fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--jz-text-inverse);
+  background: var(--jz-accent);
+}
+
+/* 裁剪区间条：底为全片，填充为实际使用区间 */
+.jz-edit__bar {
+  position: relative;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--jz-border);
+  overflow: hidden;
+}
+
+.jz-edit__barfill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--jz-accent);
+  transition: width .12s;
+}
+
+.jz-edit__range {
+  margin-top: var(--jz-sp-3);
+  padding-top: var(--jz-sp-3);
+  border-top: 1px dashed var(--jz-border);
+}
+
+.jz-edit__preview {
+  width: 100%;
+  border-radius: var(--jz-r-md);
+  border: 1px solid var(--jz-border);
+  background: #000;
+  max-height: 220px;
+}
+
+/* 表格里的文字按钮（工程名可点开） */
+.jz-linkbtn {
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--jz-accent);
+  cursor: pointer;
+  text-align: left;
+}
+
+.jz-linkbtn:hover {
+  text-decoration: underline;
+}
+

@@ -1312,6 +1312,10 @@ class NanFengH3MultiReferenceGenerator:
             True and bool(kwargs.get("启用潜空间续写", False)),
             kwargs.get("潜空间续写任务", ""), unique_id,
             kwargs.get("context_length", "22"), kwargs.get("audio_context_length", 24),
+            kwargs.get("启用续写上下文加噪", False),
+            kwargs.get("续写加噪强度", 0.45),
+            kwargs.get("续写加噪末档强度", 0.10),
+            kwargs.get("续写加噪斜坡步数", 2),
         )
         if continuation:
             require_upstream()
@@ -1622,10 +1626,34 @@ class NanFengH3MultiReferenceGenerator:
                 "MiniMaxH3MotionContextLoadLatent", latent_path=continuation["folder"],
                 clip_index=continuation["index"] - 1,
             )
+            # 换人续写链：给上下文注入锥形噪声。
+            #
+            # 见 context_taper_noise.py 的模块注释 —— 干净上下文会让模型
+            # 原样拷贝上一段的外观，而换人恰恰要求脸必须变。
+            # 加噪把外观损坏掉、运动保留下来，模型只能从身份参考重新合成。
+            #
+            # ⚠️ **段 1 不接线**。`MiniMaxH3MotionContextLoadLatent` 在
+            #    clip_index=0 时返回 `None`（"第一段没有上一段"），
+            #    Motion Context 自己能容忍 None（直接透传条件、trim=0），
+            #    但加噪节点拿到 None 会直接抛错。
+            #    所以按 index 判断，而不是按「有没有接」判断。
+            context_latent_input = previous_latent.out(0)
+            if continuation["taper_noise"] and int(continuation["index"]) > 1:
+                tapered = g.node(
+                    "NanFengH3ContextTaperNoiseV15",
+                    context_latent=context_latent_input,
+                    tail_frames=continuation["context_length"],
+                    alpha=continuation["taper_alpha"],
+                    alpha_end=continuation["taper_alpha_end"],
+                    ramp_steps=continuation["taper_ramp_steps"],
+                    seed=int(随机种子),
+                    noise_scale="match_latent_std",
+                )
+                context_latent_input = tapered.out(0)
             motion_context = g.node(
                 "MiniMaxH3MotionContext", conditioning=conditioning_output,
                 vae=video_vae.out(0), latent=prepared.out(1),
-                context_latent=previous_latent.out(0),
+                context_latent=context_latent_input,
                 context_length=continuation["context_length"],
                 audio_context_length=continuation["audio_context_length"],
             )
@@ -2530,6 +2558,13 @@ class NanFengH3MultiReferenceGeneratorV15(NanFengH3MultiReferenceGeneratorV9):
         schema["required"]["context_length"] = (["22", "5", "39", "56"], {"default": "22"})
         schema["required"]["audio_context_length"] = ("INT", {"default": 24, "min": 0, "max": 240})
         schema["required"]["潜空间续写任务"] = ("STRING", {"default": ""})
+        # 换人续写链的抗身份漂移开关：给上下文加锥形噪声，
+        # 损坏上一段外观、保留运动，迫使模型从身份参考重新合成。
+        # 默认关闭 —— 叙事续写（非换人）需要干净的上下文，行为不变。
+        schema["required"]["启用续写上下文加噪"] = ("BOOLEAN", {"default": False})
+        schema["required"]["续写加噪强度"] = ("FLOAT", {"default": 0.45, "min": 0.0, "max": 1.0, "step": 0.01})
+        schema["required"]["续写加噪末档强度"] = ("FLOAT", {"default": 0.10, "min": 0.0, "max": 1.0, "step": 0.01})
+        schema["required"]["续写加噪斜坡步数"] = ("INT", {"default": 2, "min": 1, "max": 64})
         schema["required"]["启用续写音频精修"] = ("BOOLEAN", {"default": False})
         refine_schema = NanFengV15ContinuationAudioRefine.INPUT_TYPES()["required"]
         for name, key in (("续写音频降噪强度", "audio_denoise"), ("续写音频精修步数", "steps"),
@@ -2552,6 +2587,7 @@ class NanFengH3MultiReferenceGeneratorV15(NanFengH3MultiReferenceGeneratorV9):
 
 from .native_audio_lock import MiniMaxH3NativeAudioLockV15
 from .latent_continuation import NanFengV15CommitContinuation
+from .context_taper_noise import NanFengH3ContextTaperNoiseV15
 from .continuation_audio_refine import NanFengV15ContinuationAudioRefine
 
 from .dlss_output import NanFengV15DLSSOutput
@@ -2560,6 +2596,7 @@ NODE_CLASS_MAPPINGS = {
     "NanFengV15DLSSOutput": NanFengV15DLSSOutput,
     "NanFengV15ContinuationAudioRefine": NanFengV15ContinuationAudioRefine,
     "NanFengV15CommitContinuation": NanFengV15CommitContinuation,
+    "NanFengH3ContextTaperNoiseV15": NanFengH3ContextTaperNoiseV15,
     "NanFengH3MultiReferenceGeneratorV15": NanFengH3MultiReferenceGeneratorV15,
     "MiniMaxH3NativeAudioLockV15": MiniMaxH3NativeAudioLockV15,
     "NanFengAudioPadToDurationV15": NanFengAudioPadToDurationV15,

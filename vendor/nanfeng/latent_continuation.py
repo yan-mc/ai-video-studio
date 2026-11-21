@@ -6,13 +6,24 @@ UPSTREAM = ("MiniMaxH3MotionContext", "MiniMaxH3MotionContextLoadLatent",
             "MiniMaxH3MotionContextSaveLatent", "MiniMaxH3MotionContextTrim")
 
 
-def continuation_plan(enabled, raw, node_id, context_length="22", audio_context_length=24):
+def continuation_plan(enabled, raw, node_id, context_length="22", audio_context_length=24,
+                      taper_noise=False, taper_alpha=0.45, taper_alpha_end=0.10,
+                      taper_ramp_steps=2):
     if not enabled:
         return None
     if str(context_length) not in {"5", "22", "39", "56"}:
         raise ValueError("V15 context_length 必须为 5/22/39/56。")
     if isinstance(audio_context_length, bool) or not 0 <= int(audio_context_length) <= 240:
         raise ValueError("V15 audio_context_length 必须为 0～240。")
+    taper_noise = bool(taper_noise)
+    if taper_noise:
+        alpha = float(taper_alpha)
+        alpha_end = float(taper_alpha_end)
+        ramp = int(taper_ramp_steps)
+        if not 0.0 <= alpha_end <= alpha <= 1.0:
+            raise ValueError("V15 续写加噪：需要 0 <= 末档强度 <= 强度 <= 1。")
+        if not 1 <= ramp <= 17:
+            raise ValueError("V15 续写加噪：斜坡步数必须在 1～17。")
     try:
         data = json.loads(raw)
         for key in ("workflow", "node", "group", "run"):
@@ -28,7 +39,9 @@ def continuation_plan(enabled, raw, node_id, context_length="22", audio_context_
     identity = json.dumps([data[k] for k in ("workflow", "node", "group", "run")], ensure_ascii=False)
     folder = "nanfeng_v15_context/" + hashlib.sha256(identity.encode()).hexdigest()
     return {"folder": folder, "index": index, "context_length": str(context_length),
-            "audio_context_length": int(audio_context_length)}
+            "audio_context_length": int(audio_context_length),
+            "taper_noise": taper_noise, "taper_alpha": float(taper_alpha),
+            "taper_alpha_end": float(taper_alpha_end), "taper_ramp_steps": int(taper_ramp_steps)}
 
 
 def require_upstream():

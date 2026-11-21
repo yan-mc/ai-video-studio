@@ -12,8 +12,48 @@ import { createHash } from 'node:crypto';
 import { loadConfig } from '../config.js';
 import { cancellableSleep, throwIfCancelled } from './job-runner.js';
 
-const MAX_POLL = 600;
+/**
+ * 轮询节奏与超时。
+ *
+ * ============================================================================
+ * 为什么不再用「固定轮询次数」
+ * ============================================================================
+ *
+ * 早先是 `MAX_POLL = 600` × `POLL_MS = 3000` = **硬上限 30 分钟**。
+ * 它的问题不是"30 分钟太短"，而是**这个上限与任务实际需要无关**：
+ *
+ *   · 不加速方案（原模型 50 步）单镜本来就慢 —— 5 秒片在高分辨率下
+ *     跑 50 步很容易超过 30 分钟，于是被 `COMFY_TIMEOUT` 打断。
+ *     而此时 ComfyUI **仍在继续跑**，GPU 白烧，产物也拿不到。
+ *   · 反之，一个 4 步小图 10 秒就完了，那 30 分钟的空头额度毫无意义。
+ *
+ * 正确做法是「按截止时间等」而不是「按次数等」：
+ *   · 默认超时 **2 小时**（足够跑完 50 步长片）
+ *   · 可用配置 `comfyTimeoutMin` 或环境变量 `JZ_COMFY_TIMEOUT_MIN` 覆盖
+ *   · 超时后**不谎报成功**，错误信息里带上已等待时长与建议
+ *
+ * ⚠️ 超时**不等于失败**：任务可能还在跑。所以错误信息明确写出
+ *    「可调大超时后重试，或到 ComfyUI 队列查看」。绝不静默丢弃。
+ */
 const POLL_MS = 3000;
+
+/** 默认 2 小时 —— 覆盖 50 步原模型长片的最坏情况 */
+const DEFAULT_TIMEOUT_MIN = 120;
+
+/**
+ * 从配置 / 环境变量解析超时（分钟）。
+ *
+ * 优先级：环境变量 > 配置 > 默认。上限 24 小时，防止手滑写成天文数字
+ * 把进程挂到天荒地老。
+ */
+function resolveTimeoutMs(cfg) {
+  const fromEnv = Number(process.env.JZ_COMFY_TIMEOUT_MIN);
+  const fromCfg = Number(cfg?.comfyTimeoutMin);
+  const min = Number.isFinite(fromEnv) && fromEnv > 0
+    ? fromEnv
+    : (Number.isFinite(fromCfg) && fromCfg > 0 ? fromCfg : DEFAULT_TIMEOUT_MIN);
+  return Math.min(min, 24 * 60) * 60 * 1000;
+}
 
 /**
  * 端口自动发现。
@@ -402,7 +442,18 @@ export async function runWorkflow({ cfg, workflow, map, job, outputsDir, onSubmi
     try { await onSubmitted(remoteId, job); } catch { /* 记录失败不阻断执行 */ }
   }
 
-  for (let i = 0; i < MAX_POLL; i++) {
+  const deadline = Date.now() + resolveTimeoutMs(cfg);
+  const startedAt = Date.now();
+
+  for (;;) {
+    if (Date.now() >= deadline) {
+      const waitedMin = Math.round((Date.now() - startedAt) / 60000);
+      throw new Error(
+        `COMFY_TIMEOUT: 已等待 ${waitedMin} 分钟仍未出片（上限 ${Math.round(resolveTimeoutMs(cfg) / 60000)} 分钟）。`
+        + '任务可能仍在 ComfyUI 里运行 —— 可到 ComfyUI 队列查看，'
+        + '或调大超时（配置 comfyTimeoutMin / 环境变量 JZ_COMFY_TIMEOUT_MIN，单位分钟）后重试。',
+      );
+    }
     await cancellableSleep(job, POLL_MS);     // 取消后最多 250ms 中断
     throwIfCancelled(job);
 

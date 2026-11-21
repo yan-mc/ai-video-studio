@@ -10,9 +10,15 @@ export type IconName =
   | 'chevronRight' | 'chevronLeft' | 'play' | 'stop' | 'upload' | 'download'
   | 'folder' | 'file' | 'image' | 'video' | 'audio' | 'cube' | 'text'
   | 'sun' | 'moon' | 'palette' | 'alert' | 'info' | 'spark' | 'layers' | 'users'
-  | 'grid' | 'list' | 'external' | 'copy' | 'eye' | 'clock' | 'zap';
+  | 'grid' | 'list' | 'external' | 'copy' | 'eye' | 'clock' | 'zap' | 'swap'
+  | 'scissors';
 
 const PATHS: Record<IconName, string> = {
+  /**
+   * 角色替换 —— 两个人形 + 中间双向箭头。
+   * 语义要能一眼看出「A 换成 B」，所以不能复用 users（那是角色库）。
+   */
+  swap: 'M4 7h9M9 4l4 3-4 3M20 17h-9M15 14l-4 3 4 3',
   canvas: 'M3 4h7v7H3zM14 4h7v7h-7zM3 14h7v6H3zM14 14h7v6h-7z',
   users: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75',
   assets: 'M3 5h18v14H3zM3 10h18M9 10v9',
@@ -55,6 +61,12 @@ const PATHS: Record<IconName, string> = {
   eye: 'M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
   clock: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7v5l3 2',
   zap: 'M13 2L4 14h6l-1 8 9-12h-6z',
+  /**
+   * 视频剪辑 —— 剪刀。
+   * 语义要求：一眼看出「剪」。不能复用 video（那是生成）或 layers（那是图层），
+   * 剪辑在侧栏里与"渲染/图像/预演"并列，必须自己可辨。
+   */
+  scissors: 'M6 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM20 4L8.12 15.88M14.47 14.48L20 20M8.12 8.12L12 12',
 };
 
 export interface IconProps extends Omit<SVGProps<SVGSVGElement>, 'name'> {

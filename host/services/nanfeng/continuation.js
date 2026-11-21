@@ -355,6 +355,8 @@ export function snapToGrid(seconds, fps = 24) {
  * @param {number} opts.segments          段数（≥2）
  * @param {string} [opts.contextLength]   决定裁切帧数，默认 '22'
  * @param {number} [opts.fps]
+ * @param {number} [opts.minFirstFrames]  段 1 的最小采样帧数，默认 124
+ * @param {number} [opts.maxSegmentFrames] 单段采样帧数上限，默认 362（H3 训练分布）
  * @returns {{ segments: Array<{index:number, requestSec:number, sampleFrames:number,
  *            deliverFrames:number, deliverSec:number}>, totalSec:number,
  *            targetSec:number, trimFrames:number, warnings:string[] }}
@@ -364,6 +366,18 @@ export function planSegments({
   segments,
   contextLength = '22',
   fps = 24,
+  /**
+   * 段 1 的最小采样帧数。
+   *
+   * 默认 124（5.17s）—— 叙事场景需要一段完整的开场动作。
+   *
+   * ⚠️ 但换人任务要把它降到 56（2.33s）：换人的段越短，越靠近
+   *    「每段都在重叠窗口内」，运动漂移的累积就越小（实测 10s 段
+   *    后几秒稳定性明显变差）。段 1 不是叙事铺垫，它只是链条的起点，
+   *    没理由比后面几段长一倍多。
+   */
+  minFirstFrames = 124,
+  maxSegmentFrames = 362,
 } = {}) {
   const warnings = [];
   const n = Math.max(2, Math.min(32, Math.round(Number(segments) || 9)));
@@ -373,26 +387,44 @@ export function planSegments({
     throw new Error(`context_length 必须为 ${CONTEXT_LENGTHS.join('/')}，收到 ${contextLength}`);
   }
   const trimFrames = Number(ctx);
+  const f1Min = Math.max(5, Math.round(Number(minFirstFrames) || 124));
+  const fMax = Math.max(f1Min, Math.round(Number(maxSegmentFrames) || 362));
 
   /**
-   * 候选采样帧数：5 + 17k，k 从 3 起（至少 56 帧）到 362 帧（H3 训练上限）。
-   * 段 1 也需要 ≥124 帧（5.17s）才有实际意义，但先把范围放开，下面再过滤。
+   * 候选采样帧数：5 + 17k，k 从 3 起（至少 56 帧）到 maxSegmentFrames（H3 训练上限 362）。
+   * 段 1 也需要 ≥minFirstFrames 才有实际意义，但先把范围放开，下面再过滤。
    */
   const grid = [];
-  for (let k = 3; 5 + 17 * k <= 362; k += 1) grid.push(5 + 17 * k);
+  for (let k = 3; 5 + 17 * k <= fMax; k += 1) grid.push(5 + 17 * k);
 
   // 段 1 不裁；段 2..N 交付 = grid − trimFrames，必须 > 0
   const restGrid = grid.filter((f) => f - trimFrames > 0);
 
+  /**
+   * 选点 = 三目标加权。
+   *
+   * 只看「总时长最接近」会选出很畸形的组合（实测：15s 目标 / 4 段 /
+   * context=56 时选出 段1=2.33s + 三段各 4.25s，段 1 短一半）。
+   * 换人任务里段 1 太短会导致身份锚定不足 —— 它没有上一段 latent 可依，
+   * 只能靠参考图 + 源首帧，帧数越少越容易漂。
+   *
+   * 所以同时惩罚「段 1 与后续段交付时长差太多」。
+   * 权重 3:1 —— 总时长是硬指标，均衡是偏好。
+   */
   let best = null;
   for (const f1 of grid) {
     for (const fr of restGrid) {
-      // 段 1 至少 124 帧（约 5s）—— 太短没有叙事空间
-      if (f1 < 124) continue;
-      const total = f1 + (n - 1) * (fr - trimFrames);
-      const diff = Math.abs(total - target * fps);
-      if (!best || diff < best.diff) {
-        best = { f1, fr, total, diff };
+      // 段 1 至少 minFirstFrames —— 叙事场景是 124，换人是 56
+      if (f1 < f1Min) continue;
+      const deliver1 = f1;
+      const deliverRest = fr - trimFrames;
+      const total = f1 + (n - 1) * deliverRest;
+      const diffTotal = Math.abs(total - target * fps);
+      // 段 1 与后续段交付时长的相对差（0 = 完全均匀）
+      const imbalance = Math.abs(deliver1 - deliverRest) / Math.max(1, deliver1, deliverRest);
+      const cost = diffTotal * 3 + imbalance * fps;
+      if (!best || cost < best.cost) {
+        best = { f1, fr, total, diff: diffTotal, imbalance, cost };
       }
     }
   }

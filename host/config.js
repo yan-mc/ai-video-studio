@@ -32,6 +32,17 @@ const DEFAULTS = Object.freeze({
   // （模板随插件分发，**不跟随 dataDir**；见 services/workflow-paths.js）
   workflowDir: '',
   comfyUrl: 'http://127.0.0.1:8188',
+  /**
+   * 单任务等待超时（分钟）。默认 120 = 2 小时。
+   *
+   * 为什么不再用「固定轮询次数」：早先是 600 次 × 3 秒 = 硬上限 30 分钟，
+   * 不加速方案（原模型 50 步）跑 5 秒片很容易超过，于是被 COMFY_TIMEOUT 打断 ——
+   * 而那时 ComfyUI **还在继续跑**，GPU 白烧、产物也拿不到。
+   *
+   * 现在按截止时间等，并用这个值控制上限。环境变量
+   * `JZ_COMFY_TIMEOUT_MIN` 优先级更高（临时调大不用改配置）。
+   */
+  comfyTimeoutMin: 120,
   comfyInputDir: '',
   // 南风 V15 是默认视频后端（支持二采/续写）；h3-local 为旧的模板替换路径，保留作回退
   defaultBackend: 'h3-nanfeng',
@@ -91,6 +102,8 @@ export const DEPRECATED_CONFIG_KEYS = Object.freeze([
 /** 允许通过 API 修改的字段（白名单）。可执行路径类字段刻意不在其中。 */
 export const WRITABLE_CONFIG_KEYS = Object.freeze([
   'dataDir', 'workflowDir', 'comfyUrl', 'comfyInputDir',
+  // 任务等待超时（分钟）—— 长任务（不加速跑 50 步）需要调大
+  'comfyTimeoutMin',
   'defaultBackend', 'defaultProfile', 'maxConcurrentLocal', 'accelPlan',
   'theme', 'accent', 'locale',
   // 图像生成（H3-Image）

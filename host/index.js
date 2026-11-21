@@ -19,10 +19,11 @@ import { serveSpa, serveStatic } from './static.js';
 import { recoverInterruptedJobs, runtimeStats, runJob } from './services/job-runner.js';
 import { jobs as jobsStore, newJob } from './services/job-store.js';
 import { runH3Local, runH3ImageLocal } from './services/generator.js';
-import { buildBreakdownPrompt, breakdownLevel } from './services/breakdown.js';
+import { buildBreakdownPrompt } from './services/breakdown.js';
 import { registerTools } from './tools.js';
 import { createH3Workshop } from './services/h3-workshop.js';
 import { createPostService } from './services/post.js';
+import { createEditService } from './services/edit.js';
 import { createAssetService } from './services/asset-service.js';
 import { createCanvasAgent } from './services/canvas-agent.js';
 import { createVaultService } from './services/character-vault.js';
@@ -152,6 +153,7 @@ export function apply(ctx) {
 
   const h3 = createH3Workshop({ root, cfg, getCfg });
   const post = createPostService({ cfg, getCfg });
+  const edit = createEditService({ cfg, getCfg });
   const assets = createAssetService({ cfg, getCfg });
   const vault = createVaultService({ cfg, getCfg });
   const canvasAgent = createCanvasAgent({
@@ -197,9 +199,20 @@ export function apply(ctx) {
       switch (skill) {
         case 'prompt':
         case 'h3-prompt': {
-          const lv = breakdownLevel(args.level ?? 'standard');
-          const prompt = buildBreakdownPrompt(args, lv.id);
-          return { prompt, level: lv.id, chars: prompt.length };
+          /**
+           * ⚠️ 立绘拆解现在只有**一个可编辑的提示词**，没有档位。
+           *
+           * 历史实现这里会 `breakdownLevel(args.level ?? 'standard')` 再按档位
+           * 拼装正文；档位已移除（见 services/breakdown.js 文件头）。
+           * 画布 AI 调用本技能时想改内容直接传 `args.prompt` 整段即可；
+           * 不传就是默认三视图设定卡。
+           *
+           * ⚠️ 这里曾经漏改，导致 `breakdownLevel is not a function`
+           *    在 apply() 期间抛出 → 整个插件 fiber failed（所有页面与工具
+           *    同时 404）。删掉一个导出时，**必须**全仓库 grep 它的调用点。
+           */
+          const prompt = buildBreakdownPrompt(args);
+          return { prompt, chars: prompt.length };
         }
         default:
           throw new Error(`SKILL_NOT_FOUND: 未知技能 ${JSON.stringify(skill)}`);
@@ -207,7 +220,7 @@ export function apply(ctx) {
     },
   });
   const extras = createExtrasService({ cfg });
-  attachControllers({ h3, post, assets, canvasAgent, extras, vault });
+  attachControllers({ h3, post, edit, assets, canvasAgent, extras, vault });
 
   /* ---------------------------- HTTP 路由 ---------------------------- */
 
