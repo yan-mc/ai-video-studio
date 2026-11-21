@@ -5,7 +5,619 @@
 
 ---
 
+## 2.16.0 — 加速方案真正可选 + 步数/采样器联动（2026-11-21）
+
+> 起因：用户问「能不能把替换流程的 dmad8 变成可选项」。
+> 审查后发现选择器**本来就有**，但有两个静默出废片的缺陷。
+
+### ① 缺陷：选「不加速」却只跑 8 步 —— 不报错，出废片
+
+**现象**：`accelPlan` 下拉里早就有 `none`（不加速 / 50 步）选项，
+但 `steps` 的初始值是写死的 `'8'`，切换方案时**不会变**。
+于是「选 none + 8 步」一路绿灯跑到 ComfyUI，原模型只跑 8 步去噪 —— 远未收敛，
+出片一片模糊，而且**没有任何警告**。
+
+**根因**：`accel-plan.js` 的 `checkSteps()` 对 `family === 'none'` 直接
+`return { ok: true, warning: '' }` —— 它只校验蒸馏学生，不校验原模型。
+
+**修法（三处）**：
+
+1. `checkSteps()` 补 `none` 分支：低于推荐步数 50%（50 → 25）判 `ok: false`
+2. `generator.js` 在 `ok: false` 时额外写一条「已忽略你填的 X 步，实际按 Y 步执行」
+   —— 否则用户填 8 步、系统跑 50 步，耗时涨 6 倍却没有任何解释
+3. 前端加「加速方案 → 步数联动」：切方案自动同步推荐步数，
+   但用户手动改过后不再覆盖（`stepsTouched` 标志）
+
+### ② 缺陷：采样器漏进不加速方案
+
+`buildOverrides()` 原先写 `task.sampler || d.sampler`，前端默认值 `lcm` 会顺带传进来，
+于是「选不加速 + 采样器 lcm」成立 —— **原模型用 LCM 步进器跑 50 步**。
+LCM 是为少步数设计的，在正常步数下反而会糊、丢细节。
+
+`generator.js` 的 `accelOverrides()` 之后确实会用 `accel.sampler` 再覆盖一次，
+但那是**靠执行顺序兜底**，调整合并顺序就会静默失效。
+
+**修法**：`buildOverrides()` 改用 `samplerForPlan()` / `schedulerForPlan()`，
+采样器与调度器**永远跟随加速方案**，不接受前端覆盖。
+
+### ③ UI：加速方案与 LoRA 放进同一个面板
+
+原本加速方案在右列「执行」面板、LoRA 在左列底部，两者隔得很远。
+但它们**是耦合的**：挂某些语义 LoRA（尤其成人向）时加速会明显削弱效果，
+用户需要同时看到两个选项才能权衡。
+
+现在合并为「4 · 加速方案与 LoRA」，加速方案在上、LoRA 在下。
+选 `none` 时会显示说明：「不挂加速 LoRA，跑满 50 步，慢 5–6 倍，
+但这是画质上限 —— 部分语义 LoRA 在加速下会明显失效」。
+
+### 审查结论：后端本来就支持，缺的是正确性
+
+| 环节 | 状态 |
+|---|---|
+| `/replace/meta` 下发 `accelPlans` | ✅ 原本就有（含 none） |
+| `createReplaceTask` 接收 `body.accelPlan` | ✅ 原本就有 |
+| `replace-runner` 使用 `task.accelPlan ?? 默认值` | ✅ 原本就有 |
+| **步数跟随方案** | ❌ 本次修复 |
+| **采样器跟随方案** | ❌ 本次修复 |
+| **UI 位置与提示** | ⚠️ 本次调整 |
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| `checkSteps('none', 8)` | `ok:false` —— 拦住废片组合 |
+| `checkSteps('none', 25)` | `ok:true` —— 50% 下限放行 |
+| `buildOverrides({accelPlan:'none', sampler:'lcm'})` | 采样器 = **euler**（不再被污染） |
+| `buildOverrides({accelPlan:'dmad8', sampler:'euler'})` | 采样器 = **lcm** |
+| 冒烟测试 | **180 / 180** |
+| 路由一致性 | ✅ 三方一致 |
+| TypeScript | 0 错误 |
+
+新增 2 条回归测试守护这两个缺陷。
+
+---
+
+## 2.15.0 — 顶栏 ComfyUI 启停 + 续写残留的正解（2026-11-21）
+### ① 问题：换下一个项目时，"前面的续写还在"
+
+先纠正一个我一开始也有的误判：**不是 latent 串味**。
+
+核对过 `data/replace/replace.json` 与 ComfyUI 的
+`output/nanfeng_v15_context/` —— 每个批次走 `createBatch` 生成新 UUID，
+folder 是 `sha256([workflow,node,group,run])`，**13 个历史目录互不相同**。
+续写 latent 不会跨任务互相污染。
+
+真正残留的是**队列**：
+
+- 本地「取消」只对**正在跑的那一单**发 `/interrupt`
+- 已经排进 ComfyUI 队列、还没开始的任务**不会被清掉**
+- 用户看到界面停了 → 下一单提交 → 上一单的段仍然依次执行
+
+加上每段都要冷加载 11GB 模型（日志 `loaded_models 2→0`），进程跑久了
+还有显存碎片。所以**重启进程确实是最干净的收口手段** —— 你的判断是对的，
+只是原因是队列而不是 latent。
+
+### ② 顶栏加启停按钮
+
+`App.tsx` 顶栏右侧（在 H3 / Blender 状态灯之后、配色按钮之前）新增电源按钮：
+
+| 状态 | 显示 | 点击行为 |
+|---|---|---|
+| 运行中（绿点） | ⟳ 重启 | `POST /comfy/restart` |
+| 未运行（红点） | ▶ 启动 | `POST /comfy/start` |
+| 进行中 | 启动中… / 重启中… | 禁用，防连点 |
+
+- 状态**每 10 秒自刷新** —— ComfyUI 可能被别处启停，按钮不能显示陈旧值
+- 悬停提示写明"重启会清空队列、显存碎片、节点缓存"，以及为什么要这么做
+- 找不到 `ai-runtime/start-h3.ps1` 时按钮置灰并说明原因，不做成死按钮
+
+### ③ 后端 `comfy-control.js`（新增）
+
+四条路由：`GET /comfy/status`、`POST /comfy/start|stop|restart`。
+写操作走既有 `guard()`，无令牌返回 403（已验证）；`/comfy/status` 是 GET，
+不额外校验令牌（顶栏每 10 秒要读一次）。
+
+**停止的顺序是刻意设计的**：
+
+```
+① POST /interrupt      让当前采样收尾（只杀进程会留半截 mp4/safetensors）
+② POST /queue {clear}  清掉排队项 ← 这一步才是"续写残留"的解
+③ 终止进程
+④ 等端口释放，超时再强杀
+```
+
+**启动交给 `start-h3.ps1`，不在 Node 里拼命令行** —— 端口避让（Windows
+Hyper-V 会动态保留整段 TCP）、`--lowvram --use-ck-attention`、端口文件落盘
+都在脚本里，重复一份必然走样。
+
+### ④ 过程中踩到并修掉的三个真问题
+
+**a. 必须用 `pwsh`，不能用 `powershell.exe`**
+
+`start-h3.ps1` 是 UTF-8 无 BOM 的中文脚本。Windows PowerShell 5.1 按系统
+ANSI 代码页（中文机器 = GBK）读它，脚本里的中文全变乱码、连引号都被吞掉：
+
+```
+Unexpected token '鉁?ComfyUI' in expression or statement
+The string is missing the terminator: ".
+```
+
+看起来像脚本语法坏了，实际是编码问题。同一脚本在 pwsh 7 里跑得好好的。
+`findPwsh()` 用 `where.exe` 解析真实路径（`WindowsApps\pwsh.exe` 是重解析点，
+`stat` 它 EACCES；`Program Files\WindowsApps` 整目录 EPERM 扫不了）。
+
+**b. `detached: true` 会让 PowerShell 子进程立刻以 code 0 退出**
+
+实测：spawn 后 4.6 秒就报"脚本已退出但端口未就绪"，而同一脚本在交互终端
+跑得正常。改成不 detached、只 `unref()` —— ComfyUI 是脚本内部用
+`Start-Process` 起的独立 python 进程，父进程退出不影响它。
+
+**c. 子进程秒退时必须立刻报错，不能干等 180 秒**
+
+初次实现只有超时分支，用户点了按钮会看到界面卡三分钟且没有任何提示。
+现在监听 `exit`，退出后仍未就绪就直接返回失败原因。
+
+### 验证（真跑，非静态检查）
+
+| 项 | 结果 |
+|---|---|
+| `stop` | 1.7s，返回 `{ok:true,pid,port}`，端口真释放 |
+| `start` | 12.1s（经 DSH API）/ 16.7s（直接调模块），端口 8488 就绪 |
+| `restart` | 13.5s，`phase:'start'` |
+| 无 token 调 `/comfy/start` | **403 拒绝** |
+| 顶栏按钮渲染 | Edge headless 截图确认：运行中显示「绿点 ⟳ 重启」 |
+| `/queue {clear:true}` | HTTP 200 |
+| `POST /interrupt` | HTTP 200 |
+
+`npm test` **178/178 通过**（新增 6 条启停护栏：四条路由注册、禁用
+`powershell.exe`、interrupt→clear→kill 的顺序、判活走 `/system_stats`、
+按钮挂载与自刷新、GET 不额外校验令牌）。`check:routes` 三方一致。
+
+## 2.15.0-edit — 新增「视频剪辑」：裁切 / 拼接 / 音轨（2026-11-20）
+
+### ① 为什么是「片段列表」而不是多轨时间轴
+
+本插件的主流产出是 H3 生成的**顺序片段**（镜头 1 → 2 → 3），不是需要自由编排的
+素材堆。所以编辑模型定为：素材池 → 有序片段序列 → 音轨设置 → 出片。
+
+明确**不做**多轨时间轴 UI 与逐帧预览，原因是浏览器侧的硬限制：
+WebCodecs + ffmpeg.wasm 要把整个文件读进内存，H3 的 1–2 GB 产出必然 OOM；
+而本机已有原生 ffmpeg 9.0.2，处理大文件毫无压力。所以解码与编码全部在 Host 侧跑，
+浏览器只负责组织片段。
+
+### ② 后端（`host/services/edit.js`，9 条 REST 路由 + `studio_edit` 工具）
+
+| 能力 | 实现要点 |
+|---|---|
+| `probe` | ffprobe → 时长/分辨率/帧率/音轨，字段缺失一律给 `null` |
+| `trim` | 输入端粗 seek + 输出端精 trim：纯输入 seek 会吸附到关键帧，起点差 1–2 秒 |
+| `concat` | 形状一致走流复制（秒级、无损），否则自动滤镜重编码；可带 `xfade` 转场 |
+| `audio` | `strip` / `volume` / `bgm`（可替换或与原声混音，带淡入淡出）|
+| `render` | 逐段裁切 → 拼接 → 应用音轨，产物落 `data/edit/outputs/` |
+| `projects` | 工程 json 存 `data/edit/`，只存相对路径（换机器仍可用）|
+
+几个必须记下来的判定：
+
+- **`concat` 不能只有 copy 路径**。`film/render` 只实现了 copy，接不同来源的片段时
+  会**静默产出花屏**。这里先用 ffprobe 比对 codec/宽高/帧率/音轨存在性，
+  任一项不同就自动切滤镜重编码；音轨存在性不一致还会导致 concat 流映射错位。
+- **`xfade` 的 offset 是累计时长减已消耗重叠**，算错会得到黑帧或时长不对。
+  实现里显式维护 `running` 累计值，并拒绝"片段短于转场时长"。
+- **归一化链必须带 `setsar=1`**。手机竖拍素材常带非 1:1 的 SAR，
+  不带会直接报 "Input link parameters do not match"。
+
+### ③ 前端（`EditPage.tsx` + `api/edit.ts`）
+
+三栏：素材池 / 剪辑序列 / 输出设置+成片预览。功能：加入、上下移动、移除、
+设裁剪区间（前端夹到 `[0, 片长]`，保证"看到的数字就是会用的数字"）、
+选音轨模式、出片并内联播放。另有「剪辑工程」tab 做工程增删查改。
+
+### ④ 接线与配套
+
+- 路由三方一致：`router.tsx` ROUTES / `App.tsx` NAV+RouteView / `client.js` entries
+  均加 `edit`，由 `tools/check-routes.mjs` 守护（现为 14 条）。
+- 新增 `scissors` 图标；导航里放在「工具」分组首位。
+- **`edit` 必须加进 `/file` 的 `SERVABLE_DATA_DIRS` 白名单** ——
+  否则成片能出但 `<video>` 内联播放拿到 403，表现为"出片成功但播放器空白"。
+- 样式只用已有 `--jz-*` 令牌（`--jz-r-md` 而非不存在的 `--jz-radius-*`），
+  双主题与四强调色下都能正确跟随。
+- `data/edit/` 加入 `.gitignore`（工程与产物都是运行时数据）。
+- 新增 `tools/verify-edit.mjs`：真造素材跑通裁切/拼接/转场/音轨/工程 CRUD
+  并用 ffprobe 复核时长，另含"拒绝 dataDir 外路径""写操作无 token 被拒"两项安全检查。
+
+### ⑤ 验证
+
+- `npm test` 165 / 165 通过（工具数断言从 13 更新为 14）。
+- `tools/verify-edit.mjs` 21 / 21 通过（真实 DSH HTTP 接口 + 真实 ffmpeg）。
+- 真实 ffmpeg 端到端：`trim 1→3s` 得 2.000s；`concat` 硬切 5+4=9.023s；
+  `xfade 0.5s` 得 8.500s（5+4−0.5，精确）；`strip` 输出无 audio 流；
+  `render` 两段裁切+转场+BGM 得 4.100s 且含音轨。
+- 三镜头真实素材演示（1472×832 + 864×480 + 1056×608，含裁切/转场/剥音轨）：
+  得 11.375s，期望 11.367s，**误差 0.008s**；内联播放 HTTP 200 video/mp4。
+- `npm run typecheck` 无错误；`pnpm build` 成功；`check:routes` 三方一致。
+
+### ⑥ 开发中自查修掉的严重缺陷
+
+**`Number(null) === 0` 让默认路径全坏。**
+`numOrNull(v)` 原实现 `const n = Number(v); return Number.isFinite(n) ? n : null;` ——
+`Number(null)` / `Number('')` / `Number(false)` 都是**有限数字 0**，
+于是"没设裁剪区间"的 `endSec: null` 被读成 `0`，而 `?? total` 不会对 0 回退
+（0 不是 nullish）。"整段"变成"0 到 0"→ `trim` 抛 `EMPTY_RANGE` → **多段 render 直接 500**。
+
+这是**默认路径**（用户不设裁剪区间直接出片），属于主流程全坏。
+第一版验收 20/20 全绿却漏掉了它，因为每个用例都显式给了 `endSec`。
+修复后新增专项用例「render 默认路径（不设裁剪区间）」守护。
+
+另有三个已修：`render` 的 `name` 路径穿越（加 `sanitizeFileName`）、
+首次出片因工程不存在而失败（改为就地建工程）、`lastOutputRel` 被 `saveProject` 静默丢弃。
+
+验收脚本自身也修了两处：清理写在成功路径末尾（中途 throw 就跳过）、
+只清返回值里的 rel（render 内部的 trim/concat/audio 中间产物不在返回值里）。
+现改为 `finally` + 运行前目录快照 diff，只删本次新增文件，不清空目录。
+
+### 已知边界
+
+- 剪辑只接受 `dataDir` 内的文件（安全边界，与 `film/render` 一致）。
+  外部素材需先经「素材库」上传。
+- 转场只提供淡入淡出（`xfade=fade`）。其余转场类型上游支持，但未在 UI 暴露。
+- 不做关键帧、调色、变速、字幕烧录的编辑界面（字幕仍走 `/h3/film/render`）。
+
+---
+
+## 2.14.0 — 换人接缝根治：续写链 + 每段重新锚定身份（2026-11-20）
+
+### ① 问题：独立重绘的段间必然跳变
+
+「切段 → 每段独立生成 → concat」这条路，每段都是**冷启动**：
+段 2 的首帧是模型自己推断出来的，不可能是段 1 的末帧。
+加重叠段也只缓解不根治 —— 重叠部分会生成两份不同的画面，拼接时还是得丢一份。
+
+用户实测还发现：**单个 10 秒段的后几秒稳定性本身就不好**，段间更是硬跳。
+
+### ② 方案 A：改用潜空间续写链
+
+段间通过**真实 AV latent** 传递，不是靠提示词祈祷模型"接着演"：
+
+```
+段 N 采样完 → NanFengV15CommitContinuation 存 clip_N.safetensors
+段 N+1 采样 → MotionContextLoadLatent 读 clip_N
+            → MiniMaxH3MotionContext 把末尾 trimFrames 帧钉成关键帧条件
+            → MiniMaxH3MotionContextTrim 把开头 trimFrames 帧裁掉（重放部分）
+```
+
+实测（12.25s / 3 段 / context=56）：
+
+| 项 | 结果 |
+|---|---|
+| latent 落盘 | `clip_00001/2/3.safetensors` 全部生成 |
+| 帧数 | 90 + 102 + 102 = **294 帧 = 12.28s**（源 12.25s） |
+| trim 生效 | 段2 = 102 帧 = 158 − 56 ✅ |
+| 段1→段2 接缝 | 发丝/羊角/项坠/窗棂光斑**完全对齐**，肉眼无断点 |
+
+### ③ 但暴露了更关键的问题：身份随链条累积漂移
+
+实测 **段2→段3 身份回退**：祥子变回源视频的金发礼帽角色。
+
+根因：`nodes.py:519-529` 把上一段 latent 作为**关键帧条件**注入
+（每个 latent step 一个 `resolved_frame_index` + latent block）。
+这些关键帧携带的不只是动作，还有**上一段的角色外观**。
+参考图与第 N-1 段的 latent 在同一段里竞争身份，污染随链条累积。
+
+### ④ 对策：每段重新锚定身份（三管齐下）
+
+**a. 参考图分辨率拉高**
+
+⚠️ 先纠正一个坑：`参考图尺寸`（ref_image_size, match/max）在本地 V15 上是
+**死参数** —— `h3_generator.py:1594-1599` 硬编码成 `"max"`，面板分支不读
+（`param-docs` 已标 `flag: 'dead'`）。
+
+真正接管分辨率的是 **`参考图最长边`**：
+`h3_generator.py:1404` 读它，每个参考图都过一道
+`NanFengH3LimitImageLongEdgeV15(max_long_edge=...)`。
+源码原话："One sizing authority: upstream longest-edge 1920."
+
+续写模式默认提到 **2560**（默认 1920），换人靠细节识别「这张脸是谁」。
+
+**b. 每段都重新喂参考图**
+
+`shot.refs.images` 在每个段循环里都从 `task.refImages` 重建，不是只在段 1 挂。
+（这一条本来就有，但加了护栏测试防止被改断。）
+
+**c. 段 2 起在提示词里插入身份锚定句**
+
+官方 skill（h3-continuation §1）的语义是：
+
+> Segment 2 onward: the actual previous latent motion and camera state take
+> precedence over planned poses and picture poses.
+> **Pictures retain identity, face, hair, costume.**
+
+即「latent 管动作，参考图管身份」。但模型不会自己遵守，
+必须在每段提示词里写成可执行指令：
+
+```
+Identity lock: the subject keeps the exact face, hair, horns, costume and
+body shape shown in <Picture 1> for the entire clip. The carried motion from
+the previous segment supplies movement, camera and timing only — it never
+supplies appearance. Every frame shows the <Picture 1> character, not any
+other person.
+```
+
+放在第一个空行之后（紧跟首句总结），保证注意力权重。**段 1 不加** ——
+它没有上一段 latent，不存在身份竞争，加了只是浪费注意力。
+
+### ⑤ 顺带修掉的两个 bug
+
+**`context_length` 被预设覆盖（静默跑错参数）**
+
+`presets.js` 的两套续写预设把 `context_length` 写死成 `'22'`，
+而合并顺序是「预设 → 镜头 overrides → extraParams」。
+换人线早先没写这个键 → 用户选 56（2.33s）实际跑 22（0.92s）：
+重叠窗口只剩 40%，产物 136 帧而不是 102 帧，**零报错**。
+
+**`replaceStore.upsert` 返回整个数组**
+
+底层 `updateJson` 返回写入后的**完整集合**，不是单条记录。早先直接
+`return updateJson(...)`，于是：
+
+- `createReplaceTask` 返回给前端的是数组 → `task.id` 变成
+  一串 id 拼起来的字符串 → 调 `/replace/run/` 必然 `INVALID_ID`
+- `runReplaceBatch` 的 emit 同样中招 → `current.sourceRel` 变 undefined
+  → 抛 `PATH_REQUIRED`
+
+已在 store 层收口（回读单条），所有调用方都正确。
+
+### ⑥ 新的默认值
+
+| 项 | 值 | 理由 |
+|---|---|---|
+| `continuation` | `true` | 独立重绘段间必跳 |
+| `contextLength` | `'56'` | 节点最大档 2.33s |
+| `segmentSec` | `4` | 让重叠占比过半 |
+| `refImageLongEdge` | 2560（续写）/ 1920（独立） | 续写要更高身份细节 |
+| 二采 | 强制关 | latent 不可缩放，开了第二段直接 ValueError |
+
+### 测试
+
+**160 / 160 通过**。新增 4 条抗漂移护栏 + 10 条续写机制护栏，
+覆盖 context_length 四档、段 1 不裁、trim 生效、任务 JSON 五字段、
+身份锚定句必须真正提交（`prompt: segmentPrompt`）、每段重挂参考图。
+
+---
+
+## 2.12.0 — 角色替换独立业务线 + 两个静默失效修复（2026-11-20）
+
+### ① 新增：独立「角色替换」页（与渲染页平行，互不干扰）
+
+放在左侧导航「制作」组第二位（渲染页下一格），路由 `#/replace`。
+
+**为什么必须独立成一条线**：常规渲染的参考图顺序是
+
+`
+角色卡 → 人设卡 → 手工图 → 场景道具
+`
+
+项目里只要绑着角色卡，用户手工挂的参考图就会被**顶到后面**，
+`<Picture 1>` 指向另一个人 —— 而且**不报错**。换人对此零容忍。
+所以这一页不读项目、不读镜头卡、不读角色卡，参考图编号 **= 选择顺序**。
+
+| 项 | 实现 |
+|---|---|
+| 存储 | `data/replace/replace.json`，与 `jobs.json` / `shots/` 完全隔离 |
+| 参数 | 独立一份，不读也不写 `config.json` 的渲染默认值 |
+| 提示词 | 四段式结构（照 `h3-character-replace` skill），只留 3 个占位符 |
+| 默认参数 | DMAD8 + lcm + simple + 8 步 + 0.6MP + 降噪 1.0 + 二采关 + 续写关 |
+| 光影 | 默认 `none`（继承源视频），可显式改成 4:1 |
+
+**通用换人提示词**（去掉所有特例触发词）：
+
+`	ext
+将参考视频1视频中的{原角色特征}替换成参考图{N}中的{目标角色特征}。完全复刻参考视频1内动作。
+
+<Subject 1> 是 <Picture N> 中的{目标角色特征}，替换原视频中的{原角色特征}。
+<Video 1> 是源视频，保留其完整动作、运镜和剪辑节奏。
+
+{分镜或自动兜底句}
+
+全程保持 <Subject 1> 的身份和外观与 <Picture N> 完全一致。完全复刻 <Video 1> 内动作，不添加新角色。
+`
+
+多角色时 `roles` 数组逐项展开，`<Subject N>` / `<Picture N>` 按顺序递增。
+
+### ② 长视频自动分段
+
+源视频超过 `segmentSec`（默认 10s）自动切段，逐段重绘后无损拼接。
+
+- **切段用重编码**（`-ss` 输入侧 + `-t` + crf 16），不能用 `-c copy`：
+  后者只能切在关键帧，实际段长会漂移到 8.3s / 11.7s，与 H3 的 17k+5 帧网格对不上
+- **顺手剥音轨**（`-an`）：换人铁律 1，晚一步就会被当成 `<Audio 1>`
+- 拼接走 concat demuxer `-c copy`（各段同编码同分辨率，来自同一源）
+- **不走潜空间续写**：续写要吃上一段 AV latent，且与二采硬互斥；
+  换人的源视频本身就是连续锚点，不需要 latent 链
+- 末段 <1s 自动并入上一段，避免产出碎片
+
+实测（2s/2s/1s 三段）：切段 2.000/2.000/1.000s，拼接 5.000s（150 帧 @30fps），全部无音轨。
+
+### ③ 修复：画布侧语义 LoRA 被静默丢弃
+
+`app-src/src/canvas/runner.ts` 发的是 `{ file, strength }`，
+而 `solveLoraStack` 只认 `{ name, strength }`：
+
+`js
+.filter((x) => x && typeof x.name === 'string' && x.name.trim())
+`
+
+传 `{file}` 的条目在归一化时**整条消失** —— 不报错、不进 `rejected`、
+总强度按 0 计，最终只有加速学生上机。实测：挂 2 个动作 LoRA，accepted = 0。
+
+已改为 `name: file`，并加护栏测试（既验契约，也验源码里必须是 `name:`）。
+
+### ④ 修复：≤200 字的手写提示词被整句丢弃
+
+`compilePrompt` 只在 `prompt.length > 200` 时整段采用手写稿；
+短稿被塞进 `pkg.sceneLayout`，但 `compileRef2VA` 的分支是
+
+`js
+if (scenes.length) { 逐镜头 }  else { 用 sceneLayout }
+`
+
+而 `toShotInputPackage` **永远**会造默认 `shots` 数组 → `scenes` 恒非空
+→ `sceneLayout` 是死字段。实测提交 146 字符的 LoRA 触发词，提示词里一个字都没有。
+
+已改为同时写入 `shots[0].action`（真正被读取的位置），并做去重。
+
+### ⑤ 顺带确认的两个死参数
+
+钢琴那组镜头里存着 `H3完整Sigma序列` + `V81一采使用手动Sigma: true`，
+但 V15 把 `sigma_requested` 硬编码为 False（`h3_generator.py:1687`），
+三个 Sigma 策略里只有「原生轨迹」可达，**手动序列完全不生效**。
+换人线刻意不写这两项，避免误导排障。
+
+真正起作用的 shift 由 DMAD8 学生的训练设定给出（video 12 / audio 2），
+由 `generator.js` 的 accel-plan 自动写入。
+
+### 测试
+
+141 条全部通过（新增 8 条换人线 + 7 条 LoRA 栈 + 3 条提示词边界）。
+`pnpm typecheck` 0 错误，`pnpm check:routes` 三方一致（13 条路由）。
+
+---
+
+## 2.13.0 — 立绘拆解：拆掉档位/尺寸/描述，只留一个可改的提示词（2026-11-20）
+
+### 问题
+
+立绘拆解原先是「填表」：角色名 / 服装清单 / 附属部件 / 三视图角度 / 补充说明
+五个输入，加 `level`（standard / parts / full）与 `sizeId` 两块档位，
+正文由 `breakdown.js` 按档位拼装。
+
+**核心问题是改不动结构**：
+
+| 想要 | 只能这样 | 为什么没用 |
+|---|---|---|
+| 换一套衣服 | 往「服装清单」塞词 | 正文口径仍是「逐件拆出参考图里**已有**的服装」，模型照图走 |
+| 加一个视角 | 改「三视图角度」 | 正文里「三个视角」的措辞与排版说明不会跟着变 |
+| 改排版/材质要求 | 写「补充说明」 | 该段拼在正文**末尾**，权重最低 |
+| 换档位拿更多内容 | 选「完整设定卡」 | `full` 与 `standard` **逐字相同**（表情差分 1.0.2 已移除）|
+
+### 改法
+
+**去掉全部结构化字段与档位，只留一个巨大的提示词输入框。**
+
+| 项 | 旧 | 新 |
+|---|---|---|
+| 输入 | 5 个字段 + level + sizeId | **一个字符串 `prompt`** |
+| 正文 | 后端按档位拼装 | **后端不拼装**，只 `trim` |
+| 默认值 | 由字段组合隐式产生 | `DEFAULT_BREAKDOWN_PROMPT`（1159 字符）|
+| 尺寸 | 3 档下拉 | 固定 2368×1776（4.2MP）|
+| 超长 | `normalizeImagePrompt` 静默 `slice(0,4096)` | **400 `PROMPT_TOO_LONG`**，不静默截断 |
+
+### 默认提示词的关键设计：授权句
+
+这是「改了能生效」的前提。参考图的约束力很强，只写「服装完全以参考图为准」
+用户就改不动；只写「按文字改」又会在不动的时候跑偏。所以同时写死两条边界：
+
+```
+文字里明确写出的要求优先于参考图：凡是文字里要求替换或新增的服装、配色、部件，
+都按文字执行并整体替换掉参考图中对应的部分；
+文字没有提到的部分，一律严格照参考图还原。
+```
+
+**删掉这句，换装类改动必然失效** —— 冒烟测试有断言盯着它。
+
+其余沿用 1.0.2 的细节锁（逐件单列 / 保持比例朝向 / 材质工艺逐项复刻 /
+不丢小件 / 不增删），并保持「纯文本、不编号小标题」两条老约束
+（编号会让产出图里出现编号与乱码）。
+
+### 前端
+
+`BreakdownPage.tsx` 从四步改成三步：① 选立绘 → ② 改提示词 → ③ 结果。
+
+- 提示词框 `minHeight: 60vh`（截图实测 840px 高），等宽字体
+- 顶部三个动作：**恢复默认 / 清空 / 校验**
+- 计数字样 `N / 4096 字符`，改动后的徽章从「默认值」变「已改动」
+- 草稿存 `localStorage`（键 `jz.breakdown.promptDraft.v1`），刷新不丢
+- 结果页额外显示**本次实际提交的提示词** —— 改了没生效时能立刻自查提交的是哪一版
+
+### 顺带修掉的两个真问题
+
+**① 默认选中一张解码必失败的占位图**
+
+素材列表首个元素是冒烟测试留下的 `jz-test.png`（155 字节，64×64），
+页面原先直接 `imgs[0]?.rel` 预选它。ComfyUI 读它报
+
+```
+COMFY_EXEC_ERROR @LoadImage: [Errno 542398533] Generic error in an external library: 'avcodec_receive_frame()'
+```
+
+—— 一个完全看不出根因的错误，而用户每次进页面都默认选中它。
+现在按 `MIN_REF_IMAGE_BYTES`（32 KB）过滤：可用的才预选，
+不可用的仍列出但置灰并标「体积过小，不可用」（直接隐藏会让人以为素材丢了）。
+
+**② 提示框里渲染出了字面量 `**`**
+
+引导语里写了 `**提交给模型的全部提示词**`，但那是 JSX 文本节点不是 Markdown，
+页面把星号原样显示出来了。改为 `<b>`。
+
+### 兼容
+
+`character` / `outfit` / `parts` / `views` / `notes` / `level` / `expressions` /
+`sizeId` 传了**不报错**，但不再影响提示词，响应里回 `legacyFieldsIgnored`
+明确告知调用方（不制造「我传了 outfit 却没生效」的黑箱）。
+
+### 验证（真浏览器 + 真 ComfyUI）
+
+用 Edge headless + CDP 驱动页面点真按钮，走真 ComfyUI，同一张立绘跑 A/B：
+
+| | 提示词 | 结果 |
+|---|---|---|
+| **A 默认** | 1159 字符，未改动 | 条纹衬衫 + 黄色短裤 + 毛腿 + 羊角 + 耳饰，**与参考图一致**，另出服装/部件拆解 |
+| **B 改衣** | 484 字符，服装段换成白色高领毛衣/米色外套/灰长裤/白短靴 | **整套换掉**；羊角、发色、毛腿（未提及项）保持原样 |
+
+对应产物：`outputs/job_mwns4gpd67gcc4.png`（A）、`outputs/job_mwns7nteook3es.png`（B）。
+
+### 提示词框旁加复制按钮
+
+需求是"能把默认提示词复制出来"。做了两个入口（都在提示词面板标题栏，
+紧挨着输入框）：
+
+| 按钮 | 复制什么 | 用途 |
+|---|---|---|
+| **复制默认值** | 后端下发的 `DEFAULT_BREAKDOWN_PROMPT`，**不受输入框当前内容影响** | 备份、发给别人、粘到别处对照 |
+| **复制当前** | 输入框里这段，即**实际会提交的那段** | 存档一个改好的版本 |
+
+- 输入框为空时点「复制当前」会**回落到默认提示词**，不会复制一个空串
+- 剪贴板走 `navigator.clipboard.writeText`，失败时降级到
+  `textarea + execCommand('copy')` —— DSH Desktop 的窗口 origin 是
+  `dsh-app://app`，那是自定义协议，剪贴板 API 未必可用；没有降级的话
+  复制会静默失败，用户以为复制了、实际剪贴板还是旧的
+
+**⚠️ Windows 剪贴板会把 `\n` 规范化为 `\r\n`。** 写进去 `A\n\nB`、读回来是
+`A\r\n\r\nB`；`writeText` 与 `execCommand` **两条路径都如此**，这是 text/plain
+的平台约定，不是缺陷。默认提示词有 14 个空行，所以复制结果的字节数会比
+页面显示多 14 —— 比对/测试必须归一化换行，逐字节比会误报。
+
+### 顺手改掉的一个可用性问题
+
+页面原先默认停在「① 选立绘」，那个巨大的提示词框和它的几个按钮要点一次
+「下一步」才看得到。但这一页的核心就是改提示词，而参考图在加载时已经自动
+选中第一张可用的图了 —— 于是改成**首屏直接落在「② 改提示词」**。
+选图仍可点步骤条或「换一张」回到 ①。
+
+### 测试
+
+137 条全部通过（新增 11 条：默认提示词完整性 / 授权句存在 / 原样返回 /
+空值回落 / 作废字段回报 / 尺寸固定 / meta 契约 / preview 回显 /
+超长 400 / 前端只留一个输入框）。`typecheck` 0 错误，`check:routes` 三方一致。
+
+另加 2 条纯前端护栏（复制按钮存在 + 剪贴板降级 + 空输入回落 / 首屏落在提示词步骤），
+以及一个真浏览器验证脚本 `tools/_e2e-copy.mjs`：
+点按钮 → `navigator.clipboard.readText()` 读回 → 与页面/后端逐字比对（归一化换行），
+12 项断言全绿。
+
+---
+
 ## 2.11.0 — Sakuga 实战验证 + 二采/续写互斥确认（2026-11-19）
+
 
 ### ① 确认：潜空间续写与二采硬互斥
 
@@ -1836,4 +2448,3 @@ H3 帧数必须落在 **17k+5** 网格：
 ## [0.1.0] — 2026-11 之前
 
 P0 骨架 + mock 后端。已被 1.0.0 完全取代，不再维护。
-

@@ -555,6 +555,16 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
   if (stepCheck.warning) {
     job.warnings = [...(job.warnings ?? []), stepCheck.warning];
   }
+  /**
+   * `ok: false` 表示「这个步数不能这么用」，此时已经**静默回退到方案推荐步数**。
+   *
+   * 必须额外说清「实际跑了多少」—— 否则用户填 8 步、系统跑 50 步，
+   * 耗时长 5 倍却没有一句解释，只会以为是卡住了。
+   */
+  if (!stepCheck.ok && wantSteps != null) {
+    job.warnings = [...(job.warnings ?? []),
+      `已忽略你填的 ${wantSteps} 步，实际按 ${accel.plan.label} 的推荐值 ${steps} 步执行`];
+  }
 
   job.params = {
     ...(job.params ?? {}),
@@ -925,6 +935,16 @@ export async function runH3Nanfeng({
   }
   if (stepCheck.warning) {
     job.warnings = [...(job.warnings ?? []), stepCheck.warning];
+  }
+  /**
+   * `ok: false` 表示「这个步数不能这么用」，此时已经**静默回退到方案推荐步数**。
+   *
+   * 必须额外说清「实际跑了多少」—— 否则用户填 8 步、系统跑 50 步，
+   * 耗时长 5 倍却没有一句解释，只会以为是卡住了。
+   */
+  if (!stepCheck.ok && wantSteps != null) {
+    job.warnings = [...(job.warnings ?? []),
+      `已忽略你填的 ${wantSteps} 步，实际按 ${accel.plan.label} 的推荐值 ${steps} 步执行`];
   }
 
   /**

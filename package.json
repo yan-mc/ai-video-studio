@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-jiuzhang-studio",
-  "version": "2.11.0",
+  "version": "2.16.0",
   "private": true,
   "type": "module",
   "license": "UNLICENSED",
@@ -48,3 +48,4 @@
     "audit:params": "node tools/audit-params.mjs"
   }
 }
+

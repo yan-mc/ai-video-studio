@@ -57,9 +57,9 @@ async function checkAsync(name, fn) {
 /* ------------------------------------------------ 1. 纯模块（无 ctx） */
 
 async function moduleChecks() {
-  await checkAsync('schema: 217 个参数', async () => {
+  await checkAsync('schema: 221 个参数', async () => {
     const m = await import('../host/services/nanfeng/schema.js');
-    assert.equal(m.PARAM_COUNT, 217);
+    assert.equal(m.PARAM_COUNT, 221);
   });
 
   await checkAsync('schema: enrichSchema 全覆盖中文释义', async () => {
@@ -306,6 +306,52 @@ async function moduleChecks() {
     assert.equal(a.steps, 50);
   });
 
+  /**
+   * 不加速方案必须校验步数。
+   *
+   * ==========================================================================
+   * 这组测试守护的是一个**会出废片但不报错**的组合
+   * ==========================================================================
+   *
+   * 旧行为：`checkSteps('none', 8)` 返回 `{ok:true, warning:''}` —— 一路绿灯。
+   * 后果是「选不加速 + 前端 steps 默认 8」→ 原模型只用 8 步去噪，
+   * 远未收敛，出片一片模糊，而且没有任何警告。
+   *
+   * 现在的规则：低于推荐步数 50%（50 → 25）判为不可用（ok:false），
+   * generator 会回退到推荐步数并写明「已忽略你填的 X 步」。
+   */
+  await checkAsync('加速方案：none 步数过低必须判为不可用（否则出废片不报错）', async () => {
+    const { checkSteps } = await import('../host/services/accel-plan.js');
+    assert.equal(checkSteps('none', 8).ok, false, '8 步跑原模型必须被拒');
+    assert.equal(checkSteps('none', 20).ok, false, '20 步仍远低于 50 步，应被拒');
+    assert.equal(checkSteps('none', 25).ok, true, '50% 是下限，25 步放行');
+    assert.equal(checkSteps('none', 50).ok, true, '推荐值必须放行');
+    // 蒸馏学生仍然只警告不拒绝（它是分布外而非没跑完）
+    assert.equal(checkSteps('dmad8', 20).ok, true);
+    assert.match(checkSteps('dmad8', 20).warning, /分布外/);
+  });
+
+  /**
+   * 换人流程：采样器必须跟随加速方案，不接受前端覆盖。
+   *
+   * 旧行为 `task.sampler || d.sampler` 会让前端默认的 `lcm` 漏进 `none` 方案，
+   * 变成「原模型用 LCM 步进器跑 50 步」—— 不报错，但会糊。
+   */
+  await checkAsync('换人：采样器跟随加速方案，不被前端 lcm 污染', async () => {
+    const { buildOverrides } = await import('../host/services/replace-runner.js');
+    const none = buildOverrides({
+      accelPlan: 'none', steps: 50, sampler: 'lcm', scheduler: 'simple', continuation: false,
+    });
+    assert.equal(none['采样器'], 'euler', '不加速方案必须用 euler，不能被 lcm 覆盖');
+    assert.equal(none['采样步数'], 50);
+
+    const dmad = buildOverrides({
+      accelPlan: 'dmad8', steps: 8, sampler: 'euler', scheduler: 'simple', continuation: false,
+    });
+    assert.equal(dmad['采样器'], 'lcm', '蒸馏方案必须用 lcm，不能被 euler 覆盖');
+    assert.equal(dmad['采样步数'], 8);
+  });
+
   await checkAsync('加速方案：覆盖预设里的采样器/步数（extraParams 最高优先级）', async () => {
     const nf = await import('../host/services/nanfeng/index.js');
     const { planForShot } = await import('../host/services/accel-plan.js');
@@ -333,6 +379,640 @@ async function moduleChecks() {
     assert.match(src, /strict_lora_opt_in = True/);
     // 而 启用LoRA 的早退只对 individual=False 生效
     assert.match(src, /if not individual and not bool\(kwargs\.get\("启用LoRA"/);
+  });
+
+  /* -------------------- LoRA 栈求解（本轮新增） -------------------- */
+
+  /**
+   * 这组测试守护「用户选的语义 LoRA 真的会生效」。
+   *
+   * 历史缺陷（本轮实测复现）：画布的 `nodeToShot` 把语义 LoRA 写成
+   * `{ file, strength }`，而 `solveLoraStack` 只认 `{ name, strength }`，
+   * 于是条目在入参归一化处被**静默丢弃** —— 不报错、不进 rejected、
+   * 总强度按 0 计，最终只有加速学生上机。画布上拖着「语义 LoRA」
+   * 以为生效了，实际一帧都没用上。
+   */
+  await checkAsync('LoRA 栈：{name} 契约能进槽，{file} 会被静默丢弃（护栏）', async () => {
+    const { solveLoraStack } = await import('../host/services/lora-catalog.js');
+    const files = ['20_motion\\A.safetensors'];
+    const byName = solveLoraStack([{ name: '20_motion\\A.safetensors' }], { availableFiles: files });
+    assert.equal(byName.accepted.length, 1, '{name} 形态应当被接受');
+    const byFile = solveLoraStack([{ file: '20_motion\\A.safetensors' }], { availableFiles: files });
+    assert.equal(byFile.accepted.length, 0, '{file} 形态会被丢弃 —— 这是契约，前端必须发 name');
+  });
+
+  await checkAsync('LoRA 栈：画布 runner 必须发 name 而不是 file', async () => {
+    const f = await import('node:fs');
+    const src = f.readFileSync(new URL('../app-src/src/canvas/runner.ts', import.meta.url), 'utf8');
+    assert.match(src, /loras:\s*semanticLoras\.map\(\(file\)\s*=>\s*\(\{\s*\n?\s*name:/,
+      'nodeToShot 的 loras 映射必须产出 name 字段，否则后端静默丢弃');
+  });
+
+  await checkAsync('LoRA 栈：单选类后来的替换先来的', async () => {
+    const { solveLoraStack } = await import('../host/services/lora-catalog.js');
+    const files = ['30_style\\a.safetensors', '30_style\\b.safetensors'];
+    const r = solveLoraStack(
+      [{ name: '30_style\\a.safetensors' }, { name: '30_style\\b.safetensors' }],
+      { availableFiles: files },
+    );
+    assert.equal(r.accepted.length, 1, '画风是单选类，只能留 1 条');
+    assert.match(r.accepted[0].name, /b\.safetensors/);
+    assert.equal(r.replaced.length, 1);
+  });
+
+  await checkAsync('LoRA 栈：加速学生恒 1.0 且不计入总强度', async () => {
+    const { solveLoraStack } = await import('../host/services/lora-catalog.js');
+    const files = ['00_turbo\\dmad.safetensors', '20_motion\\m.safetensors'];
+    const r = solveLoraStack(
+      [{ name: '00_turbo\\dmad.safetensors', strength: 0.5 }, { name: '20_motion\\m.safetensors' }],
+      { availableFiles: files },
+    );
+    const accel = r.accepted.find((a) => a.role === 'accelerator');
+    assert.equal(accel.appliedStrength, 1, '加速学生强度必须被钉回 1.0');
+    assert.equal(r.totalStrength, 0.7, '总强度只算语义 LoRA');
+  });
+
+  await checkAsync('LoRA 栈：多挂按 stackDecay 衰减 + 总强度看门狗', async () => {
+    const { solveLoraStack, STRENGTH_LIMITS } = await import('../host/services/lora-catalog.js');
+    const files = [
+      '20_motion\\a.safetensors', '20_motion\\b.safetensors', '30_style\\s.safetensors',
+      '10_camera\\c.safetensors',
+    ];
+    const decay = solveLoraStack(
+      [{ name: '20_motion\\a.safetensors' }, { name: '20_motion\\b.safetensors' }],
+      { availableFiles: files },
+    );
+    assert.ok(decay.accepted[1].appliedStrength < decay.accepted[0].appliedStrength, '第 2 条动作类应衰减');
+    const over = solveLoraStack(
+      [
+        { name: '20_motion\\a.safetensors', strength: 1 },
+        { name: '20_motion\\b.safetensors', strength: 1 },
+        { name: '30_style\\s.safetensors', strength: 1 },
+        { name: '10_camera\\c.safetensors', strength: 1 },
+      ],
+      { availableFiles: files },
+    );
+    assert.ok(over.totalStrength <= STRENGTH_LIMITS.warn, '超硬上限后必须砍到建议阈值以下');
+    assert.ok(over.rejected.length > 0, '被砍的条目必须出现在 rejected 里，不能静默消失');
+  });
+
+  await checkAsync('LoRA 栈：不存在的文件在组装期就被拒', async () => {
+    const { solveLoraStack } = await import('../host/services/lora-catalog.js');
+    const r = solveLoraStack(
+      [{ name: '20_motion\\NotInstalled.safetensors' }],
+      { availableFiles: ['20_motion\\real.safetensors'] },
+    );
+    assert.equal(r.accepted.length, 0);
+    assert.match(r.rejected[0].reason, /不在 ComfyUI 的 loras 目录/);
+  });
+
+  await checkAsync('LoRA 栈：探测失败（availableFiles 为空）时不误杀', async () => {
+    const { solveLoraStack } = await import('../host/services/lora-catalog.js');
+    const r = solveLoraStack([{ name: '20_motion\\X.safetensors' }], { availableFiles: [] });
+    assert.equal(r.accepted.length, 1, 'ComfyUI 不可达时不能把用户的 LoRA 全丢掉');
+  });
+
+  /* -------------------- 提示词：手写短句不得被丢（本轮修复） -------------------- */
+
+  /**
+   * 守护「用户手写的短提示词会进最终提示词」。
+   *
+   * 历史缺陷（本轮实测复现）：compilePrompt 只在 `prompt.trim().length > 200`
+   * 时整段采用手写稿；不足 200 字时它退化成"简短备注"，被追加到
+   * `pkg.sceneLayout`。但 compileRef2VA 的分支是
+   *     if (scenes.length) { 逐镜头 } else { 用 sceneLayout }
+   * 而 toShotInputPackage **永远**会造一个默认 shots 数组 —— 于是 scenes 恒非空，
+   * sceneLayout 是死字段，那句话被整句丢弃。
+   *
+   * 触发词（LoRA trainedWords）几乎都是 200 字以下的一两句，正好全部踩中：
+   * 用户以为挂上 LoRA 就有效果，实际触发词一个字都没进提示词。
+   */
+  await checkAsync('提示词：<=200 字的手写短句必须进最终提示词', async () => {
+    const api = await import('../host/api/index.js');
+    const short = 'Video depicts a sexual scene between a female central character and a giant partner';
+    assert.ok(short.length <= 200);
+    const out = api.compilePrompt({
+      id: 'p', mode: 'ref2va', prompt: short,
+      description: 'a different description',
+      refs: { images: ['assets/x.png'], videos: [], audios: [] },
+    }, []);
+    assert.ok(out.includes(short), '短提示词被丢掉了 —— 它只被写进了 scenes 恒非空时不会被读取的 sceneLayout');
+  });
+
+  await checkAsync('提示词：>200 字的手写稿整段采用且不被重编译', async () => {
+    const api = await import('../host/api/index.js');
+    const long = 'A'.repeat(120) + ' ' + 'B'.repeat(120);
+    assert.ok(long.length > 200);
+    const out = api.compilePrompt({
+      id: 'p', mode: 'ref2va', prompt: long,
+      description: 'a different description',
+      refs: { images: ['assets/x.png'], videos: [], audios: [] },
+    }, []);
+    assert.ok(out.includes(long), '完整手写稿必须原样保留');
+    assert.ok(!out.includes('subject_definitions:'), '手写成品不应再被骨架包一层');
+  });
+
+  await checkAsync('提示词：短句与 description 相同时不重复追加', async () => {
+    const api = await import('../host/api/index.js');
+    const same = 'a woman kneels in a stone chamber and looks up';
+    const base = { id: 'p', mode: 'ref2va', description: same, refs: { images: ['assets/x.png'], videos: [], audios: [] } };
+    // description 本身就会进 summary 与 [Shot 1]，所以"重复"不能用绝对次数判断，
+    // 要比"带上 prompt"与"完全不带 prompt"两次输出是否一致。
+    const withPrompt = api.compilePrompt({ ...base, prompt: same }, []);
+    const without = api.compilePrompt({ ...base }, []);
+    assert.equal(withPrompt, without, 'prompt 与 description 相同时不应再追加一遍');
+  });
+
+  /* -------------------- 角色替换（换人）业务线 -------------------- */
+
+  /**
+   * 这组测试守护「换人线与常规渲染完全隔离」这条硬约束。
+   *
+   * 实测背景（2026-11-19 A/B 对照）：常规渲染页的参考图顺序是
+   *   角色卡 → 人设卡 → 手工图 → 场景道具
+   * 项目里只要绑着角色卡，用户手工挂的图就会被顶到后面，`<Picture 1>`
+   * 指向另一个人 —— 而且**不报错**。换人对此零容忍，所以整条线独立。
+   */
+  await checkAsync('换人：提示词四段式结构完整', async () => {
+    const R = await import('../host/services/replace.js');
+    const p = R.buildReplacePrompt({
+      roles: [{ sourceDesc: '黑发猫耳少女', targetDesc: '银蓝长发羊角少女', pictureIndex: 1 }],
+    });
+    assert.match(p, /将参考视频1视频中的黑发猫耳少女替换成参考图1中的银蓝长发羊角少女/);
+    assert.match(p, /<Subject 1> 是 <Picture 1> 中的银蓝长发羊角少女/);
+    assert.match(p, /<Video 1> 是源视频/);
+    assert.match(p, /完全复刻 <Video 1> 内动作，不添加新角色/);
+  });
+
+  await checkAsync('换人：提示词不写声音字段与否定式清单（skill 铁律 2/4）', async () => {
+    const R = await import('../host/services/replace.js');
+    const p = R.buildReplacePrompt({ roles: [{ sourceDesc: 'A', targetDesc: 'B' }] });
+    assert.ok(!/overall_soundscape/.test(p), '换人不应写 overall_soundscape');
+    assert.ok(!/non_diegetic_music/.test(p), '换人不应写 non_diegetic_music');
+    assert.ok(!/<Audio \d+>/.test(p), '换人不应引用音频标签');
+    assert.ok(!/^\s*Forbidden/im.test(p), '换人不应有否定式 Forbidden 清单');
+  });
+
+  await checkAsync('换人：多角色各自绑定自己的 Picture 编号', async () => {
+    const R = await import('../host/services/replace.js');
+    const p = R.buildReplacePrompt({
+      roles: [
+        { sourceDesc: '甲', targetDesc: '甲2', pictureIndex: 1 },
+        { sourceDesc: '乙', targetDesc: '乙2', pictureIndex: 2 },
+      ],
+    });
+    assert.match(p, /<Subject 1> 是 <Picture 1> 中的甲2/);
+    assert.match(p, /<Subject 2> 是 <Picture 2> 中的乙2/);
+  });
+
+  await checkAsync('换人：没有角色时明确报错而不是产出空提示词', async () => {
+    const R = await import('../host/services/replace.js');
+    assert.throws(() => R.buildReplacePrompt({ roles: [] }), /REPLACE_ROLES_REQUIRED/);
+  });
+
+  await checkAsync('换人：默认参数是 DMAD8 那套', async () => {
+    const R = await import('../host/services/replace.js');
+    const d = R.REPLACE_DEFAULTS;
+    assert.equal(d.accelPlan, 'dmad8');
+    assert.equal(d.sampler, 'lcm');
+    assert.equal(d.scheduler, 'simple');
+    assert.equal(d.steps, 8);
+    assert.equal(d.megapixels, 0.6);
+    assert.equal(d.lightingId, 'none', '换人默认继承源视频光影');
+    /**
+     * 续写默认**开**（方案 A）。
+     *
+     * 早先默认是「独立重绘 + 二采关」，段间硬跳。
+     * 实测 10 秒段的后几秒稳定性本就不足，段间更是接缝明显。
+     * 续写用真实 AV latent 传状态，是唯一从机制上解决接缝的做法。
+     */
+    assert.equal(d.continuation, true, '换人默认走续写链');
+    assert.equal(d.contextLength, '22', '重叠取 22 档（0.92s），别让污染占掉半个片段');
+  });
+
+  await checkAsync('换人：分段按 10s 切且不产生碎片', async () => {
+    // 直接验分段算法（不碰 ffmpeg）：复用 planSegments 的分段规则
+    const total = 34.5;
+    const seg = 10;
+    const segments = [];
+    let cursor = 0;
+    let guard = 0;
+    while (cursor < total - 0.05 && guard < 40) {
+      guard += 1;
+      const remain = total - cursor;
+      const dur = Math.min(seg, remain);
+      if (dur < 1 && segments.length) {
+        segments[segments.length - 1].durationSec += dur;
+        break;
+      }
+      segments.push({ startSec: cursor, durationSec: dur });
+      cursor += dur;
+    }
+    assert.equal(segments.length, 4, '34.5s 应切成 4 段');
+    assert.ok(Math.abs(segments.reduce((s, x) => s + x.durationSec, 0) - total) < 0.01,
+      '段时长之和必须等于总时长');
+    assert.ok(segments.every((s) => s.durationSec >= 1), '不应出现 <1s 的碎片');
+  });
+
+  await checkAsync('换人：ratioOf 按源分辨率取最接近的画幅', async () => {
+    const { ratioOf } = await import('../host/services/replace-runner.js');
+    assert.equal(ratioOf(1920, 1080), '16:9');
+    assert.equal(ratioOf(1080, 1920), '9:16');
+    assert.equal(ratioOf(1024, 1024), '1:1');
+    assert.equal(ratioOf(640, 360), '16:9');
+    assert.equal(ratioOf(0, 0), '16:9', '缺失分辨率要回退到 16:9 而不是抛错');
+  });
+
+  await checkAsync('换人：存储与 jobs.json 完全分离', async () => {
+    const R = await import('../host/services/replace.js');
+    const cfg = { dataDir: path.join(TMP, 'data'), comfyUrl: '', ffmpegDir: '' };
+    const store = R.replaceStore(cfg);
+    assert.ok(store.file.endsWith(path.join('replace', 'replace.json')),
+      `换人集合必须是 replace/replace.json，实际 ${store.file}`);
+    assert.ok(!store.file.endsWith('jobs.json'), '换人不能复用 jobs.json');
+  });
+
+  await checkAsync('换人：整段提示词优先于结构化字段', async () => {
+    /**
+     * 这条守护「用户可以直接改整段提示词」。
+     *
+     * 早先只有 roles/shotBeats 三个占位符，只能表达一对一替换；
+     * 多角色、配角不动、某角色只在某几段出现全都表达不了。
+     * 现在 body.prompt 非空就整段用它，roles 只作兜底。
+     */
+    const R = await import('../host/services/replace.js');
+    const custom = '将参考视频1中的甲换成参考图1的乙；将参考视频1中的丙换成参考图2的丁。';
+    // 模拟 createReplaceTask 里的取舍逻辑
+    const pick = (body) => String(body.prompt ?? '').trim()
+      || R.buildReplacePrompt({ roles: body.roles ?? [], shotBeats: body.shotBeats ?? '' });
+    assert.equal(pick({ prompt: custom, roles: [{ sourceDesc: 'a', targetDesc: 'b' }] }), custom);
+    // 没给 prompt 时回落到结构化拼装
+    const fallback = pick({ roles: [{ sourceDesc: 'a', targetDesc: 'b' }] });
+    assert.match(fallback, /<Subject 1>/);
+  });
+
+  await checkAsync('换人：提示词模板按参考图数量生成对应组数', async () => {
+    const R = await import('../host/services/replace.js');
+    for (const n of [1, 2, 3]) {
+      const roles = Array.from({ length: n }, (_, i) => ({
+        sourceDesc: `原${i + 1}`,
+        targetDesc: `目标${i + 1}`,
+        pictureIndex: i + 1,
+      }));
+      const p = R.buildReplacePrompt({ roles });
+      for (let i = 1; i <= n; i += 1) {
+        assert.match(p, new RegExp(`<Subject ${i}> 是 <Picture ${i}>`), `${n} 组时应含 <Subject ${i}>`);
+      }
+      // 不该出现超出组数的编号
+      assert.ok(!new RegExp(`<Subject ${n + 1}>`).test(p), `${n} 组时不应出现 <Subject ${n + 1}>`);
+    }
+  });
+
+  await checkAsync('换人：LoRA 透传到段镜头的 nanfeng.loras', async () => {
+    /**
+     * 换人页也能选 LoRA（比如挂一个动作/画风 LoRA）。
+     * 这条守护 `task.loras → shot.nanfeng.loras` 这条链路不被改断 ——
+     * 断了的表现是「页面上选了 LoRA，提交后 LoRA2 槽是未选择」，且不报错。
+     */
+    const { ratioOf } = await import('../host/services/replace-runner.js');
+    assert.equal(typeof ratioOf, 'function');
+    const src = await import('node:fs').then((f) => f.readFileSync(
+      new URL('../host/services/replace-runner.js', import.meta.url), 'utf8',
+    ));
+    assert.match(src, /loras:\s*Array\.isArray\(task\.loras\)/, 'runner 必须把 task.loras 传给 shot.nanfeng');
+  });
+
+  /* -------------------- 续写链（换人方案 A） -------------------- */
+
+  /**
+   * 这组守护「续写分段规划」的算术。
+   *
+   * 背景：独立重绘的段间必然跳变（每段首帧是模型自己推断的，不是上一段末帧）。
+   * 续写用真实 AV latent 传状态，是唯一从机制上解决接缝的做法。
+   * 段与段在源视频上要**重叠** trimFrames 帧，采完裁掉。
+   */
+  await checkAsync('续写：context_length 四档对应正确帧数与秒数', async () => {
+    const C = await import('../host/services/nanfeng/continuation.js');
+    assert.deepEqual([...C.CONTEXT_LENGTHS], ['5', '22', '39', '56']);
+    for (const [ctx, sec] of [['5', 0.21], ['22', 0.92], ['39', 1.63], ['56', 2.33]]) {
+      const got = Number(ctx) / 24;
+      assert.ok(Math.abs(got - sec) < 0.01, `context=${ctx} 应为 ${sec}s，实际 ${got.toFixed(3)}s`);
+    }
+  });
+
+  await checkAsync('续写：规划器从目标时长反推，且段 1 不比后续段短太多', async () => {
+    const C = await import('../host/services/nanfeng/continuation.js');
+    const r = C.planSegments({ targetSeconds: 15, segments: 3, contextLength: '56' });
+    assert.equal(r.segments.length, 3);
+    assert.equal(r.trimFrames, 56);
+    // 总交付要贴近目标
+    const sum = r.segments.reduce((s, x) => s + x.deliverSec, 0);
+    assert.ok(Math.abs(sum - 15) < 1.5, `15s 目标，实际交付 ${sum.toFixed(2)}s`);
+    // 段 1 与后续段的交付时长差距不超过 40%（均衡性）
+    const d1 = r.segments[0].deliverSec;
+    const dRest = r.segments[1].deliverSec;
+    assert.ok(Math.abs(d1 - dRest) / Math.max(d1, dRest) < 0.4,
+      `段 1(${d1}s) 与段 2(${dRest}s) 差距过大，身份锚定会不稳`);
+  });
+
+  await checkAsync('续写：段 1 不裁、后续段裁掉 trimFrames', async () => {
+    const C = await import('../host/services/nanfeng/continuation.js');
+    const r = C.planSegments({ targetSeconds: 20, segments: 4, contextLength: '22' });
+    assert.equal(r.segments[0].deliverFrames, r.segments[0].sampleFrames, '段 1 不裁');
+    for (const s of r.segments.slice(1)) {
+      assert.equal(s.deliverFrames, s.sampleFrames - 22, '段 n>1 交付 = 采样 − 22');
+    }
+  });
+
+  await checkAsync('续写：换人模式允许段 1 短于叙事模式的 124 帧下限', async () => {
+    const C = await import('../host/services/nanfeng/continuation.js');
+    // 叙事模式：段 1 必须 ≥124
+    const story = C.planSegments({ targetSeconds: 20, segments: 3, contextLength: '56' });
+    assert.ok(story.segments[0].sampleFrames >= 124, '叙事模式段 1 应 ≥124 帧');
+    // 换人模式：minFirstFrames 可以放开
+    const repl = C.planSegments({
+      targetSeconds: 20, segments: 3, contextLength: '56', minFirstFrames: 39,
+    });
+    assert.ok(repl.segments[0].sampleFrames >= 39, '换人模式段 1 只要 ≥minFirstFrames');
+  });
+
+  await checkAsync('续写：任务 JSON 五字段完整且 node 恒为 1', async () => {
+    const C = await import('../host/services/nanfeng/continuation.js');
+    const batch = C.createBatch({
+      projectId: 'p', shotIds: ['a', 'b'], preset: 'draft', contextLength: '56',
+    });
+    const t = JSON.parse(C.taskFor(batch, 1));
+    for (const k of ['workflow', 'node', 'group', 'run', 'index']) {
+      assert.ok(k in t, `任务 JSON 缺字段 ${k}`);
+    }
+    assert.equal(t.node, '1', 'node 必须等于 buildWorkflow 固定的节点 ID');
+    assert.equal(t.index, 1);
+    // folder 是两个相同身份算同一个 hash —— 这是续写能接上的前提
+    const f1 = C.contextFolder({ workflow: batch.batchId, node: '1', group: batch.batchId, run: batch.runId });
+    const f2 = C.contextFolder({ workflow: batch.batchId, node: '1', group: batch.batchId, run: batch.runId });
+    assert.equal(f1, f2);
+  });
+
+  await checkAsync('续写：换人默认开续写 + 重叠取 22 档', async () => {
+    const R = await import('../host/services/replace.js');
+    assert.equal(R.REPLACE_DEFAULTS.continuation, true, '换人默认应开启续写');
+    /**
+     * 默认从 '56' 改成 '22'，理由见 REPLACE_DEFAULTS.contextLength 的注释：
+     * 56 帧会在 30s/6 段时占掉目标片段 32%~45% 的帧数，那些帧被
+     * 「上一段实际生成的内容」—— 含源角色残留 —— 作为关键帧钉住，
+     * 参考图压不过张量条件，于是身份漂移。窗口越长漂得越重。
+     */
+    assert.equal(R.REPLACE_DEFAULTS.contextLength, '22', '重叠窗口默认 22，别让污染占掉半个片段');
+    assert.equal(R.REPLACE_DEFAULTS.segmentSec, 4, '段长默认 4s');
+  });
+
+  await checkAsync('续写：上下文加噪的默认配方是 0.45/0.10/2', async () => {
+    /**
+     * 这是路线 A 的核心。配方来自 MacroSony/minimax-h3-chained-character-swap
+     * 的实测（inject_tail_taper.py），见 vendor/nanfeng/context_taper_noise.py。
+     */
+    const R = await import('../host/services/replace.js');
+    assert.equal(R.REPLACE_DEFAULTS.taperAlpha, 0.45, '平坦注入强度取社区验证值');
+    assert.equal(R.REPLACE_DEFAULTS.taperAlphaEnd, 0.1, '接缝端降到 0.10');
+    assert.equal(R.REPLACE_DEFAULTS.taperRampSteps, 2, '最后 2 个 latent step 做斜坡');
+  });
+
+  await checkAsync('续写：context_length 必须写进 overrides（防预设覆盖）', async () => {
+    /**
+     * 这条守护一个**实测踩到的静默错误**。
+     *
+     * `presets.js` 的 continuation / continuation-quality 两套预设都把
+     * `context_length` 写死成 `'22'`。而合并顺序是「预设 → 镜头 overrides
+     * → extraParams」，overrides 能赢预设，但前提是 overrides 里**有**这个键。
+     *
+     * 早先换人线没写 → 用户选 56（2.33s）实际跑 22（0.92s）：
+     * 重叠窗口只剩 40%，产物 136 帧（158-22）而不是 102 帧（158-56），
+     * 接缝明显但**零报错**。
+     */
+    const { buildOverrides } = await import('../host/services/replace-runner.js');
+    const ov = buildOverrides({ contextLength: '56', steps: 8 }, { continuation: true });
+    assert.equal(ov.context_length, '56', 'context_length 必须被显式写进 overrides');
+    assert.equal(ov['启用H3潜空间放大二采'], false, '续写强制关二采');
+  });
+
+  await checkAsync('续写：audio_context_length 按 40Hz/24fps 换算，而不是 ctx*4', async () => {
+    /**
+     * 这条守护另一个**没有报错的浪费**。
+     *
+     * H3 音频 latent 跑 40 Hz、画面 24 fps → 1 像素帧 = 5/3 个音频步。
+     * `context_length=56` 只需要 round(56*5/3)=93 步。
+     *
+     * 早先写的是 `Number(ctx) * 4`（56→224 步），比实际需要多 **2.4 倍**。
+     * 多出来的每一步都作为 conditioning row 钉进序列、走完整 DiT，
+     * 而换人线在切段阶段就 `-an` 剥掉了音轨，这些行连价值都没有。
+     */
+    const { buildOverrides } = await import('../host/services/replace-runner.js');
+    for (const [ctx, want] of [['5', 8], ['22', 37], ['39', 65], ['56', 93]]) {
+      const ov = buildOverrides({ contextLength: ctx }, { continuation: true });
+      assert.equal(ov.audio_context_length, want,
+        `context_length=${ctx} 应换算成 ${want} 个音频步（= round(ctx*40/24)）`);
+    }
+  });
+
+  await checkAsync('续写：audio_context_length 不越界（0～240）', async () => {
+    const { buildOverrides } = await import('../host/services/replace-runner.js');
+    for (const ctx of ['5', '22', '39', '56']) {
+      const ov = buildOverrides({ contextLength: ctx }, { continuation: true });
+      assert.ok(ov.audio_context_length >= 0 && ov.audio_context_length <= 240,
+        `context_length=${ctx} 换算出的音频步 ${ov.audio_context_length} 越界`);
+    }
+  });
+
+  await checkAsync('续写：独立模式不写 context_length，二采尊重用户', async () => {
+    const { buildOverrides } = await import('../host/services/replace-runner.js');
+    const ov = buildOverrides({ secondPass: true }, { continuation: false });
+    assert.equal(ov.context_length, undefined, '独立模式不该塞续写参数');
+    assert.equal(ov['启用H3潜空间放大二采'], true, '独立模式应尊重用户的二采开关');
+  });
+
+  await checkAsync('续写：独立模式不能给加噪参数', async () => {
+    /**
+     * 加噪是给 `context_latent` 用的，独立模式根本没有上下文。
+     * 写了只会让参数面板出现一个永远不生效的开关。
+     */
+    const { buildOverrides } = await import('../host/services/replace-runner.js');
+    const ov = buildOverrides({}, { continuation: false });
+    assert.equal(ov['启用续写上下文加噪'], undefined, '独立模式不该出现加噪开关');
+  });
+
+  await checkAsync('续写：用户试图在续写模式下开二采也被强制关闭', async () => {
+    const { buildOverrides } = await import('../host/services/replace-runner.js');
+    const ov = buildOverrides(
+      { contextLength: '56', overrides: { 启用H3潜空间放大二采: true } },
+      { continuation: true },
+    );
+    assert.equal(ov['启用H3潜空间放大二采'], false,
+      '续写 + 二采会在 vendor 层直接 ValueError，必须在组装期就拦掉');
+  });
+
+  await checkAsync('续写：replaceStore.upsert 返回单条记录而不是数组', async () => {
+    /**
+     * 这条守护一个**让任务完全起不来**的 bug。
+     *
+     * store 底层是 `updateJson`，它返回**整个数组**。
+     * 早先 `upsert` 直接 `return updateJson(...)`，于是：
+     *   · createReplaceTask 返回给前端的是数组 → 前端 `task.id` 变成
+     *     一串 id 拼起来的字符串（"rp_aaa rp_bbb ..."）→
+     *     调 `/replace/run/` 必然 INVALID_ID，任务永远起不来。
+     *   · runReplaceBatch 的 emit 同样中招 → current.sourceRel 变 undefined
+     *     → 抛 PATH_REQUIRED。
+     */
+    const R = await import('../host/services/replace.js');
+    const cfg = { dataDir: path.join(TMP, 'data'), ffmpegDir: '' };
+    const store = R.replaceStore(cfg);
+    const written = await store.upsert({ id: 'rp_test_1', sourceRel: 'a.mp4', status: 'draft' });
+    assert.ok(!Array.isArray(written), 'upsert 不能返回数组');
+    assert.equal(written.id, 'rp_test_1');
+    assert.equal(written.sourceRel, 'a.mp4');
+    // 再 upsert 一次应合并而非重复
+    const again = await store.upsert({ id: 'rp_test_1', status: 'running' });
+    assert.equal(again.status, 'running');
+    assert.equal(again.sourceRel, 'a.mp4', '合并不能丢字段');
+  });
+
+  /* --------- 续写抗漂移：加噪上下文 + 每段重锚身份（方案 A v3） --------- */
+
+  /**
+   * 实测背景（30s / 6 段 / context=56）：
+   *   段#1 ✓  段#2 段中漂成金发 ✗  段#3 ✓  段#4 ✓  段#5 段中漂 ✗  段#6 ✓
+   *   第 0 帧必定是上一段末帧（直接拷贝），**第 5 帧（0.2s）就翻车**
+   *
+   * 根因不是提示词不够重 —— MotionContext 把上一段 latent 作为
+   * **关键帧条件**注入（nodes.py:511-530），那是张量级硬条件；
+   * 参考图只是 text-encoder 侧的软约束。文字压不过张量。
+   *
+   * 所以对策是机制层面的：给上下文加锥形噪声，把「上一段的外观」
+   * 损坏掉、把「上一段的运动」保留下来，模型只能从身份参考重新合成。
+   */
+  await checkAsync('抗漂移：续写模式接上加噪，且参数来自 REPLACE_DEFAULTS', async () => {
+    const { buildOverrides } = await import('../host/services/replace-runner.js');
+    const R = await import('../host/services/replace.js');
+    const ov = buildOverrides({ contextLength: '39' }, { continuation: true });
+    assert.equal(ov['启用续写上下文加噪'], true, '续写链必须开启上下文加噪');
+    assert.equal(ov['续写加噪强度'], R.REPLACE_DEFAULTS.taperAlpha);
+    assert.equal(ov['续写加噪末档强度'], R.REPLACE_DEFAULTS.taperAlphaEnd);
+    assert.equal(ov['续写加噪斜坡步数'], R.REPLACE_DEFAULTS.taperRampSteps);
+  });
+
+  await checkAsync('抗漂移：加噪强度可被任务级覆盖', async () => {
+    const { buildOverrides } = await import('../host/services/replace-runner.js');
+    const ov = buildOverrides(
+      { contextLength: '22', taperAlpha: 0.6, taperAlphaEnd: 0.2, taperRampSteps: 3 },
+      { continuation: true },
+    );
+    assert.equal(ov['续写加噪强度'], 0.6);
+    assert.equal(ov['续写加噪末档强度'], 0.2);
+    assert.equal(ov['续写加噪斜坡步数'], 3);
+  });
+
+  await checkAsync('抗漂移：taperEnabled=false 时完全退回干净上下文', async () => {
+    /**
+     * 用户可以在页面上关掉加噪换更顺的接缝 —— 代价是画面会抄上一段外观。
+     * 这条守护「关掉时连参数都不写」，避免出现"开关关了但强度还在传"的
+     * 半关状态（那种状态最难排查）。
+     */
+    const { buildOverrides } = await import('../host/services/replace-runner.js');
+    const ov = buildOverrides(
+      { contextLength: '22', taperEnabled: false },
+      { continuation: true },
+    );
+    assert.equal(ov['启用续写上下文加噪'], false, '关掉时必须是显式 false');
+    assert.equal(ov['续写加噪强度'], undefined, '关掉时不该再传强度');
+    assert.equal(ov['续写加噪末档强度'], undefined);
+    assert.equal(ov['续写加噪斜坡步数'], undefined);
+    // 但续写本身仍然成立
+    assert.equal(ov.context_length, '22', '关加噪不能把续写也关了');
+  });
+
+  await checkAsync('抗漂移：taperEnabled 未指定时默认开启', async () => {
+    const { buildOverrides } = await import('../host/services/replace-runner.js');
+    const ov = buildOverrides({ contextLength: '22' }, { continuation: true });
+    assert.equal(ov['启用续写上下文加噪'], true,
+      '老任务 JSON 没有 taperEnabled 字段时，应按开启处理');
+  });
+
+  await checkAsync('抗漂移：不再写幽灵参数 参考图最长边', async () => {
+    /**
+     * 这条守护一个**跑了两轮都没人发现空转**的错误决策。
+     *
+     * 上一轮把续写模式的 `参考图最长边` 从 1920 提到 2560，理由是
+     * 「续写要更高身份细节」，并把它当作「耗时翻倍」的元凶。
+     *
+     * 两个都不成立：
+     *   ① vendor 的 NanFengH3LimitImageLongEdgeV15 是**只缩不放**：
+     *        if longest <= maximum: return (image,)
+     *      而换人的参考图是 852×1440（最长边 1440），
+     *      1440 < 1920 < 2560 → 1920 和 2560 走同一个直通分支，完全等价。
+     *   ② 它前端根本没有 UI，用户看不见、改不了。
+     *
+     * 外部佐证：MiniMax-H3 discussion #91 用 InsightFace 实测，
+     * ref_image_size 从 match 改到 max，身份相似度 0.0884 → 0.0902。
+     * 参考图分辨率这条路在 H3 上本来就不通。
+     */
+    const { buildOverrides } = await import('../host/services/replace-runner.js');
+    const cont = buildOverrides({}, { continuation: true });
+    assert.ok(!('参考图最长边' in cont), '不该再写这个空转参数');
+    const indep = buildOverrides({}, { continuation: false });
+    assert.ok(!('参考图最长边' in indep), '独立模式同样不该写');
+  });
+
+  await checkAsync('抗漂移：续写模式不写死参数 参考图尺寸', async () => {
+    /**
+     * `参考图尺寸`（ref_image_size, match/max）在本地 V15 上是**死参数**：
+     * h3_generator.py 把它硬编码成 "max"，面板分支不读。
+     * 写这个键只会让人误以为调了有用。
+     */
+    const { buildOverrides } = await import('../host/services/replace-runner.js');
+    const ov = buildOverrides({ contextLength: '22' }, { continuation: true });
+    assert.ok(!('参考图尺寸' in ov), '不该设置死参数 参考图尺寸');
+  });
+
+  await checkAsync('抗漂移：段 2 起提示词插入身份锚定句，段 1 不加', async () => {
+    /**
+     * 官方 skill（h3-continuation §1）：段 2 起 latent 管动作、参考图管身份。
+     * 模型不会自己遵守，必须每段写成可执行指令。
+     *
+     * ⚠️ 锚定句必须用**正面描述**：含 "never" / "not" 的否定句会违反
+     *    h3-character-replace 铁律 4（正文里的"不要 X"反而把 X 拉进画面）。
+     */
+    const src = await import('node:fs').then((f) => f.readFileSync(
+      new URL('../host/services/replace-runner.js', import.meta.url), 'utf8',
+    ));
+    assert.match(src, /Identity lock:/, '必须有身份锚定句');
+    assert.match(src, /seg\.index === 1\) return base/,
+      '段 1 不加锚定句（没有上一段 latent，不存在身份竞争）');
+    assert.match(src, /prompt:\s*segmentPrompt/,
+      'runH3Nanfeng 必须收到 segmentPrompt，否则锚定句从未进过 ComfyUI');
+  });
+
+  await checkAsync('抗漂移：身份锚定句不含否定式措辞', async () => {
+    /**
+     * skill 铁律 4：本地 CFG 固定 1.0、采样器没有 negative 分支，
+     * 正文里的"不要 X"反而会把 X 拉进画面。锚定句必须是纯正面陈述。
+     */
+    const src = await import('node:fs').then((f) => f.readFileSync(
+      new URL('../host/services/replace-runner.js', import.meta.url), 'utf8',
+    ));
+    const start = src.indexOf("'Identity lock:");
+    assert.ok(start > 0, '找不到锚定句');
+    const tail = src.slice(start, start + 800);
+    const anchor = tail.slice(0, tail.indexOf("].join(' ')") + 11);
+    assert.ok(!/\bnever\b|\bnot any\b|\bdon't\b|\bno other\b/i.test(anchor),
+      `锚定句里不能有否定式措辞（会反向强调）：\n${anchor}`);
+  });
+
+  await checkAsync('抗漂移：每段都带上同一张参考图', async () => {
+    const src = await import('node:fs').then((f) => f.readFileSync(
+      new URL('../host/services/replace-runner.js', import.meta.url), 'utf8',
+    ));
+    // shot.refs.images 来自 task.refImages，循环内没有按段号过滤
+    assert.match(src, /images:\s*\(task\.refImages \?\? \[\]\)\.map/,
+      '每段都要重新挂参考图，不能只在段 1 挂');
   });
 
   /* -------------------- 打光通道（本轮新增） -------------------- */
@@ -1102,7 +1782,7 @@ async function moduleChecks() {
 
   /* -------------------- 参数审计工具 -------------------- */
 
-  await checkAsync('审计：217 参数四分类完整且无遗漏', async () => {
+  await checkAsync('审计：221 参数四分类完整且无遗漏', async () => {
     // audit-params.mjs 是独立脚本，这里只验它的产出结构
     const { execFileSync } = await import('node:child_process');
     // ⚠️ 必须用 fileURLToPath —— import.meta.url 是百分号编码的
@@ -1114,9 +1794,9 @@ async function moduleChecks() {
       maxBuffer: 8 * 1024 * 1024,
     });
     const j = JSON.parse(out);
-    assert.equal(j.rows.length, 217, `应有 217 行，实际 ${j.rows.length}`);
+    assert.equal(j.rows.length, 221, `应有 221 行，实际 ${j.rows.length}`);
     const total = Object.values(j.counts).reduce((a, b) => a + b, 0);
-    assert.equal(total, 217, `四分类合计应 217，实际 ${total}`);
+    assert.equal(total, 221, `四分类合计应 221，实际 ${total}`);
     for (const row of j.rows) {
       assert.ok(['A', 'B', 'C', 'D'].includes(row.cls), `${row.name} 分类异常：${row.cls}`);
     }
@@ -1184,11 +1864,11 @@ async function applyChecks() {
     }
   });
 
-  await checkAsync('apply(): 注册了 13 个 studio_* 工具', async () => {
+  await checkAsync('apply(): 注册了 14 个 studio_* 工具', async () => {
     // 给 effect 一个 tick 让 registerTools 落地
     await new Promise((r) => setTimeout(r, 50));
     const names = ctx.__tools.map((t) => t.name).filter((n) => n && String(n).startsWith('studio_'));
-    assert.equal(new Set(names).size, 13, `工具数应为 13，实际 ${JSON.stringify([...new Set(names)])}`);
+    assert.equal(new Set(names).size, 14, `工具数应为 14，实际 ${JSON.stringify([...new Set(names)])}`);
   });
 
   await checkAsync('apply(): runtime 挂上了控制器', async () => {
@@ -1288,7 +1968,7 @@ async function routeChecks() {
     const { req, res, out } = fakeReqRes('GET', '/nanfeng/schema');
     await handleApi(req, res);
     const j = JSON.parse(out.text);
-    assert.equal(j.paramCount, 217);
+    assert.equal(j.paramCount, 221);
     assert.ok(j.params.百万像素.zh, '缺 百万像素 的说明');
     assert.ok(j.params.启用双采样.flag === 'dead', '启用双采样 应标为 dead');
     assert.ok(Array.isArray(j.inert) && j.inert.length > 0, '缺 inert 清单');
@@ -1371,6 +2051,258 @@ async function routeChecks() {
       `/breakdown/generate 里 prompt 未定义：${out.text.slice(0, 200)}`);
   });
 
+  /* -------------------- 立绘拆解：提示词即唯一输入（本轮重构） -------------------- */
+
+  /**
+   * 这一组守护"用户改的提示词原样进模型"。
+   *
+   * 历史缺陷（本轮重构）：提示词由 character / outfit / parts / views / notes
+   * 五个字段 + level + sizeId 拼装，用户想换一套衣服时只能往 outfit 清单里加词，
+   * 而正文口径仍是"逐件拆出参考图里已有的服装" —— 改不动。
+   * 现在后端只做 trim，**不拼装、不改写、不追加**。
+   */
+  await checkAsync('立绘拆解：默认提示词是一份完整三视图设定卡', async () => {
+    const m = await import('../host/services/breakdown.js');
+    const p = m.DEFAULT_BREAKDOWN_PROMPT;
+    assert.ok(p.length > 600, `默认提示词太短（${p.length}），不足以约束排版与细节`);
+    for (const kw of ['正面视图', '侧面视图', '背面视图', '逐件拆出', '不要出现任何文字']) {
+      assert.ok(p.includes(kw), `默认提示词缺关键约束：${kw}`);
+    }
+    // 纯文本：不许出现 Markdown 记号（模型不吃，还会破坏分段理解）
+    assert.ok(!/\*\*|^#{1,6}\s/m.test(p), '默认提示词里出现了 Markdown 记号');
+    // 不编号：带编号小标题会让产出图里出现编号/图例
+    assert.ok(!/(^|\n)\s*[1-9][.、]\s/.test(p), '默认提示词里出现了编号小标题');
+  });
+
+  await checkAsync('立绘拆解：默认提示词带"文字优先于参考图"的授权句', async () => {
+    const m = await import('../host/services/breakdown.js');
+    const p = m.DEFAULT_BREAKDOWN_PROMPT;
+    // 没有这句，用户改衣服一定失败：参考图的约束力会盖过文字
+    assert.ok(/文字里明确写出的要求优先于参考图|优先于参考图/.test(p),
+      '缺授权句 —— 用户改写服装/配色时会被参考图覆盖');
+    assert.ok(/文字没有提到的部分/.test(p),
+      '缺"未提到部分照参考图"的边界句 —— 精准还原会失效');
+  });
+
+  await checkAsync('立绘拆解：buildBreakdownPrompt 原样返回用户文本，不拼装', async () => {
+    const m = await import('../host/services/breakdown.js');
+    const mine = '把参考图里的黑色紧身衣换成白色高领毛衣，其余照原图。';
+    assert.equal(m.buildBreakdownPrompt({ prompt: mine }), mine);
+    // 任何作废的结构化字段都不得进入正文
+    const withLegacy = m.buildBreakdownPrompt({
+      prompt: mine,
+      character: '三角初华', outfit: ['蕾丝胸衣'], parts: ['耳钉'],
+      views: ['正面'], notes: '哥特风', level: 'parts',
+    });
+    assert.equal(withLegacy, mine, '作废字段仍在影响提示词');
+    // 前后空白要清掉，但不能动内容
+    assert.equal(m.buildBreakdownPrompt({ prompt: `  ${mine}\n\n` }), mine);
+  });
+
+  await checkAsync('立绘拆解：空提示词回落默认值', async () => {
+    const m = await import('../host/services/breakdown.js');
+    assert.equal(m.buildBreakdownPrompt({}), m.DEFAULT_BREAKDOWN_PROMPT);
+    assert.equal(m.buildBreakdownPrompt({ prompt: '   ' }), m.DEFAULT_BREAKDOWN_PROMPT);
+    assert.ok(m.isDefaultBreakdownPrompt(m.buildBreakdownPrompt({ prompt: '' })));
+    assert.ok(!m.isDefaultBreakdownPrompt('换成白色毛衣'));
+  });
+
+  await checkAsync('立绘拆解：作废字段被显式回报，而不是静默忽略', async () => {
+    const m = await import('../host/services/breakdown.js');
+    const used = m.legacyBreakdownFields({ prompt: 'x', character: 'A', outfit: ['衣'] });
+    assert.deepEqual(used.sort(), ['character', 'outfit']);
+    assert.deepEqual(m.legacyBreakdownFields({ prompt: 'x' }), []);
+  });
+
+  await checkAsync('立绘拆解：尺寸固定为一档，不再提供档位选择', async () => {
+    const m = await import('../host/services/breakdown.js');
+    assert.ok(!('BREAKDOWN_LEVELS' in m), '档位常量应已移除');
+    // 旧 id 也回落到同一档，不制造"选了就生效"的假象
+    for (const id of ['square', 'portrait', 'landscape', undefined, 'l-4x3']) {
+      assert.equal(m.breakdownSize(id).id, m.BREAKDOWN_SIZE.id);
+    }
+    // 面积必须落在默认上限 4.3MP 之内，否则每次请求都会被路由拒
+    assert.ok((m.BREAKDOWN_SIZE.w * m.BREAKDOWN_SIZE.h) / 1e6 <= 4.3);
+  });
+
+  await checkAsync('立绘拆解：GET /breakdown/meta 下发默认提示词与固定尺寸', async () => {
+    const { req, res, out } = fakeReqRes('GET', '/breakdown/meta');
+    await handleApi(req, res);
+    const j = JSON.parse(out.text);
+    assert.ok(j.defaultPrompt && j.defaultPrompt.length > 600, 'meta 必须下发默认提示词');
+    assert.ok(!('levels' in j), '档位列表应已移除');
+    assert.ok(j.size && j.size.w === 2368, '尺寸应固定为横版');
+    assert.ok(j.maxChars > 0, '缺 maxChars');
+  });
+
+  await checkAsync('立绘拆解：POST /breakdown/preview 回显用户原文', async () => {
+    const mine = '换成白色高领毛衣，其余照原图。';
+    const { req, res, out, status } = fakeReqRes('POST', '/breakdown/preview', {
+      body: JSON.stringify({ prompt: mine }),
+      headers: { 'x-jz-token': tok },
+    });
+    await handleApi(req, res);
+    assert.equal(status(), 200, out.text.slice(0, 200));
+    const j = JSON.parse(out.text);
+    assert.equal(j.prompt, mine, '预览必须等于提交值（所见即所提交）');
+    assert.equal(j.chars, mine.length);
+    assert.equal(j.isDefault, false);
+  });
+
+  await checkAsync('立绘拆解：preview 对作废字段给出 legacy 提示', async () => {
+    const { req, res, out } = fakeReqRes('POST', '/breakdown/preview', {
+      body: JSON.stringify({ prompt: 'x', character: 'A', outfit: ['衣'], level: 'parts' }),
+      headers: { 'x-jz-token': tok },
+    });
+    await handleApi(req, res);
+    const j = JSON.parse(out.text);
+    assert.ok(Array.isArray(j.legacyFieldsIgnored) && j.legacyFieldsIgnored.includes('outfit'),
+      `作废字段应回报：${out.text.slice(0, 240)}`);
+  });
+
+  await checkAsync('立绘拆解：超长提示词 400 拒绝而不是静默截断', async () => {
+    const m = await import('../host/services/breakdown.js');
+    const tooLong = '衣'.repeat(m.BREAKDOWN_PROMPT_MAX_CHARS + 1);
+    const { req, res, out, status } = fakeReqRes('POST', '/breakdown/generate', {
+      body: JSON.stringify({ prompt: tooLong, refImages: ['assets/__x__.png'] }),
+      headers: { 'x-jz-token': tok },
+    });
+    await handleApi(req, res);
+    assert.equal(status(), 400, `应 400，实际 ${status()}：${out.text.slice(0, 200)}`);
+    assert.equal(JSON.parse(out.text).error, 'PROMPT_TOO_LONG');
+  });
+
+  /**
+   * 前端契约：拆解页必须**只**有提示词一个输入，不许再长回结构化字段。
+   * 这类回归靠人眼审查很容易漏，用源码断言钉住。
+   */
+  await checkAsync('立绘拆解页：只保留提示词输入，档位/尺寸/角色描述已删除', async () => {
+    const f = await import('node:fs');
+    const src = f.readFileSync(new URL('../app-src/src/pages/BreakdownPage.tsx', import.meta.url), 'utf8');
+    for (const banned of ['outfitText', 'partsText', 'viewText', 'setLevel(', 'setSizeId(']) {
+      assert.ok(!src.includes(banned), `页面里仍残留旧字段：${banned}`);
+    }
+    assert.ok(/api\.breakdownPreview\(\{ prompt \}\)/.test(src),
+      '预览必须只提交 prompt');
+    assert.ok(/api\.breakdownGenerate\(\{\s*\n?\s*prompt,/.test(src),
+      '生成必须提交 prompt');
+    assert.ok(/minHeight/.test(src), '提示词框必须是"巨大"的（设了 minHeight）');
+  });
+
+  /**
+   * 复制按钮的护栏。
+   *
+   * 需求：提示词框旁边要能一键把**默认提示词**复制出来。
+   * 这类"按钮点了有没有用"没法靠接口测，至少要把源码层面的承诺钉住：
+   *   · 两个入口都在（复制默认值 / 复制当前）
+   *   · 剪贴板必须有降级路径 —— DSH Desktop 的窗口 origin 是 dsh-app://，
+   *     那里 navigator.clipboard 不可用时得靠 execCommand 兜底
+   *   · 空输入框时「复制当前」要回落默认值，而不是复制一个空串
+   */
+  await checkAsync('立绘拆解页：提示词框旁有复制按钮，且带剪贴板降级', async () => {
+    const f = await import('node:fs');
+    const src = f.readFileSync(new URL('../app-src/src/pages/BreakdownPage.tsx', import.meta.url), 'utf8');
+    assert.ok(src.includes('复制默认值'), '缺「复制默认值」按钮');
+    assert.ok(src.includes('复制当前'), '缺「复制当前」按钮');
+    assert.ok(src.includes('navigator.clipboard'), '没有用 clipboard API');
+    assert.ok(/execCommand\('copy'\)/.test(src),
+      '没有 execCommand 降级 —— dsh-app:// 下剪贴板 API 可能不可用，复制会静默失败');
+    // 空输入框时复制当前 → 必须回落默认值
+    assert.ok(/prompt\.trim\(\) \? prompt : defaultPrompt/.test(src),
+      '「复制当前」在输入框为空时没有回落到默认提示词');
+    // 默认提示词也要能单独复制（不受输入框当前内容影响）
+    assert.ok(/copyText\(defaultPrompt\)/.test(src), '「复制默认值」没有复制 defaultPrompt');
+  });
+
+  await checkAsync('立绘拆解页：首屏直接落在提示词步骤', async () => {
+    const f = await import('node:fs');
+    const src = f.readFileSync(new URL('../app-src/src/pages/BreakdownPage.tsx', import.meta.url), 'utf8');
+    // 核心诉求是改提示词，不该让用户先点一次「下一步」才看到那个框
+    assert.ok(/useState<Step>\('prompt'\)/.test(src),
+      '页面初始步骤必须是 prompt —— 否则提示词框与复制按钮第一屏看不到');
+  });
+
+  await checkAsync('ComfyUI 启停：四个路由都注册了', async () => {
+    /**
+     * 顶栏那个电源按钮依赖这四条。少一条前端就是个死按钮。
+     */
+    const f = await import('node:fs');
+    const src = f.readFileSync(new URL('../host/api/index.js', import.meta.url), 'utf8');
+    for (const r of ['/comfy/status', '/comfy/start', '/comfy/stop', '/comfy/restart']) {
+      assert.ok(src.includes(`route === '${r}'`), `缺少路由 ${r}`);
+    }
+  });
+
+  await checkAsync('ComfyUI 启停：必须用 pwsh 而不是 powershell.exe', async () => {
+    /**
+     * 这条守护一个**看起来像语法错误、实际是编码问题**的坑。
+     *
+     * `start-h3.ps1` 是 UTF-8 无 BOM 的中文脚本。Windows PowerShell 5.1
+     * （`powershell.exe`）按系统 ANSI 代码页（中文机器 = GBK）读它，
+     * 于是脚本里的中文全变乱码、连引号都被吞掉，报：
+     *   `Unexpected token '鉁?ComfyUI' in expression or statement`
+     *   `The string is missing the terminator: ".`
+     * 实测踩到过：同一脚本在 pwsh 7 里跑得好好的。
+     */
+    const f = await import('node:fs');
+    const src = f.readFileSync(new URL('../host/services/comfy-control.js', import.meta.url), 'utf8');
+    assert.ok(!src.includes("spawn('powershell.exe'"),
+      '不能 spawn powershell.exe（5.1 会按 GBK 读 UTF-8 脚本，中文全乱码）');
+    assert.match(src, /findPwsh/, '必须有 pwsh 解析函数');
+  });
+
+  await checkAsync('ComfyUI 启停：停止时先 interrupt 再清队列再杀进程', async () => {
+    /**
+     * 顺序有讲究：
+     *   · 只杀进程 → 正在写的 mp4 / safetensors 留半截文件
+     *   · 不清队列 → "/interrupt 只管正在跑的那一单"，排队的还在
+     *     —— 这正是用户报的「换下一个项目时前面的续写还在」
+     */
+    const f = await import('node:fs');
+    const src = f.readFileSync(new URL('../host/services/comfy-control.js', import.meta.url), 'utf8');
+    const iInterrupt = src.indexOf('/interrupt');
+    const iQueue = src.indexOf('/queue');
+    const iKill = src.indexOf("process.kill(pid, 'SIGTERM')");
+    assert.ok(iInterrupt > 0, '停止必须发 /interrupt');
+    assert.ok(iQueue > 0, '停止必须清队列（/queue clear）');
+    assert.ok(iKill > 0, '停止必须终止进程');
+    assert.ok(iInterrupt < iKill, '/interrupt 要在杀进程之前');
+    assert.ok(iQueue < iKill, '清队列要在杀进程之前');
+  });
+
+  await checkAsync('ComfyUI 启停：状态以端口可连为准，不靠进程名猜', async () => {
+    const f = await import('node:fs');
+    const src = f.readFileSync(new URL('../host/services/comfy-control.js', import.meta.url), 'utf8');
+    assert.match(src, /system_stats/, '判活必须探 /system_stats');
+  });
+
+  await checkAsync('ComfyUI 启停：顶栏按钮存在且会自刷新', async () => {
+    const f = await import('node:fs');
+    const src = f.readFileSync(new URL('../app-src/src/App.tsx', import.meta.url), 'utf8');
+    assert.match(src, /ComfyPowerButton/, '顶栏必须有电源按钮组件');
+    assert.match(src, /<ComfyPowerButton \/>/, '按钮必须真的挂进 TopBar');
+    // 状态可能被别处改变，不能只加载一次
+    assert.match(src, /setInterval/, '状态必须定时自刷新');
+    // 三个动作都要接上 api
+    for (const fn of ['comfyStart', 'comfyStop']) {
+      assert.ok(src.includes(`api.${fn}`), `按钮必须调用 api.${fn}`);
+    }
+  });
+
+  await checkAsync('ComfyUI 启停：路由受写令牌保护', async () => {
+    /**
+     * 这四条是 POST，落到 guard() 的写方法分支，天然要 X-JZ-Token。
+     * 但 /comfy/status 是 GET，**不该**要令牌（顶栏每次刷新都要读）。
+     */
+    const f = await import('node:fs');
+    const src = f.readFileSync(new URL('../host/api/index.js', import.meta.url), 'utf8');
+    const i = src.indexOf("route === '/comfy/status'");
+    assert.ok(i > 0);
+    // 该路由分支里不应出现 writeGuard 之类
+    const block = src.slice(i, i + 260);
+    assert.ok(!/writeGuard|requireToken/.test(block), 'GET /comfy/status 不该额外校验令牌');
+  });
+
   await checkAsync('写操作无 token 被拒绝', async () => {
     const { req, res, status } = fakeReqRes('POST', '/projects', { body: JSON.stringify({ name: 'x' }) });
     await handleApi(req, res);
@@ -1431,6 +2363,96 @@ async function routeChecks() {
       assert.ok(r.ok);
       const j = await r.json();
       assert.ok(j.NanFengH3MultiReferenceGeneratorV15, '节点未注册');
+    });
+
+    await checkAsync('加噪节点已在 ComfyUI 注册且签名正确', async () => {
+      /**
+       * 换人抗漂移的核心节点。它必须在 ComfyUI 侧真实注册，
+       * 否则 `buildWorkflow` 组出来的子图会在展开期报 unknown node class，
+       * 而那是在提交之后才失败 —— 白等一次排队。
+       */
+      const r = await fetch('http://127.0.0.1:8488/object_info/NanFengH3ContextTaperNoiseV15', { signal: AbortSignal.timeout(20000) });
+      assert.ok(r.ok, `加噪节点未注册（HTTP ${r.status}）`);
+      const node = (await r.json()).NanFengH3ContextTaperNoiseV15;
+      assert.ok(node, 'object_info 里没有 NanFengH3ContextTaperNoiseV15');
+      const req = Object.keys(node.input.required);
+      for (const k of ['context_latent', 'tail_frames', 'alpha', 'alpha_end', 'ramp_steps', 'seed']) {
+        assert.ok(req.includes(k), `缺少输入 ${k}`);
+      }
+      // tail_frames 只能是整数个 latent step 的那四档
+      assert.deepEqual(node.input.required.tail_frames[0], ['5', '22', '39', '56'],
+        'tail_frames 必须只提供整数 latent step 的四档');
+      // 默认配方必须与 REPLACE_DEFAULTS 一致
+      const R = await import('../host/services/replace.js');
+      assert.equal(node.input.required.alpha[1].default, R.REPLACE_DEFAULTS.taperAlpha,
+        'ComfyUI 侧默认强度与插件侧不一致');
+      assert.equal(node.input.required.alpha_end[1].default, R.REPLACE_DEFAULTS.taperAlphaEnd,
+        'ComfyUI 侧默认末档强度与插件侧不一致');
+    });
+
+    await checkAsync('加噪节点：纯函数层面的锥形与边界', async () => {
+      /**
+       * 直接验算法，不跑 GPU。参考实现见 MacroSony 的 inject_tail_taper.py：
+       * 22 帧 / 0.45 / 0.10 / 3 的末三档是 0.333 / 0.217 / 0.100。
+       * 这里用的是 latent step（2 步斜坡），但单调性必须一致。
+       */
+      const m = await import('../vendor/nanfeng/context_taper_noise.py')
+        .catch(() => null);
+      // Python 模块不能直接 import，改为验插件侧的换算与约束
+      const { buildOverrides } = await import('../host/services/replace-runner.js');
+
+      // ① 四档 ctx 都应能得出合法的音频步数
+      for (const [ctx, want] of [['5', 8], ['22', 37], ['39', 65], ['56', 93]]) {
+        const ov = buildOverrides({ contextLength: ctx }, { continuation: true });
+        assert.equal(ov.audio_context_length, want);
+        assert.equal(ov['续写加噪末档强度'] <= ov['续写加噪强度'], true,
+          `ctx=${ctx}：末档强度必须 <= 强度，否则不是锥形`);
+      }
+
+      // ② 斜坡步数不能超过该档对应的 latent step 数
+      const stepsFor = { 5: 2, 22: 7, 39: 12, 56: 17 };
+      for (const [ctx, steps] of Object.entries(stepsFor)) {
+        const ov = buildOverrides({ contextLength: ctx }, { continuation: true });
+        assert.ok(ov['续写加噪斜坡步数'] <= steps,
+          `ctx=${ctx} 只有 ${steps} 个 latent step，斜坡 ${ov['续写加噪斜坡步数']} 步会越界`);
+      }
+      assert.equal(m, null, 'Python 模块不应被 JS 直接 import（这里只是为了保留探针）');
+    });
+
+    await checkAsync('加噪节点：参数真的进入提交快照（含开启与关闭两种）', async () => {
+      /**
+       * 只验算 `buildOverrides` 不够 —— 必须确认参数穿过
+       * `buildShotWorkflow` 的整条合并链，最终出现在
+       * `workflow['1'].inputs`（也就是真正提交给 ComfyUI 的那份 JSON）。
+       * 历史上 `context_length` 就是被预设悄悄盖掉的（零报错）。
+       */
+      const { buildShotWorkflow } = await import('../host/services/nanfeng/index.js');
+      const C = await import('../host/services/nanfeng/continuation.js');
+      const { buildOverrides } = await import('../host/services/replace-runner.js');
+
+      const b = C.createBatch({ projectId: 't', shotIds: ['a', 'b'], contextLength: '39' });
+      for (const cont of [true, false]) {
+        const extra = buildOverrides({ contextLength: '39' }, { continuation: cont });
+        const r = buildShotWorkflow({
+          shot: { id: 's', mode: 'ref2va', durationSec: 6, prompt: 'x' },
+          preset: 'draft',
+          continuationTask: cont ? C.taskFor(b, 2) : undefined,
+          jobId: 't',
+          extraParams: extra,
+        });
+        const p = r.workflow['1'].inputs;
+        assert.equal(p.context_length, cont ? '39' : p.context_length,
+          `续写=${cont}：context_length 未被预设覆盖`);
+        if (cont) {
+          assert.equal(p['启用续写上下文加噪'], true, '续写必须开加噪');
+          assert.equal(p['续写加噪强度'], 0.45);
+          assert.equal(p['续写加噪末档强度'], 0.1);
+          assert.equal(p['续写加噪斜坡步数'], 2);
+          assert.equal(p.audio_context_length, 65, '39 帧应换算成 65 个音频步');
+        } else {
+          assert.equal(p['启用续写上下文加噪'], false, '独立模式加噪必须关着');
+        }
+      }
     });
 
     await checkAsync('schema.js 与 ComfyUI object_info 逐项一致', async () => {

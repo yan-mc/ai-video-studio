@@ -17,6 +17,9 @@ data/inputs/
 data/vault/
 data/prompts/
 data/projects/
+# 剪辑工程与剪辑产物 —— 同属运行时数据，不入库
+# （工程 json 里只有片段相对路径与音轨设置，但产出 mp4 会撑爆仓库）
+data/edit/
 
 # 仓库里只保留工作流模板
 !data/workflows/
@@ -68,3 +71,4 @@ docs/probes/
 # 公开仓库不应包含这类索引：与项目本身（视频制作工具）无关，
 # 且可能触碰托管平台的内容政策。文档仍保留在本地供参考。
 docs/LORA-NSFW-CATALOG.md
+docs/LORA-DR34ML4Y.md
