@@ -196,20 +196,56 @@ export async function normalizePrompt(raw, cfg, opts = {}) {
   if (!opts.useLlm) return base;
   if (!parts.needsTranslate) return base;
 
-  // 只翻纯自然语言句：不含占位符、且确实有中文
-  const PH = /<(Subject|Video|Picture|Audio)\s*\d+>/i;
-  const targets = [...parts.summary, ...parts.stray]
-    .filter((t) => hasCjk(t) && !PH.test(t));
+  /**
+   * 送翻的候选：**所有含中文的句子**，包括带占位符的那些。
+   *
+   * ⚠️ 早先这里排除了含 `<Subject N>` 的句子，理由是"怕模型把占位符改坏"。
+   *    结果 `subjects` / `video` / `guards` 三段**整段保持中文**，
+   *    输出里还剩 68 个中文字符 —— 而这三段恰恰是身份绑定和防漂移声明，
+   *    是最该让模型读对的部分。
+   *
+   * 正确做法是**让模型翻，但在提示词里强调占位符逐字保留**，
+   * 翻完再用正则校验：占位符数量对不上就丢掉这条译文、保留原文。
+   * 这样既拿到了翻译，又不会因为模型手滑而破坏 `<Picture 1>`。
+   */
+  const PH_ALL = /<(Subject|Video|Picture|Audio)\s*\d+>/gi;
+  const countPh = (s) => (String(s).match(PH_ALL) || []).length;
+
+  const targets = [
+    ...parts.summary,
+    ...parts.subjects,
+    ...parts.video,
+    ...parts.shots,
+    ...parts.guards,
+    ...parts.stray,
+  ].filter((t) => hasCjk(t) && !parts.trigger.includes(t));   // 触发词永远不翻
 
   if (!targets.length) return base;
 
   try {
     const LLM = await import('./prompt-llm.js');
-    const translated = await LLM.translateBatch(cfg, targets);
-    if (!Object.keys(translated).length) {
+    const raw2 = await LLM.translateBatch(cfg, targets);
+    if (!Object.keys(raw2).length) {
       warnings.push('本地翻译模型没有返回结果，已保留中文原文');
       return base;
     }
+
+    /**
+     * 校验：占位符数量必须一致。
+     *
+     * 模型偶尔会把 `<Picture 1>` 翻成"图片1"或加空格，那样 H3 就认不出了。
+     * 数量对不上就**丢掉这条译文**（保留原文），宁可中英混排也不能破坏占位符。
+     */
+    const translated = {};
+    let dropped = 0;
+    for (const [src, dst] of Object.entries(raw2)) {
+      if (countPh(src) === countPh(dst)) translated[src] = dst;
+      else dropped += 1;
+    }
+    if (dropped) {
+      warnings.push(`${dropped} 条译文改动了占位符，已保留原文（防止 <Picture N> 失效）`);
+    }
+
     const prompt = joinReplacePrompt(parts, { translated });
     return { parts, prompt, translated: true, warnings };
   } catch (e) {

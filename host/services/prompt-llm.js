@@ -26,10 +26,22 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(HERE, '..', '..');
 const SCRIPT = path.join(PLUGIN_ROOT, 'tools', 'prompt-llm', 'translate_server.py');
 
-/** 模型加载慢（首次要读 5GB 权重），给足时间 */
-const LOAD_TIMEOUT_MS = 10 * 60 * 1000;
-/** 单条翻译超时 */
-const TRANSLATE_TIMEOUT_MS = 3 * 60 * 1000;
+/**
+ * 超时设置。
+ *
+ * ⚠️ 这几个值都调过一轮，原因是**实测比预期慢得多**：
+ *
+ *   · 首次加载 7B 4bit 要读 ~15GB 权重并做量化，冷启动 **5–10 分钟**很常见
+ *     （磁盘慢、杀毒软件扫描都会拖）。
+ *   · 之前 `TRANSLATE_TIMEOUT_MS` 只有 3 分钟，导致模型还在加载就被判超时，
+ *     而且错误信息说"翻译超时"，看起来像推理慢，实际是加载没完成 ——
+ *     这种**错误归因**比超时本身更浪费时间。
+ *
+ * 现在把「加载」和「推理」分开计时，各自给足额度，错误信息也分开描述。
+ */
+const LOAD_TIMEOUT_MS = 15 * 60 * 1000;
+/** 单批推理超时：模型已就绪后，翻译十几句话几秒到一分钟足够 */
+const TRANSLATE_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** 解析 ai-runtime 的 python（与 ComfyUI 共用同一个 venv） */
 function resolvePython(cfg) {
