@@ -41,12 +41,13 @@ import { runH3Nanfeng } from './generator.js';
 import {
   REPLACE_DEFAULTS,
   replaceStore,
-  planSegments,
+  planSourceSegments,
   cutSegments,
   concatSegments,
   resolveReplaceInput,
 } from './replace.js';
 import { planForShot } from './accel-plan.js';
+import { splitPromptForSegment, checkShotNumbering } from './shot-splitter.js';
 
 /**
  * 跑一个换人批次。
@@ -118,7 +119,7 @@ export async function runReplaceBatch({ replaceId, cfg = loadConfig(), onProgres
   try {
     /* ---------- 阶段 1：规划分段 ---------- */
     const sourceAbs = resolveReplaceInput(current.sourceRel, cfg);
-    const plan = await planSegments(sourceAbs, cfg, {
+    const plan = await planSourceSegments(sourceAbs, cfg, {
       segmentSec: current.segmentSec,
       maxSourceSec: REPLACE_DEFAULTS.maxSourceSec,
       maxSegments: REPLACE_DEFAULTS.maxSegments,
@@ -128,6 +129,18 @@ export async function runReplaceBatch({ replaceId, cfg = loadConfig(), onProgres
       segmentCount: current.segmentCount,
     });
     warnings.push(...plan.warnings);
+
+    /**
+     * 分镜编号自检 —— 在**开跑之前**就告诉用户，而不是等出片才发现。
+     *
+     * 两种情况会打乱模型对齐时间轴的依据：
+     *   · 重号（两个 [Shot 6]）—— 用户手误的常见形态
+     *   · 缺号/跳号（[Shot 1][Shot 3]）—— 删除某段时忘了重排
+     *
+     * 不阻断执行（能跑），但必须让用户看到。
+     */
+    const numChk = checkShotNumbering(current.prompt);
+    if (!numChk.ok) warnings.push(numChk.warning);
 
     /**
      * 段表：保留已完成的段（重跑时用），新增的段补上。
@@ -195,7 +208,7 @@ export async function runReplaceBatch({ replaceId, cfg = loadConfig(), onProgres
     const isContinuation = plan.mode === 'continuation';
     let contBatch = null;
     if (isContinuation) {
-      const CONT = await import('./nanfeng/continuation.js');
+      const CONT = (await import('../bridge/index.js')).continuation;
       contBatch = CONT.createBatch({
         projectId: `replace:${replaceId}`,
         // 段数就是批次里的段数 —— createBatch 只用来生成 id 与 folder
@@ -242,7 +255,7 @@ export async function runReplaceBatch({ replaceId, cfg = loadConfig(), onProgres
        * clip_<n> 能按顺序接上。
        */
       const contTask = isContinuation && contBatch
-        ? (await import('./nanfeng/continuation.js')).taskFor(contBatch, seg.index)
+        ? (await import('../bridge/index.js')).continuation.taskFor(contBatch, seg.index)
         : null;
 
       /**
@@ -288,8 +301,32 @@ export async function runReplaceBatch({ replaceId, cfg = loadConfig(), onProgres
        *
        * 段 1 不加：它没有上一段 latent，不存在竞争，加了只是浪费注意力。
        */
+      /**
+       * 本段实际采用的分镜切分策略（写入 job.params 便于排障）。
+       *
+       * `mode`: one-to-one（N段N镜）/ grouped（分组）/ whole（未切，整份发）
+       * `shots`: 这段实际包含的 Shot 编号
+       */
+      let splitInfo = { mode: 'whole', shots: [] };
+
       const segmentPrompt = (() => {
-        const base = String(task.prompt ?? '');
+        /**
+         * 第一步：**按段切分分镜**。
+         *
+         * 长视频切成 N 段重建时，提示词里的 `[Shot 1]…[Shot M]` 是整条片子的
+         * 分镜设计。早先直接把整份提示词发给每一段 —— 于是 7 段视频的每一段
+         * 都收到 7 个 Shot，每段都想把整场戏演完，动作挤成一团、节奏全乱。
+         *
+         * 现在每段只保留它自己那个 `[Shot i]`。
+         * 数量对不上时（M != N 且不整除）不瞎猜，原样发全文并写警告。
+         */
+        const raw = String(task.prompt ?? '');
+        const split = splitPromptForSegment(raw, seg.index, segments.length);
+        if (split.warning) warnings.push(split.warning);
+        // 记录实际切分策略，排障时能看出这段收到的是哪个镜头
+        splitInfo = { mode: split.mode, shots: split.shots };
+
+        const base = split.prompt;
         if (!isContinuation || seg.index === 1) return base;
 
         /**
@@ -352,6 +389,13 @@ export async function runReplaceBatch({ replaceId, cfg = loadConfig(), onProgres
           durationSec: seg.durationSec,
           ratio: shot.ratio,
           seed: Number.isFinite(Number(task.seed)) ? Number(task.seed) : 1101,
+          /**
+           * 分镜切分结果 —— 排障时一眼看出这段收到的是哪个镜头。
+           *
+           * `mode: 'whole'` 说明分镜数和段数配不上，整份提示词发下去了，
+           * 此时每段都会试图演完整场戏（并伴随一条 warning）。
+           */
+          shotSplit: splitInfo,
           /**
            * ⚠️ 必须把步数传下去，否则用户设了也没用。
            *
