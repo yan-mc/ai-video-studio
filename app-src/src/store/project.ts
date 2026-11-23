@@ -28,25 +28,25 @@ interface ProjectStore {
   /* 元信息 */
   meta: MetaState | null;
   metaLoaded: boolean;
-  metaError: string | null;
+  metaError: unknown;
 
   /* 配置 */
   config: AppConfig | null;
   configLoaded: boolean;
-  configError: string | null;
+  configError: unknown;
 
   /* 项目 */
   projects: ProjectSummary[];
   projectsLoaded: boolean;
   projectsLoading: boolean;
-  projectsError: string | null;
+  projectsError: unknown;
   currentProjectId: string | null;
 
   /* 资产（素材库页共用，避免每页各拉一次） */
   assets: Asset[];
   assetsLoaded: boolean;
   assetsLoading: boolean;
-  assetsError: string | null;
+  assetsError: unknown;
 
   /* actions */
   loadMeta: () => Promise<void>;
@@ -113,7 +113,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         metaError: null,
       });
     } catch (err) {
-      set({ metaLoaded: true, metaError: err instanceof Error ? err.message : String(err) });
+      set({ metaLoaded: true, metaError: err });
     }
   },
 
@@ -124,7 +124,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     } catch (err) {
       set({
         configLoaded: true,
-        configError: err instanceof Error ? err.message : String(err),
+        configError: err,
       });
     }
   },
@@ -162,7 +162,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       set({
         projectsLoading: false,
         projectsLoaded: true,
-        projectsError: err instanceof Error ? err.message : String(err),
+        projectsError: err,
       });
     }
   },
@@ -206,7 +206,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       set({
         assetsLoading: false,
         assetsLoaded: true,
-        assetsError: err instanceof Error ? err.message : String(err),
+        assetsError: err,
       });
     }
   },

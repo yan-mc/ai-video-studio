@@ -15,7 +15,7 @@ import * as comfy from './services/comfy-client.js';
 import * as mockBackend from './services/mock-backend.js';
 import { runH3Local, runH3Nanfeng } from './services/generator.js';
 import { blenderStatus, buildSceneSpec, renderControl, listModelAssets, listAssetActions } from './services/blender-service.js';
-import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, H3_MODES, H3_LIMITS } from './services/h3-prompt.js';
+import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, H3_MODES, H3_LIMITS } from './bridge/prompt/h3-prompt.js';
 import {
   IMAGE_MODELS as IMAGE_MODELS_MAP,
   IMAGE_VAE as IMAGE_VAE_NAME,
@@ -101,8 +101,8 @@ export function registerTools(ctx) {
     + '后端状态、南风参数分组与预设。',
     { type: 'object', properties: {}, additionalProperties: false },
     async () => {
-      const nf = await import('./services/nanfeng/schema.js');
-      const nfPre = await import('./services/nanfeng/presets.js');
+      const nf = await import('./bridge/vendors/nanfeng/schema.js');
+      const nfPre = await import('./bridge/vendors/nanfeng/presets.js');
       return {
         profiles: PROFILES,
         h3Slots: H3_MODEL_SLOTS,
@@ -349,7 +349,7 @@ export function registerTools(ctx) {
         seed: { type: 'number' },
         /** 预设 id */
         preset: { type: 'string' },
-        /** 单个参数覆盖（南风 217 参数里的任意项） */
+        /** 单个参数覆盖（南风 221 参数里的任意项） */
         params: { type: 'object', description: '覆盖预设参数，键名同南风参数名' },
         /** 生成模式（覆盖镜头卡的 mode） */
         mode: { type: 'string', enum: ['ref2va', 't2va', 'i2va', 'fl2va'] },
@@ -402,58 +402,49 @@ export function registerTools(ctx) {
       if (backendId === 'h3-image') job.kind = 'image';
       await jobsStore().upsert(job);
 
-      runJob(job, async (running, hooks) => {
-        // ⭐ 南风后端：支持二采 / 续写 / 217 参数
-        if (backendId === 'h3-nanfeng') {
-          return runH3Nanfeng({
-            job: running,
-            shot: shotWithCards,
-            prompt: running.prompt,
-            cfg,
-            onSubmitted: hooks?.onSubmitted,
-            mode: running.params?.nanfengMode,
-            preset: running.params?.nanfengPreset,
-            extraParams: running.params?.nanfengExtra,
-            continuationTask: running.params?.continuationTask,
-          });
-        }
-        if (backendId === 'h3-local') {
-          // 统一走 services/generator.js —— 与 REST 路径共用同一实现，
-          // 杜绝"工具漏填占位符"这类漂移（审查 G7）
-          return runH3Local({
-            workflow: z.h3.loadWorkflow(),
-            job: running,
-            shot: shotWithCards,
-            prompt: running.prompt,
-            cfg,
-            onSubmitted: hooks?.onSubmitted,
-          });
-        }
-        if (backendId === 'h3-image') return runH3ImageLocal({
-          workflow: imageWorkflow(),
-          job: running,
-          prompt: running.prompt,
-          shot: shotWithCards,
-          cfg,
-          onSubmitted: hooks?.onSubmitted,
-        });
-        // mock 是**测试占位后端**（services/mock-backend.js）：只出 ffmpeg 色卡，
-        // 不做推理。真实产出走 h3-nanfeng / h3-local / h3-image。
-        return mockBackend.runMock({ cfg, job: running, shot: shotWithCards, prompt: running.prompt });
-      }).catch(() => {});
+      runGenerationFor(job, { shot, projectId: pid, backendId });
 
       return job;
     },
   )));
 
   /* ---------------------------------------------------------- 任务 */
+  /**
+   * 重跑一条任务（与 REST 的 `/jobs/:id/retry` 同语义）。
+   *
+   * ⚠️ 旧实现没有 retry：Agent 侧只能"取消 + 重新 generate"，
+   *    于是同一镜头的两次尝试在列表里看起来是两个不同任务，排查时对不上号。
+   *    REST 有这条能力，两个入口（Agent / 网页）必须一致。
+   *
+   * 复用 `runGenerationFor`（studio_generate 用的同一段执行分流），
+   * 避免后端分流 / 角色卡解析 / 提示词编译在两处各写一遍。
+   */
+  async function retryJobById(jobId) {
+    const old = await jobsStore().get(jobId);
+    if (!old) throw new Error(`JOB_NOT_FOUND: ${jobId}`);
+    const pid = requireProjectId(old.projectId);
+    const shot = listShots(pid).find((s) => s.id === old.shotId);
+    if (!shot) throw new Error(`SHOT_NOT_FOUND: ${old.shotId}`);
+    const job = newJob({
+      projectId: pid,
+      shotId: old.shotId,
+      backendId: old.backendId,
+      prompt: old.prompt,
+      params: old.params,
+      mode: old.mode,
+    });
+    await jobsStore().upsert(job);
+    runGenerationFor(job, { shot, projectId: pid, backendId: old.backendId }).catch(() => {});
+    return job;
+  }
+
   disposers.push(reg(tool(
     'studio_jobs',
     '任务查询 / 取消 / 重试。cancel 会真正通知远端（ComfyUI /interrupt）。',
     {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['list', 'get', 'cancel'] },
+        action: { type: 'string', enum: ['list', 'get', 'cancel', 'retry'] },
         jobId: { type: 'string' },
         limit: { type: 'number' },
       },
@@ -475,9 +466,62 @@ export function registerTools(ctx) {
           }
         }));
       }
+      if (args.action === 'retry') return retryJobById(args.jobId);
       throw new Error('UNKNOWN_ACTION');
     },
   )));
+
+  /**
+   * 按后端分流执行一次生成。
+   *
+   * studio_generate 与 studio_jobs(retry) 共用这一段，避免"两个入口各写一遍
+   * 后端分流"这种漂移（历史上工具侧就漏填过 6 个模型/LoRA 占位符）。
+   *
+   * @param {object} job
+   * @param {{shot: object, projectId: string, backendId: string}} opts
+   */
+  async function runGenerationFor(job, { shot, projectId, backendId }) {
+    const cfg = loadConfig();
+    const shotWithCards = await withVaultCards(shot, projectId, getRuntime(), cfg);
+    return runJob(job, async (running, hooks) => {
+      if (backendId === 'h3-nanfeng') {
+        return runH3Nanfeng({
+          job: running,
+          shot: shotWithCards,
+          prompt: running.prompt,
+          cfg,
+          onSubmitted: hooks?.onSubmitted,
+          mode: running.params?.nanfengMode,
+          preset: running.params?.nanfengPreset,
+          extraParams: running.params?.nanfengExtra,
+          continuationTask: running.params?.continuationTask,
+        });
+      }
+      if (backendId === 'h3-local') {
+        // 统一走 services/generator.js —— 与 REST 路径共用同一实现
+        return runH3Local({
+          workflow: z.h3.loadWorkflow(),
+          job: running,
+          shot: shotWithCards,
+          prompt: running.prompt,
+          cfg,
+          onSubmitted: hooks?.onSubmitted,
+        });
+      }
+      if (backendId === 'h3-image') {
+        return runH3ImageLocal({
+          workflow: imageWorkflow(),
+          job: running,
+          prompt: running.prompt,
+          shot: shotWithCards,
+          cfg,
+          onSubmitted: hooks?.onSubmitted,
+        });
+      }
+      // mock 是**测试占位后端**（services/mock-backend.js）：只出 ffmpeg 色卡，不做推理。
+      return mockBackend.runMock({ cfg, job: running, shot: shotWithCards, prompt: running.prompt });
+    }).catch(() => {});
+  }
 
   /* ---------------------------------------------------------- H3 工坊 */
   disposers.push(reg(tool(
@@ -887,8 +931,8 @@ export function registerTools(ctx) {
       additionalProperties: false,
     },
     async (args) => {
-      const sb = await import('./services/nanfeng/storyboard.js');
-      const llm = await import('./services/nanfeng/dsh-llm.js');
+      const sb = await import('./bridge/llm/storyboard.js');
+      const llm = await import('./bridge/llm/dsh-llm.js');
       const cfg = loadConfig();
 
       if (args.action === 'meta') {
@@ -979,12 +1023,3 @@ export function registerTools(ctx) {
 }
 
 export default registerTools;
-
-
-
-
-
-
-
-
-

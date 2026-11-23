@@ -110,10 +110,3 @@ export function navigateTo(route: RouteId): void {
   if (typeof window === 'undefined') return;
   window.location.hash = routeToHash(route);
 }
-
-
-
-
-
-
-

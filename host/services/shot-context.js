@@ -21,7 +21,7 @@ import path from 'node:path';
 import { loadConfig } from '../config.js';
 import { safeJoin } from '../security.js';
 import { readProjectCards } from './character-vault.js';
-import { resolveRefImages } from './generator.js';
+import { resolveRefImages } from './ref-images.js';
 import { probeMedia } from './media-probe.js';
 
 /**

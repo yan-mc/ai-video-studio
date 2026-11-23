@@ -72,3 +72,25 @@ docs/probes/
 # 且可能触碰托管平台的内容政策。文档仍保留在本地供参考。
 docs/LORA-NSFW-CATALOG.md
 docs/LORA-DR34ML4Y.md
+
+# 换人实验产物 —— 与其它运行时数据同属不入库
+#
+# ⚠️ 历史缺陷：上面的 data/*.json 只覆盖一层，data/replace/ 下的
+#    png / csv / json 全部漏网 → 77 个文件、41.88 MB 被提交进仓库，
+#    且运行时还在持续写入（git status 永远是脏的）。
+data/replace/
+data/shots/
+data/projects/
+data/vault/
+data/runs/
+data/previz/
+data/post/
+data/edit/
+data/inputs/
+data/tmp-inline/
+
+# json-store 的原子写备份与损坏副本 —— 运行时产物，不入库
+data/*.bak
+data/**/*.bak
+data/*.corrupt
+data/**/*.corrupt

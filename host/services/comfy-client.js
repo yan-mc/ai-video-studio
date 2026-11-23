@@ -118,13 +118,6 @@ export function discoverComfyUrl() {
   return '';
 }
 
-function baseUrl(cfg = loadConfig()) {
-  const configured = String(cfg.comfyUrl || '').replace(/\/+$/, '');
-  // 端口文件优先于配置：它反映"当前实际在跑哪个端口"
-  const discovered = discoverComfyUrl();
-  return discovered || configured;
-}
-
 /**
  * 拿一个**确认可达**的 ComfyUI 地址。
  *
@@ -162,9 +155,12 @@ export async function resolveComfyUrl(cfg = loadConfig()) {
       }
     } catch { /* 继续试下一个 */ }
   }
-  PROBE_CACHE.url = candidates[0] || '';
-  PROBE_CACHE.at = Date.now();
-  return PROBE_CACHE.url;
+  // ⚠️ 探测失败**不写缓存**：ComfyUI 刚 bind 完、或启动脚本还在加载模型时，
+  //    一次失败如果被缓存 5 秒，接下来 5 秒内 health()/vramStatus() 全报"不可达"，
+  //    用户看到的是「启动成功但状态不可达」。失败只记 url 供报错文案用，不下结论。
+  PROBE_CACHE.url = '';
+  PROBE_CACHE.at = 0;
+  return candidates[0] || '';
 }
 
 /** 只取配置值（不经端口文件） */
@@ -444,6 +440,8 @@ export async function runWorkflow({ cfg, workflow, map, job, outputsDir, onSubmi
 
   const deadline = Date.now() + resolveTimeoutMs(cfg);
   const startedAt = Date.now();
+  /** 连续多少次"HTTP 层面的硬失败"（区分于网络抖动） */
+  let histHardFailures = 0;
 
   for (;;) {
     if (Date.now() >= deadline) {
@@ -460,7 +458,28 @@ export async function runWorkflow({ cfg, workflow, map, job, outputsDir, onSubmi
     let hist;
     try {
       hist = await getJson(`${url}/history/${encodeURIComponent(remoteId)}`);
-    } catch { continue; }
+    } catch (e) {
+      /**
+       * ⚠️ 不能无条件 `continue`。
+       *
+       * ComfyUI 中途被 404/500 打挂、或 history 返回坏 JSON 时，无限重试意味着
+       * 用户要等满 2 小时才拿到错误，而且拿到的是"超时"—— 文案还会引导用户
+       * 去调大超时，方向完全相反。
+       *
+       * 只对**网络类**错误继续等（ComfyUI 可能只是忙），HTTP 层面明确失败
+       * 连续出现 5 次就抛真实错误。
+       */
+      const code = String(e?.message || '');
+      const hard = /^COMFY_HTTP_(4\d\d|5\d\d)/.test(code) || code.startsWith('COMFY_BAD_JSON');
+      if (hard) {
+        histHardFailures += 1;
+        if (histHardFailures >= 5) {
+          throw new Error(`COMFY_HISTORY_FAILED: 连续 ${histHardFailures} 次读取任务状态失败 → ${code.slice(0, 300)}`);
+        }
+      }
+      continue;
+    }
+    histHardFailures = 0;
     const entry = hist[remoteId];
     if (!entry) continue;
 
@@ -478,33 +497,53 @@ export async function runWorkflow({ cfg, workflow, map, job, outputsDir, onSubmi
         if (Array.isArray(node[key])) files.push(...node[key]);
       }
     }
-    const media = files.find((f) => /\.(mp4|webm|mov|gif)$/i.test(f?.filename || '')) || files[0];
-    if (!media) throw new Error(`COMFY_NO_OUTPUT (status=${st.status_str || '?'})`);
+    // 主产物：优先视频。其余产物（二采/续写可能同时产出多份）**全部下载**，
+    // 不能只取第一个 —— 旧实现只留 media[0]，`job.outputs` 恒为 1 条，
+    // 而任务记录自称"含全部 outputs"，多出来的产物静默消失。
+    const mediaLike = files.filter((f) => f && f.filename);
+    if (!mediaLike.length) throw new Error(`COMFY_NO_OUTPUT (status=${st.status_str || '?'})`);
+    const primary = mediaLike.find((f) => /\.(mp4|webm|mov|gif)$/i.test(f.filename))
+      || mediaLike[0];
+    const ordered = [primary, ...mediaLike.filter((f) => f !== primary)];
 
-    const q = new URLSearchParams({
-      filename: media.filename,
-      subfolder: media.subfolder || '',
-      type: media.type || 'output',
-    });
-    const res = await fetch(`${url}/view?${q}`, { signal: AbortSignal.timeout(120000) });
-    if (!res.ok) throw new Error(`COMFY_DOWNLOAD_${res.status}`);
-    const buf = Buffer.from(await res.arrayBuffer());
-    const ext = (path.extname(media.filename || '') || '.mp4').toLowerCase();
     fs.mkdirSync(outputsDir, { recursive: true });
-    const dest = path.join(outputsDir, `${job.id}${ext}`);
-    fs.writeFileSync(dest, buf);
+    const outputs = [];
+    const downloadFailures = [];
+    for (const item of ordered) {
+      const q = new URLSearchParams({
+        filename: item.filename,
+        subfolder: item.subfolder || '',
+        type: item.type || 'output',
+      });
+      try {
+        const res = await fetch(`${url}/view?${q}`, { signal: AbortSignal.timeout(120000) });
+        if (!res.ok) { downloadFailures.push(`${item.filename}: HTTP ${res.status}`); continue; }
+        const buf = Buffer.from(await res.arrayBuffer());
+        const ext = (path.extname(item.filename || '') || '.mp4').toLowerCase();
+        // 多产物时按序号区分文件名，避免后写的覆盖先写的
+        const suffix = outputs.length === 0 ? '' : `_${outputs.length + 1}`;
+        const dest = path.join(outputsDir, `${job.id}${suffix}${ext}`);
+        fs.writeFileSync(dest, buf);
+        outputs.push({
+          role: /\.(mp4|webm|mov)$/i.test(ext) ? 'video' : 'image',
+          path: dest,
+          // rel 是相对 dataDir 的路径，前端直接拼 /jiuzhang/api/file?path=<rel> 即可。
+          rel: toRel(cfg, dest),
+          bytes: buf.length,
+          mime: ext === '.mp4' ? 'video/mp4' : undefined,
+        });
+      } catch (e) {
+        downloadFailures.push(`${item.filename}: ${e.message}`);
+      }
+    }
+    if (!outputs.length) throw new Error(`COMFY_DOWNLOAD_FAILED: ${downloadFailures.join('; ').slice(0, 400)}`);
 
     return {
       remoteId,
-      outputs: [{
-        role: /\.(mp4|webm|mov)$/i.test(ext) ? 'video' : 'image',
-        path: dest,
-        // rel 是相对 dataDir 的路径，前端直接拼 /jiuzhang/api/file?path=<rel> 即可。
-        // 旧实现只给绝对路径，逼前端用正则从 "…/outputs/xxx.png" 里抠 —— 换机器就废。
-        rel: toRel(cfg, dest),
-        bytes: buf.length,
-        mime: ext === '.mp4' ? 'video/mp4' : undefined,
-      }],
+      outputs,
+      warnings: downloadFailures.length
+        ? [`有 ${downloadFailures.length} 个产物下载失败：${downloadFailures.join('; ').slice(0, 300)}`]
+        : [],
     };
   }
   throw new Error('COMFY_TIMEOUT');

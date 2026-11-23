@@ -280,8 +280,19 @@ export function resolveAccelForFiles(planId, loraFiles) {
   if (exactFile) {
     const meta = classifyAccelLora(base.lora);
     const resolved = exactFile.dir ? `${exactFile.dir}/${exactFile.base}` : exactFile.base;
+    /**
+     * ⚠️ 历史 P0（本次修复）：这里原来是 `const note = exactFile.dir ? [] : warnings`，
+     *    逻辑写反了 —— LoRA 放在子目录（本机实际布局 `00_turbo/...`）时，
+     *    它把**已经累积的 warnings 全部丢掉**，包括：
+     *      · 「未知加速方案已回退到 dmad8」
+     *      · 「声明名不存在，已按同家族替换」
+     *    于是用户改错了方案名，界面上一句提示都没有，只有画质变差。
+     *
+     *    正确语义：命中子目录只是"提交时要用带目录的完整名"，
+     *    应该在 warnings 里**追加一条说明**，而不是清空前面的。
+     */
     const note = exactFile.dir
-      ? []
+      ? [...warnings, `已按子目录完整名提交：${resolved}`]
       : warnings;
     return { ...base, lora: resolved, matched: 'declared', loraMeta: meta, warnings: note };
   }

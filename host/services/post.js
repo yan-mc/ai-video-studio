@@ -9,8 +9,9 @@ import path from 'node:path';
 import { runProcess, resolveFfmpeg, resolveFfprobe } from './ffmpeg-tools.js';
 import { resolveUserPath } from '../security.js';
 import { loadConfig } from '../config.js';
+import { configReader } from '../config-reader.js';
 
-export function createPostService({ cfg, getCfg = loadConfig }) {
+export function createPostService({ getCfg = loadConfig } = {}) {
   /**
    * 配置访问器。
    *
@@ -20,7 +21,7 @@ export function createPostService({ cfg, getCfg = loadConfig }) {
    *    "项目列表在、项目内容空"，且没有任何报错。
    *    这里每次现取，保证全进程看到同一份配置。
    */
-  const C = () => (typeof getCfg === 'function' ? getCfg() : cfg);
+  const C = configReader(getCfg);
   function outDir() {
     const d = path.join(C().dataDir, 'post');
     fs.mkdirSync(d, { recursive: true });
@@ -64,7 +65,7 @@ export function createPostService({ cfg, getCfg = loadConfig }) {
     const abs = resolveInput(input);
     if (kindOf(abs) !== 'video') throw new Error('NOT_A_VIDEO: 去音轨只对视频有意义');
     const out = uniqueOut('.mp4');
-    await runProcess(resolveFfmpeg(cfg), [
+    await runProcess(resolveFfmpeg(C()), [
       '-y', '-i', abs,
       '-c:v', 'copy',        // 视频流原样复制：不重编码，无画质损失，速度极快
       '-an',                 // 丢弃音频流
@@ -78,7 +79,7 @@ export function createPostService({ cfg, getCfg = loadConfig }) {
   async function transcode({ input, crf = 23, preset = 'veryfast', videoCodec = 'libx264', audioCodec = 'aac', audioBitrate = '128k' }) {
     const abs = resolveInput(input);
     const out = uniqueOut('.mp4');
-    await runProcess(resolveFfmpeg(cfg), [
+    await runProcess(resolveFfmpeg(C()), [
       '-y', '-i', abs,
       '-c:v', videoCodec, '-crf', String(crf), '-preset', preset, '-pix_fmt', 'yuv420p',
       '-c:a', audioCodec, '-b:a', audioBitrate,
@@ -100,7 +101,7 @@ export function createPostService({ cfg, getCfg = loadConfig }) {
     const args = kind === 'image'
       ? ['-y', '-i', abs, '-vf', vf, out]
       : ['-y', '-i', abs, '-vf', vf, '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'copy', out];
-    await runProcess(resolveFfmpeg(cfg), args, 1800000);
+    await runProcess(resolveFfmpeg(C()), args, 1800000);
     return result(out);
   }
 
@@ -115,7 +116,7 @@ export function createPostService({ cfg, getCfg = loadConfig }) {
       );
     }
     const out = uniqueOut('.png');
-    await runProcess(resolveFfmpeg(cfg), [
+    await runProcess(resolveFfmpeg(C()), [
       '-y', '-ss', String(Number(timeSec) || 0), '-i', abs, '-frames:v', '1', out,
     ], 120000);
     return result(out);
@@ -137,7 +138,7 @@ export function createPostService({ cfg, getCfg = loadConfig }) {
     if (isImage) args.push('-frames:v', '1');
     else args.push('-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', '-c:a', 'copy');
     args.push(out);
-    await runProcess(resolveFfmpeg(cfg), args, 600000);
+    await runProcess(resolveFfmpeg(C()), args, 600000);
     return result(out);
   }
 
@@ -145,7 +146,7 @@ export function createPostService({ cfg, getCfg = loadConfig }) {
   async function extractAudio({ input }) {
     const abs = resolveInput(input);
     const out = uniqueOut('.m4a');
-    await runProcess(resolveFfmpeg(cfg), ['-y', '-i', abs, '-vn', '-c:a', 'aac', '-b:a', '128k', out], 600000);
+    await runProcess(resolveFfmpeg(C()), ['-y', '-i', abs, '-vn', '-c:a', 'aac', '-b:a', '128k', out], 600000);
     return result(out);
   }
 
@@ -158,7 +159,7 @@ export function createPostService({ cfg, getCfg = loadConfig }) {
     const abs = resolveInput(input);
     const r = Math.max(1, Math.min(10, Number(rows) || 2));
     const c = Math.max(1, Math.min(10, Number(cols) || 2));
-    const ffprobe = resolveFfprobe(cfg);
+    const ffprobe = resolveFfprobe(C());
     // 取原图尺寸
     const probe = await runProcess(ffprobe, [
       '-v', 'error', '-select_streams', 'v:0',
@@ -174,7 +175,7 @@ export function createPostService({ cfg, getCfg = loadConfig }) {
     const ext = path.extname(abs).toLowerCase() || '.png';
     const stamp = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
     const files = [];
-    const ffmpeg = resolveFfmpeg(cfg);
+    const ffmpeg = resolveFfmpeg(C());
     let index = 0;
     for (let ry = 0; ry < r; ry++) {
       for (let cx = 0; cx < c; cx++) {
@@ -208,7 +209,7 @@ export function createPostService({ cfg, getCfg = loadConfig }) {
   async function annotate({ input, text = '', fontSize = 28, color = 'white', x = 16, y = 16, fontFile }) {
     const abs = resolveInput(input);
     if (!text) throw new Error('ANNOTATE_TEXT_REQUIRED');
-    const ffmpeg = resolveFfmpeg(cfg);
+    const ffmpeg = resolveFfmpeg(C());
     const ext = path.extname(abs).toLowerCase() || '.png';
     const out = uniqueOut(ext === '.mp4' ? '.mp4' : ext);
 
@@ -282,7 +283,7 @@ export function createPostService({ cfg, getCfg = loadConfig }) {
   async function qc(input) {
     const abs = resolveInput(input);
     if (!fs.existsSync(abs)) throw new Error('FILE_NOT_FOUND');
-    const ffprobe = resolveFfprobe(cfg);
+    const ffprobe = resolveFfprobe(C());
     const r = await runProcess(ffprobe, [
       '-v', 'error',
       '-show_entries', 'format=duration,size,format_name',

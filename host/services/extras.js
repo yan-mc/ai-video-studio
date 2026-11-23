@@ -14,7 +14,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from '../config.js';
-import { updateJson } from '../store/json-store.js';
+import { configReader } from '../config-reader.js';
+import { updateJson, readJson as readJsonCore } from '../store/json-store.js';
 
 /* ------------------------------------------------------- 提示词模板 */
 
@@ -104,54 +105,13 @@ export const IMPORT_SOURCES = Object.freeze([
 
 /* ------------------------------------------------------- 服务 */
 
-export function createExtrasService({ cfg, getCfg = loadConfig }) {
-  const C = () => (typeof getCfg === 'function' ? getCfg() : cfg);
+export function createExtrasService({ getCfg = loadConfig } = {}) {
+  const C = configReader(getCfg);
   function file(name) {
     const d = path.join(C().dataDir, 'extras');
     fs.mkdirSync(d, { recursive: true });
     return path.join(d, name);
   }
-  /**
-   * 读 JSON —— **损坏时抛错，不静默清空**。
-   *
-   * ⚠️ 历史缺陷：原来是 `catch { return fallback; }`。一旦文件损坏
-   *    （断电 / 杀进程 / 磁盘满 / 手工编辑出错），readJson 返回 `[]`，
-   *    紧接着 `upsertTemplate` 把**只含新条目的数组**写回去 ——
-   *    用户的自定义模板/服化道**全部消失，且没有任何提示**。
-   *
-   *    这与 `store/json-store.js` 的处理正好相反：那个模块专门修过
-   *    同样的问题（读出错就抛 CORRUPT_JSON 并保留 .corrupt 副本）。
-   *    这里对齐它。
-   *
-   * 文件不存在仍然返回 fallback（这是正常情况，不是损坏）。
-   */
-  function readJson(f, fallback, opts = {}) {
-    if (!fs.existsSync(f)) return fallback;
-    let text;
-    try { text = fs.readFileSync(f, 'utf8'); } catch { return fallback; }
-    if (!text.trim()) return fallback;
-    try {
-      return JSON.parse(text);
-    } catch (e) {
-      // 保留坏文件供人工修复
-      try { fs.copyFileSync(f, `${f}.corrupt`); } catch { /* ignore */ }
-      /**
-       * 写路径必须抛（否则覆盖掉用户数据）；
-       * 读路径（列表展示）**降级为 fallback**，否则一个坏文件会让整个工具箱
-       * 面板打不开 —— 但要把原因记进 warnings 让用户在界面上看到，
-       * 不能像以前那样"空列表 + 什么也不说"。
-       */
-      const msg = `CORRUPT_JSON: ${path.basename(f)} 解析失败（已备份为 .corrupt）`;
-      if (opts.soft) {
-        corruptWarnings.push(msg);
-        return fallback;
-      }
-      const err = new Error(`${msg}：${e.message}`);
-      err.code = 'CORRUPT_JSON';
-      throw err;
-    }
-  }
-
   /**
    * 读坏过的文件清单 —— 供 `warnings()` 暴露给前端。
    *
@@ -161,35 +121,42 @@ export function createExtrasService({ cfg, getCfg = loadConfig }) {
   const corruptWarnings = [];
 
   /**
-   * 原子写 JSON。
+   * 读 JSON —— 统一走 `store/json-store.js`，不再自己写一份。
    *
-   * Windows 上 rename 覆盖已存在文件可能因杀软扫描/句柄占用抛
-   * EPERM/EBUSY/EACCES —— `json-store.js` 有专门的重试，这里补齐，
-   * 否则用户在 Windows 上会遇到随机写入失败。
+   * ⚠️ 历史说明：这里原来有一个**本地实现**（readJson + writeJson 两套），
+   *    与 json-store 的语义有微妙差异：
+   *      · 本地版本损坏时对"读路径"降级为 fallback 并记 warnings；
+   *      · json-store 一律抛 CORRUPT_JSON 并保留 .corrupt。
+   *    两条路径并存 = 同一份文件被两种策略处理，最容易出现
+   *    "面板能打开但保存时报错"这种自相矛盾的表现。
+   *
+   *    现在统一：**读一律走 json-store.readJson**（损坏就抛），
+   *    需要"降级 + 告警"的展示型调用由本模块自己 try/catch 一次并记 warnings，
+   *    把策略收敛到调用点，而不是藏在一个模块私有的第二份实现里。
    */
-  function writeJson(f, v) {
-    const tmp = `${f}.${process.pid}.${Date.now()}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(v, null, 2), 'utf8');
-    const RETRY = [0, 10, 30, 80, 150];
-    for (let i = 0; i < RETRY.length; i += 1) {
-      if (RETRY[i]) {
-        const until = Date.now() + RETRY[i];
-        while (Date.now() < until) { /* 短自旋：这个模块的写入频率极低 */ }
+  const readJson = (f, fallback, opts = {}) => {
+    try {
+      return readJsonCore(f, fallback);
+    } catch (e) {
+      if (opts.soft) {
+        corruptWarnings.push(`CORRUPT_JSON: ${path.basename(f)} 解析失败（已备份为 .corrupt）`);
+        return fallback;
       }
-      try {
-        fs.renameSync(tmp, f);
-        return v;
-      } catch (e) {
-        const code = String(e?.code || '');
-        const retriable = code === 'EPERM' || code === 'EBUSY' || code === 'EACCES';
-        if (!retriable || i === RETRY.length - 1) {
-          try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
-          throw e;
-        }
-      }
+      throw e;
     }
-    return v;
-  }
+  };
+
+  /**
+   * 读-改-写统一走 `updateJson`（同一文件的串行队列）。
+   *
+   * ⚠️ 不能写成 `readJson() → 改 → writeJson()`：`writeJson` 是**同步裸写**，
+   *    完全绕过串行队列，两个并发的 upsert 会互相覆盖（经典 last-write-wins）。
+   *    这里的所有集合都是"先读全量再写回全量"，所以必须在 mutator 内完成。
+   */
+  const mutateList = (f, mutator) => updateJson(f, [], (arr) => {
+    const list = Array.isArray(arr) ? arr.slice() : [];
+    return mutator(list);
+  });
 
   /* ---------------- 提示词模板 ---------------- */
   const tplFile = () => file('prompt-templates.json');
@@ -198,9 +165,7 @@ export function createExtrasService({ cfg, getCfg = loadConfig }) {
     const custom = readJson(tplFile(), [], { soft: true });
     return [...SYSTEM_PROMPT_TEMPLATES, ...custom];
   }
-  function upsertTemplate(t) {
-    const custom = readJson(tplFile(), []);
-    const at = custom.findIndex((x) => x.id === t.id);
+  async function upsertTemplate(t) {
     const next = {
       id: t.id || `tpl-${Date.now().toString(36)}`,
       name: String(t.name || '新模板'),
@@ -209,13 +174,15 @@ export function createExtrasService({ cfg, getCfg = loadConfig }) {
       custom: true,
       updatedAt: Date.now(),
     };
-    if (at >= 0) custom[at] = next; else custom.unshift(next);
-    writeJson(tplFile(), custom);
+    await mutateList(tplFile(), (list) => {
+      const at = list.findIndex((x) => x.id === next.id);
+      if (at >= 0) list[at] = next; else list.unshift(next);
+      return list;
+    });
     return next;
   }
-  function deleteTemplate(id) {
-    const custom = readJson(tplFile(), []).filter((x) => x.id !== id);
-    writeJson(tplFile(), custom);
+  async function deleteTemplate(id) {
+    await mutateList(tplFile(), (list) => list.filter((x) => x.id !== id));
     return { removed: id };
   }
 
@@ -269,9 +236,7 @@ export function createExtrasService({ cfg, getCfg = loadConfig }) {
     return kind ? all.filter((w) => w.kind === kind) : all;
   }
 
-  function upsertWardrobe(item) {
-    const all = readJson(wardFile(), []);
-    const at = all.findIndex((x) => x.id === item.id);
+  async function upsertWardrobe(item) {
     const next = {
       ...item,
       id: item.id || `wd-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
@@ -283,13 +248,15 @@ export function createExtrasService({ cfg, getCfg = loadConfig }) {
       updatedAt: Date.now(),
       createdAt: item.createdAt ?? Date.now(),
     };
-    if (at >= 0) all[at] = next; else all.unshift(next);
-    writeJson(wardFile(), all);
+    await mutateList(wardFile(), (list) => {
+      const at = list.findIndex((x) => x.id === next.id);
+      if (at >= 0) list[at] = next; else list.unshift(next);
+      return list;
+    });
     return next;
   }
-  function deleteWardrobe(id) {
-    const all = readJson(wardFile(), []).filter((x) => x.id !== id);
-    writeJson(wardFile(), all);
+  async function deleteWardrobe(id) {
+    await mutateList(wardFile(), (list) => list.filter((x) => x.id !== id));
     return { removed: id };
   }
 
@@ -475,9 +442,7 @@ export function createExtrasService({ cfg, getCfg = loadConfig }) {
     const all = readJson(motionFile(), [], { soft: true });
     return projectId ? all.filter((m) => m.projectId === projectId) : all;
   }
-  function upsertMotionShot(item) {
-    const all = readJson(motionFile(), []);
-    const at = all.findIndex((x) => x.id === item.id);
+  async function upsertMotionShot(item) {
     const next = {
       ...item,
       id: item.id || `ms-${Date.now().toString(36)}`,
@@ -489,13 +454,15 @@ export function createExtrasService({ cfg, getCfg = loadConfig }) {
       updatedAt: Date.now(),
       createdAt: item.createdAt ?? Date.now(),
     };
-    if (at >= 0) all[at] = next; else all.unshift(next);
-    writeJson(motionFile(), all);
+    await mutateList(motionFile(), (list) => {
+      const at = list.findIndex((x) => x.id === next.id);
+      if (at >= 0) list[at] = next; else list.unshift(next);
+      return list;
+    });
     return next;
   }
-  function deleteMotionShot(id) {
-    const all = readJson(motionFile(), []).filter((x) => x.id !== id);
-    writeJson(motionFile(), all);
+  async function deleteMotionShot(id) {
+    await mutateList(motionFile(), (list) => list.filter((x) => x.id !== id));
     return { removed: id };
   }
 

@@ -32,6 +32,7 @@ import path from 'node:path';
 import { runProcess, resolveFfmpeg, resolveFfprobe } from './ffmpeg-tools.js';
 import { resolveUserPath, safeId } from '../security.js';
 import { loadConfig } from '../config.js';
+import { configReader } from '../config-reader.js';
 
 /** 视频扩展名 —— 只认这些，避免把任意文件塞给 ffmpeg */
 const VIDEO_EXT = new Set(['.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v']);
@@ -41,7 +42,7 @@ const AUDIO_EXT = new Set(['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.op
 /** 工程 id 的允许形态 */
 const EDIT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
-export function createEditService({ cfg, getCfg = loadConfig }) {
+export function createEditService({ getCfg = loadConfig } = {}) {
   /**
    * 配置访问器。
    *
@@ -49,7 +50,7 @@ export function createEditService({ cfg, getCfg = loadConfig }) {
    * 是启动时快照。改 dataDir 之后它继续指向旧目录，于是"工程列表在、
    * 内容读到空"。每次现取才能保证全进程看到同一份配置。
    */
-  const C = () => (typeof getCfg === 'function' ? getCfg() : cfg);
+  const C = configReader(getCfg);
 
   function editDir() {
     const d = path.join(C().dataDir, 'edit');
@@ -228,8 +229,9 @@ export function createEditService({ cfg, getCfg = loadConfig }) {
     const list = Array.isArray(inputs) ? inputs.filter(Boolean) : [];
     if (list.length === 0) throw new Error('NO_INPUTS');
     if (list.length === 1) {
-      // 单片段拼接退化成复制，别让用户以为出错了
-      return trim({ input: list[0], startSec: 0, endSec: null, reencode: true });
+      // 单片段拼接退化成原样拷贝。这里必须 reencode:false —— 用户说"合并"，
+      // 期望的是无损搬运，而不是一次无谓的 x264 转码（会掉画质且更慢）。
+      return trim({ input: list[0], startSec: 0, endSec: null, reencode: false });
     }
 
     const absPaths = list.map((p) => resolveInput(p));
@@ -255,6 +257,18 @@ export function createEditService({ cfg, getCfg = loadConfig }) {
     const ffmpeg = resolveFfmpeg(C());
 
     if (!doReencode) {
+      /**
+       * 流复制路径要求**编码参数完全一致**（codec/profile/pix_fmt/sar/timebase），
+       * 否则 concat demuxer 会产出"能播放但时长/时间戳错乱"的文件 ——
+       * 而且 ffmpeg 不报错。调用方显式要求 copy（reencode === false）时，
+       * 这里必须自己兜住形状不一致，不能静默产出坏文件。
+       */
+      if (absPaths.length > 1 && !sameShape(infos)) {
+        throw new Error(
+          'COPY_SHAPE_MISMATCH: 片段分辨率/帧率/编码不一致，无法无损拼接。'
+          + '请改用时转码（去掉「强制流复制」），或先把片段统一到同一规格。',
+        );
+      }
       // ---- 流复制路径 ----
       const listFile = path.join(outDir(), `cc_${stamp()}.txt`);
       const lines = absPaths.map((p) => `file '${p.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`);

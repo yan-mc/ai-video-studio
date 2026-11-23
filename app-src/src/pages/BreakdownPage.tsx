@@ -22,7 +22,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { api } from '../api/client';
+import { api, ApiHttpError } from '../api/client';
 import { outputUrl } from '../api/url';
 import type { JobOutput } from '../api/url';
 import {
@@ -273,8 +273,30 @@ export function BreakdownPage() {
     const timer = window.setInterval(() => {
       void (async () => {
         try {
-          const jobs = await api.listJobs() as { id: string; status: string; outputs?: JobOutput[]; error?: string }[];
-          const cur = jobs.find((j) => j.id === jobId);
+          /**
+           * 单任务查询。
+           *
+           * 这里本来就只关心 `jobId` 这一个任务（提交后拿到 id 再等终态），
+           * 旧实现却每 5 秒 `listJobs()` 拉一遍全量列表再 `find` ——
+           * 一次响应 300 KB 级，绝大部分与本页无关。
+           */
+          const cur = await api.getJob(jobId) as { id: string; status: string; outputs?: JobOutput[]; error?: string } | null;
+          /**
+           * 任务不存在（`404 JOB_NOT_FOUND`）就停轮询。
+           *
+           * 后端会裁剪终态任务（见 job-store 的 pruneJobs），换 dataDir 后
+           * 旧 id 也会查不到 —— 不早退的话这里会每 5 秒打一次必定失败的请求，
+           * 直到用户离开页面。
+           */
+          /**
+           * 任务不存在就停轮询。
+           *
+           * ⚠️ `getJob` 在 404 时是**抛 ApiHttpError**，不是返回 null ——
+           *    所以判据必须是 `!cur`（正常不会发生）**加上** catch 里识别
+           *    `JOB_NOT_FOUND`。旧代码只有前者，等于这条早退永远不生效，
+           *    后端裁剪掉终态任务后会每 5 秒打一次必定 404 的请求。
+           */
+          if (!cur) { setJobId(''); window.clearInterval(timer); return; }
           if (cur && ['completed', 'failed', 'cancelled'].includes(cur.status)) {
             /**
              * ⚠️ 成功判据必须认 `rel`，不能只认 `path`。
@@ -295,7 +317,19 @@ export function BreakdownPage() {
             setJobId('');
             window.clearInterval(timer);
           }
-        } catch { /* 网络抖动不中断 */ }
+        } catch (err) {
+          /**
+           * 404 JOB_NOT_FOUND = 任务已被裁剪（或换了 dataDir），
+           * 继续轮询没有意义 —— 停掉并把状态清空。
+           * 其它错误（网络抖动）保持原样继续轮询。
+           */
+          if (err instanceof ApiHttpError && err.status === 404) {
+            setJobId('');
+            window.clearInterval(timer);
+            return;
+          }
+          /* 网络抖动不中断 */
+        }
       })();
     }, 5000);
     return () => window.clearInterval(timer);

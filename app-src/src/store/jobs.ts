@@ -8,7 +8,15 @@ interface JobsStore {
   jobs: Job[];
   loaded: boolean;
   loading: boolean;
-  error: string | null;
+  /**
+   * 错误**保留原始对象**，不要降级成 string。
+   *
+   * ⚠️ 历史 P1：这里曾经是 string 类型，赋值时
+   *    String(err) / rr.message，于是 JobsPage 里
+   *    describeError(error) 拿到的是字符串 → 只认 Error/ApiHttpError 的
+   *    describeError 直接返回「发生未知错误」——**任务中心永远不显示真实原因**。
+   */
+  error: unknown;
   /** 上次刷新时间 */
   lastFetchedAt: number;
 
@@ -40,11 +48,7 @@ export const useJobsStore = create<JobsStore>((set, get) => ({
       const list = Array.isArray(raw) ? raw : [];
       set({ jobs: list, loaded: true, loading: false, error: null, lastFetchedAt: Date.now() });
     } catch (err) {
-      set({
-        loading: false,
-        loaded: true,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      set({ loading: false, loaded: true, error: err });
     }
   },
 

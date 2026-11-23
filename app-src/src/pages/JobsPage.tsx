@@ -59,7 +59,21 @@ export function JobsPage() {
     // 运行中任务存在时轮询，结束后自动停
     const hasActive = jobs.some((j) => j.status === 'running' || j.status === 'queued');
     if (!hasActive) return undefined;
-    const timer = window.setInterval(() => void loadJobs(true), 2500);
+    /**
+     * 为什么这里**不**改用 `fields:'list'` 轻量模式：
+     *
+     * 这一页的「提示词」列把 `job.prompt` 塞进了 `title`（悬浮看全文），
+     * 而轻量投影只回前 240 字符 —— 列表页要靠它读完整提示词，
+     * 投影会把悬浮内容截断。功能优先，这里保留全量。
+     *
+     * 真正的浪费不在这一页（轮询只在**有运行中任务时**才启动），
+     * 而在"轮询单个任务却拉全量"的那 3 处 —— 它们已改成 `getJob()`。
+     * 这里补两条抑制：页面切到后台就不发请求，间隔放到 4s。
+     */
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      void loadJobs(true);
+    }, 4000);
     return () => window.clearInterval(timer);
   }, [loadJobs, jobs]);
 

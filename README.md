@@ -29,12 +29,12 @@ ComfyUI 给你一个节点图；九章给你的是「从剧本到成片」的全
 
 | 你遇到过的 | 九章怎么做 |
 |---|---|
-| 217 个参数，不知道哪个有用 | 逐条对照上游源码审计，**无效的默认折叠并标注原因** |
+| 221 个参数，不知道哪个有用 | 逐条对照上游源码审计，**无效的默认折叠并标注原因** |
 | 角色换个镜头就换脸 | 角色卡仓库 + 参考图编号自动对齐 `<Picture N>` |
 | 长视频接不上，动作断裂 | 段间 **AV latent 续接**，实测段间 PSNR 30.7 dB |
 | 想让模型照着走位演 | Blender 渲灰模参考视频 → Ref2VA 的 `<Video N>` |
 | 出片慢、画质还差 | DMAD 蒸馏学生 + 潜空间二采，**5 分钟出 1472×832** |
-| 不知道这次到底提交了什么 | `job.params` 完整 217 参数快照 + 生效警告 |
+| 不知道这次到底提交了什么 | `job.params` 完整 221 参数快照 + 生效警告 |
 | 提示词写得很好但成片不对 | 编译期 lint + 提交期一致性校验，**不静默降级** |
 
 ---
@@ -45,7 +45,7 @@ ComfyUI 给你一个节点图；九章给你的是「从剧本到成片」的全
 
 | 后端 | 引擎 | 用途 |
 |---|---|---|
-| `h3-nanfeng` | 南风 V15（217 参数 → 内部展开 ~40 节点） | **主力视频生成**：二采 / 续写 / 全参数控制 |
+| `h3-nanfeng` | 南风 V15（221 参数 → 内部展开 ~40 节点） | **主力视频生成**：二采 / 续写 / 全参数控制 |
 | `h3-local` | 官方工作流模板替换 | 精简路径，排障对照用 |
 | `h3-image` | H3-Image 33B | 文生图、参考图编辑、角色设定卡、立绘拆解 |
 
@@ -68,7 +68,7 @@ ComfyUI 给你一个节点图；九章给你的是「从剧本到成片」的全
 
 ### 🎨 画风 × 打光：两个正交通道
 
-南风 217 参数里**没有画风参数，也没有打光参数** —— H3 是纯提示词驱动的。这两项由提示词通道实现，可任意组合：
+南风 221 参数里**没有画风参数，也没有打光参数** —— H3 是纯提示词驱动的。这两项由提示词通道实现，可任意组合：
 
 - **画风 11 种**：`helltaker-look` / `helltaker-style` / `ova90s` / `shinkai` / `ghibli` / `american-toon` / `ufotable` / `toon3d-pbr` / `gohands` / `ligne-claire` / `vivziepop`
 - **光比 7 种**：2:1 高调柔光 / 3:1 经典人像 / 4:1 戏剧低调 / **6:1 特写档** / **8:1 极低调**（母鸡卡剧场版那种强反差）/ 8:1 强边缘光 / 不指定
@@ -198,6 +198,11 @@ cd $env:USERPROFILE\.dsh\profiles\desktop
 python main.py --lowvram --use-ck-attention --port 8488
 ```
 
+> **端口怎么对上的**：插件不靠 `config.json` 猜端口 —— `resolveComfyUrl()` 的顺序是
+> **环境变量 `DSH_COMFY_URL`/`COMFY_URL` > `ai-runtime/.comfy-port` > 配置里的 `comfyUrl` > 常见端口探测**。
+> `start-h3.ps1` 启动成功后会写 `.comfy-port`，所以只要用插件的「顶栏启动按钮」或这个脚本起，
+> 地址会自动对齐。手写 `config.json` 的 `comfyUrl` 只在端口文件缺失时才生效（默认 8488）。
+
 ### 3. 部署自定义节点
 
 ```powershell
@@ -236,26 +241,27 @@ pwsh -File vendor/nanfeng/deploy-vendor.ps1 -ComfyDir "<工作区>\ai-runtime\Co
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│ ① DSH Host（Node ESM）                                            │
-│   host/index.js        插件入口：路由 + 工具 + 启动编排             │
-│   host/tools.js        13 个 studio_* Agent 工具                   │
-│   host/api/index.js    92 条 REST 路由（/jiuzhang/api/*）+ SSE     │
-│   host/services/*      业务层（南风桥接 / Blender / 素材 / LoRA…）  │
+  ① DSH Host（Node ESM）                                             
+    host/index.js        插件入口：路由 + 工具 + 启动编排              
+    host/tools.js        14 个 studio_* Agent 工具                    
+    host/api/            105 条精确路由 + 5 条参数化 + 5 个前缀族（/jiuzhang/api/*）+ SSE      
+    host/bridge/         ★ H3 桥接层（唯一知道上游长什么样的地方）
+host/services/*      业务层（执行器 / Blender / 素材 / LoRA / 剪辑…）   
 └───────────┬───────────────────────────────┬──────────────────────┘
-            │ REST + SSE                     │ spawn 子进程
+              REST + SSE                       spawn 子进程
             ▼                                ▼
 ┌──────────────────────────┐   ┌───────────────────────────────────┐
-│ ② Web SPA（React 18 + TS）│   │ ④ Blender 5.2.4                   │
-│   12 个页面 + 26 节点画布  │   │   渲灰模参考视频 → <Video N>       │
-│   构建产物 app-dist/       │   └───────────────────────────────────┘
+  ② Web SPA（React 18 + TS）      ④ Blender 5.2.4                    
+    14 条路由 / 15 个页面文件 + 26 节点画布          渲灰模参考视频 → <Video N>        
+    构建产物 app-dist/           └───────────────────────────────────┘
 └──────────────────────────┘
-            │ ComfyUI /prompt
+              ComfyUI /prompt
             ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│ ③ ComfyUI 0.45.0 + vendor/nanfeng                                 │
-│   NanFengH3MultiReferenceGeneratorV15（217 参数巨型节点）           │
-│     → GraphBuilder 内部展开 ~40 节点                                │
-│     → H3 出片（264×480 … 1472×832）                                │
+  ③ ComfyUI 0.45.0 + vendor/nanfeng                                  
+    NanFengH3MultiReferenceGeneratorV15（221 参数巨型节点）            
+      → GraphBuilder 内部展开 ~40 节点                                 
+      → H3 出片（264×480 … 1472×832）                                 
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -277,26 +283,26 @@ pwsh -File vendor/nanfeng/deploy-vendor.ps1 -ComfyDir "<工作区>\ai-runtime\Co
          ├ planImageSlots()                首/尾帧占位，参考图避让
          ├ stageToComfyInput()             参考图/视频/音频上传到 input/
          ├ injectCardDefinitions()         只追加，绝不覆写官方英文段
-         └ buildShotWorkflow()             217 参数快照 + 图组装 + 环境修正
+         └ buildShotWorkflow()             221 参数快照 + 图组装 + 环境修正
              → POST {comfy}/prompt
  → SSE shot-updated / job-progress          推回浏览器
 ```
 
 ---
 
-## 参数体系：217 个，但只有 122 个真正生效
+## 参数体系：221 个，其中 126 个真正生效
 
 | 分类 | 含义 | 数量 |
 |---|---|---|
-| **A/B** | **有效**（B 类有效但默认没开，有收益建议开） | 122 |
+| **A/B** | **有效**（B 类有效但默认没开，有收益建议开） | 126 |
 | **C** | 死参数：上游硬编码关闭 / 完全无读取 | 47 |
 | **D** | 缺依赖：本机未装节点，开了报错 | 48 |
 
-界面默认**折叠全部无效参数**并标注原因，不让人在 95 个不响应的旋钮上瞎试。
+界面默认**折叠全部无效参数**并标注原因，不让人在 95（47 死 + 48 缺依赖）个不响应的旋钮上瞎试。
 
 > 完整逐条审计见 **[参数审计报告](docs/PARAM-AUDIT.md)**
 > （生成命令 `npm run audit:params`，逐项对照 `h3_generator.py` 源码核实）。
-> 自检：`node -e "import('./host/services/nanfeng/schema.js').then(m=>{const i=m.inertParams();console.log(i.length,i.filter(p=>p.flag==='dead').length,'dead')})"`
+> 自检：`node -e "import('./host/bridge/vendors/nanfeng/schema.js').then(m=>{const i=m.inertParams();console.log(i.length,i.filter(p=>p.flag==='dead').length,'dead')})"`
 > → 期望 `95 47 dead`
 
 ### 内置预设
@@ -311,15 +317,15 @@ pwsh -File vendor/nanfeng/deploy-vendor.ps1 -ComfyDir "<工作区>\ai-runtime\Co
 | `continuation-quality` | 续写 + 高画质一采 | 续写不能开潜空间二采（上游硬互斥） |
 | `low-vram` | 12GB 保守 | 开启运行时预留显存 |
 
-预设支持三层叠加：**内置预设 → 项目预设 → 镜头覆盖**。
+预设支持四层叠加：**schema 默认 → 内置预设 → 项目/镜头覆盖 → 调用方 extra**。
 
 ---
 
-## Agent 工具（13 个）
+## Agent 工具（14 个）
 
 | 工具 | 用途 |
 |---|---|
-| `studio_meta` | 元信息（217 参数分组 / 预设 / 加速方案 / 节点类型） |
+| `studio_meta` | 元信息（221 参数分组 / 预设 / 加速方案 / 节点类型） |
 | `studio_config` | 读写配置（16 键白名单） |
 | `studio_project` | 项目 CRUD |
 | `studio_shot` | 镜头卡 CRUD（`list` / `create` / `save` / `delete`） |
@@ -384,26 +390,49 @@ pwsh -File vendor/nanfeng/deploy-vendor.ps1 -ComfyDir "<工作区>\ai-runtime\Co
 
 ```
 dsh-jiuzhang-studio/
-├─ host/                    Node 后端
-│   ├─ index.js             插件入口
-│   ├─ tools.js             13 个 Agent 工具
-│   ├─ skills.js            Skill provider（绕开 DSH 的目录深度限制）
-│   ├─ api/                 REST 路由 + SSE 事件总线
-│   ├─ services/            业务服务层
-│   │   ├─ nanfeng/         南风桥接（schema / graph / presets / continuation）
-│   │   ├─ generator.js     执行器（runH3Local / runH3Nanfeng）
-│   │   ├─ accel-plan.js    DMAD 加速方案 + LoRA 学生匹配
-│   │   ├─ h3-prompt.js     提示词编译器（2000+ 行）
-│   │   └─ blender-service.js  Blender 子进程编排
-│   ├─ store/               数据模型 + 原子 JSON 存储
-│   └─ blender/             render_shot.py / actions.py（60 动作）
-├─ app-src/                 React 18 + TS 前端源码
-│   └─ src/{pages,canvas,components,api,ui}
+├─ host/                    Node 后端（66 文件 / ~27,700 行）
+│  ├─ index.js             插件入口：路由 + 工具 + 启动编排
+│  ├─ config.js            配置层（白名单 + 缓存 + comfyUrl SSRF 校验）
+│  ├─ config-reader.js     ★ 配置读取约定（消灭"配置分裂脑"）
+│  ├─ security.js          guard / safeId / safeJoin / resolveUserPath
+│  ├─ static.js            SPA + 静态托管（Range / ETag / 301）
+│  ├─ runtime.js           模块级单例（Host 服务挂载）
+│  ├─ skills.js            Skill provider（绕开 DSH 的目录深度限制）
+│  ├─ tools.js             14 个 Agent 工具
+│  ├─ api/                 REST 层（拆成 9 个文件，105 条精确路由 + 参数化/前缀族 + SSE）
+│  │  ├─ index.js          路由分发 + executeBackend
+│  │  ├─ http.js           body 解析 / sendJson / Range / multipart
+│  │  ├─ shots.js          镜头卡 CRUD
+│  │  ├─ prompt-compile.js compilePrompt / deriveSubjectsFromShot
+│  │  ├─ projects.js       项目投影 / 可写字段白名单
+│  │  ├─ monitor.js        /monitor 负载
+│  │  ├─ replace-tasks.js  换人任务创建
+│  │  ├─ archive.js        产物归档 / 字体 / 路径白名单
+│  │  └─ events.js         SSE 事件总线
+│  ├─ bridge/              ★★ H3 桥接层：唯一知道「上游长什么样」的地方
+│  │  ├─ index.js          门面 —— 业务层只 import 这里
+│  │  ├─ README.md         职责边界 + 上游升级流程
+│  │  ├─ vendors/nanfeng/  上游节点包镜像（221 参数 / 图组装 / 预设 / 续写）
+│  │  ├─ prompt/           提示词通道（六段式编译器 / 换人规则化）
+│  │  └─ llm/              DSH LLM 桥接（文本 / 视觉 / 智能分镜）
+│  ├─ services/            业务服务层（30 文件）
+│  │  ├─ ref-images.js     ★★ 参考图编号唯一实现（原 4 份合一）
+│  │  ├─ generator.js      执行器（runH3Nanfeng / runH3Local）
+│  │  ├─ comfy-client.js   ComfyUI 客户端（探测 / 上传 / 轮询 / 取消）
+│  │  ├─ accel-plan.js     DMAD 加速方案 + LoRA 学生匹配
+│  │  ├─ lora-catalog.js   LoRA 分类 / 互斥 / 衰减 / 看门狗
+│  │  ├─ job-runner.js     任务状态机 + 并发闸门
+│  │  ├─ blender-service.js Blender 子进程编排
+│  │  └─ …                 素材 / 剪辑 / 后处理 / 换人 / 剧本工坊
+│  ├─ store/               数据模型 + 原子 JSON 存储（.bak / .corrupt / 队列）
+│  └─ blender/             render_shot.py / actions.py（内置动作目录）
+├─ app-src/                 React 18 + TS 前端源码（85 文件 / ~21,300 行）
+│  └─ src/{pages,canvas,components,api,ui}
 ├─ app-dist/                构建产物（入库，随插件分发）
 ├─ vendor/nanfeng/          南风 V15 Python 节点（部署时复制进 custom_nodes）
 ├─ skills/                  ★ 唯一 Skill 根目录
-├─ tools/                   开发工具（冒烟 / 路由 / 参数审计 / 预览）
-├─ docs/                    审查报告与机制查明
+├─ tools/                   开发工具（冒烟 207 项 / 路由一致性 / 参数审计 / 剪辑验收）
+├─ docs/                    机制查明与参数审计
 ├─ client.js                DSH 侧栏入口
 └─ cordis.patch.yml         DSH 加载补丁
 ```
@@ -414,10 +443,10 @@ dsh-jiuzhang-studio/
 
 ```powershell
 pnpm run build          # 构建 SPA（tsc --noEmit && vite build）
-npm test                # 冒烟测试（111 项真执行）
+npm test                # 冒烟测试（207 项真执行）
 npm run typecheck       # 仅类型检查
 npm run check:routes    # SPA/NAV/client 三方路由一致性（method+path 双键校验）
-npm run audit:params    # 217 参数有效性审计
+npm run audit:params    # 221 参数有效性审计
 npm run preview         # 独立预览服务器（不启动 DSH）
 ```
 

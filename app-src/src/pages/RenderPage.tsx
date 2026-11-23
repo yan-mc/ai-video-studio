@@ -29,7 +29,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { api, describeError } from '../api/client';
-import { subscribeEvents, eventsConnected } from '../api/events';
+import { subscribeEvents, useStudioEventsConnected } from '../api/events';
 import { Alert, Badge, Button, Field, Input, Page, Panel, Select, Spinner, useToast } from '../ui';
 import { useProjectStore } from '../store/project';
 import {
@@ -132,6 +132,8 @@ export function RenderPage() {
   // ---- 镜头 ----
   const [shots, setShots] = useState<ShotLite[]>([]);
   const [shotId, setShotId] = useState('');
+  /** SSE 连接状态：必须用响应式 hook，否则徽章永远显示离线 */
+  const eventsAlive = useStudioEventsConnected();
 
   // ---- 参数面板 ----
   const [paramFilter, setParamFilter] = useState('');
@@ -181,8 +183,23 @@ export function RenderPage() {
     return () => { cancelled = true; };
   }, []);
 
-  // 镜头列表
-  const loadShots = useCallback(async (pid: string) => {
+  /**
+   * 镜头列表。
+   *
+   * ⚠️⚠️ 历史 P0（本次修复）：`loadShots` 曾经**无条件**把 shotId 设为
+   *      `updatedAt` 最新的那个镜头。
+   *
+   *      用户正在编辑镜头 A（较早）→ DSH Agent 改了镜头 B →
+   *      SSE `shot-updated` → `loadShots()` → shotId 被改成 B →
+   *      回填 effect 把 B 的字段灌进表单 → 用户以为还在编辑 A，
+   *      下一次点「渲染」就把 B 的内容写进 A（或反向），**输入被静默回滚**。
+   *
+   * 现在：默认**保留当前选中镜头**，只有三种情况才切换 ——
+   *   ① 还没有选中（首次进入 / 新建项目）
+   *   ② 当前选中的镜头已经不存在了（被删）
+   *   ③ 显式传 `preferId`（保存后要跳到刚保存的那张）
+   */
+  const loadShots = useCallback(async (pid: string, opts: { preferId?: string } = {}) => {
     if (!pid) { setShots([]); setShotId(''); return; }
     try {
       const list = (await api.listShots(pid)) as unknown as ShotLite[];
@@ -190,7 +207,11 @@ export function RenderPage() {
         (a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0),
       );
       setShots(sorted);
-      setShotId(sorted[0]?.id ?? '');
+      setShotId((prev) => {
+        const wanted = opts.preferId ?? prev;
+        if (wanted && sorted.some((s) => s.id === wanted)) return wanted;
+        return sorted[0]?.id ?? '';
+      });
     } catch {
       setShots([]);
       setShotId('');
@@ -279,7 +300,7 @@ export function RenderPage() {
     setOverrides(nf?.overrides && typeof nf.overrides === 'object' ? nf.overrides : {});
     // LoRA 栈跟着镜头卡走 —— 换镜头要看到那个镜头自己的选择
     setLoras(Array.isArray(nf?.loras) ? nf.loras : []);
-  }, [shotId, shots]);
+  }, [shotId]);   // ⚠️ 不能加 shots：否则任何列表刷新都会把用户正在输入的内容回滚
 
   /* ------------------------------ 计算 ------------------------------ */
 
@@ -356,7 +377,8 @@ export function RenderPage() {
       });
 
       toast.ok(`已提交（任务 ${String(job.id).slice(0, 8)}）`);
-      void loadShots(currentProjectId);
+      // 保存后显式跳到刚保存的那张（而不是让 loadShots 猜）
+      void loadShots(currentProjectId, { preferId: String(saved.id) });
     } catch (e) {
       toast.error(describeError(e));
     } finally {
@@ -445,8 +467,8 @@ export function RenderPage() {
             <Input value={seed} onChange={(e) => setSeed(e.target.value)} mono />
           </Field>
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
-            <Badge tone={eventsConnected() ? 'ok' : 'default'}>
-              {eventsConnected() ? '实时同步' : '离线'}
+            <Badge tone={eventsAlive ? 'ok' : 'default'}>
+              {eventsAlive ? '实时同步' : '离线'}
             </Badge>
             {changedTotal > 0 ? <Badge tone="accent">已改 {changedTotal} 项</Badge> : null}
             <Button onClick={() => void handleRender()} disabled={submitting}>

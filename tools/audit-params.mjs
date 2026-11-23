@@ -39,8 +39,8 @@ const siblingSrc = siblingFiles
     try { return fs.readFileSync(path.join(path.dirname(VENDOR), f), 'utf8'); } catch { return ''; }
   })
   .join('\n');
-const { PARAMS, GROUPS } = await import(`file://${path.join(ROOT, 'host/services/nanfeng/schema.js').replace(/\\/g, '/')}`);
-const { PARAM_DOCS } = await import(`file://${path.join(ROOT, 'host/services/nanfeng/param-docs.js').replace(/\\/g, '/')}`);
+const { PARAMS, GROUPS } = await import(`file://${path.join(ROOT, 'host/bridge/vendors/nanfeng/schema.js').replace(/\\/g, '/')}`);
+const { PARAM_DOCS } = await import(`file://${path.join(ROOT, 'host/bridge/vendors/nanfeng/param-docs.js').replace(/\\/g, '/')}`);
 
 /* ---------------------------------------------------------- 辅助判断 */
 

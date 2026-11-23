@@ -178,7 +178,7 @@ description: 触发条件描述    # ← 必填，空字符串也会被丢弃
 1. 在 `skills/prompt/` 下建目录，放 `SKILL.md`（带 frontmatter：`name` / `description`）
 2. **name 必须是 kebab-case**（只允许 `a-z` `0-9` `-`），否则会被丢弃
 3. 如果要在**智能分镜**里可选，改两处：
-   - `host/services/nanfeng/storyboard.js` 的 `SKILLS` 或 `CONTINUATION_SKILL_DIRS`
+   - `host/bridge/llm/storyboard.js` 的 `SKILLS` 或 `CONTINUATION_SKILL_DIRS`
    - `host/tools.js` 里 `studio_storyboard` 的 `skillId` enum
 4. 如果只是**给模型/人阅读**，放进去即可，`host/skills.js` 会自动收录，不用改代码
 5. 改完用 §二·五 的一行命令自查，确认出现在列表里

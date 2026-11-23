@@ -6,7 +6,7 @@
  *
  * 并发闸门（本地后端 limit=1）沿用原实现的正确设计：按 jobId 记账、按 backendId 判定。
  */
-import { jobs as jobStore, isLocalBackendOf, LOCAL_BACKENDS } from './job-store.js';
+import { jobs as jobStore, isLocalBackendOf, LOCAL_BACKENDS, TERMINAL, pruneJobs } from './job-store.js';
 import { loadConfig } from '../config.js';
 
 const activeLocal = new Set();
@@ -38,33 +38,9 @@ function releaseSlot(jobId) {
   }
 }
 
-export function markCancelled(jobId) { cancelled.add(jobId); }
-export function isCancelled(jobId) { return cancelled.has(jobId); }
+function markCancelled(jobId) { cancelled.add(jobId); }
+function isCancelled(jobId) { return cancelled.has(jobId); }
 function clearCancelled(jobId) { cancelled.delete(jobId); }
-
-/**
- * 借一个本地后端槽位执行 fn，结束后自动归还。
- *
- * ⚠️ 为什么需要这个导出：并发闸门原本只在 runJob() 里用，
- *    而**批量出图链路绕过了 runJob**（漫画逐格、模特套图直接调
- *    runH3ImageLocal），于是视频和图像可以同时上 12GB 卡 → OOM。
- *    这两条链路现在都改成 withLocalSlot(...) 包一层。
- *
- * 非本地后端不占槽位（当前所有可用后端都是本地的，保留该判断是为了
- * 将来接入远端服务时不必回头改并发闸门）。
- */
-export async function withLocalSlot(backendId, fn) {
-  const local = isLocalBackend(backendId);
-  const token = Symbol('slot');
-  if (local) {
-    await acquireSlot(token, backendId);
-  }
-  try {
-    return await fn();
-  } finally {
-    if (local) releaseSlot(token);
-  }
-}
 
 export class CancelledError extends Error {
   constructor() { super(CANCELLED_MSG); this.name = 'CancelledError'; this.code = 'CANCELLED'; }
@@ -102,7 +78,7 @@ export async function cancellableSleep(job, ms) {
 export async function cancelJob(jobId, onRemoteCancel) {
   const job = await jobStore().get(jobId);
   if (!job) throw new Error('任务不存在');
-  if (['completed', 'failed', 'cancelled'].includes(job.status)) {
+  if (TERMINAL.has(job.status)) {
     return { ...job, cancelResult: 'ALREADY_TERMINAL', remoteCancel: 'skipped' };
   }
   markCancelled(jobId);
@@ -191,11 +167,11 @@ export async function runJob(job, runner) {
       await acquireSlot(job.id, job.backendId);
       if (isCancelled(job.id)) {
         await jobStore().upsert({ ...job, status: 'cancelled', error: CANCELLED_MSG, updatedAt: Date.now() });
-        return;
+        return { outputs: [], remoteId: job.remoteId ?? null, cancelled: true };
       }
     } else if (isCancelled(job.id)) {
       await jobStore().upsert({ ...job, status: 'cancelled', error: CANCELLED_MSG, updatedAt: Date.now() });
-      return;
+      return { outputs: [], remoteId: job.remoteId ?? null, cancelled: true };
     }
 
     job = { ...job, status: 'running', startedAt: Date.now(), updatedAt: Date.now() };
@@ -211,6 +187,9 @@ export async function runJob(job, runner) {
         status: 'completed',
         error: null,
         outputs: result?.outputs ?? job.outputs ?? [],
+        // 执行器回报的告警（例如"多产物中有几个下载失败"）必须带到任务记录上，
+        // 否则失败被吞、用户只看到"成功"和一张图。
+        warnings: [...(job.warnings ?? []), ...(result?.warnings ?? [])],
         remoteId: finalRemoteId,
         finishedAt: Date.now(),
         updatedAt: Date.now(),
@@ -241,7 +220,6 @@ export async function runJob(job, runner) {
      *    这是收尾逻辑，属于"尽力而为"。
      */
     try {
-      const { pruneJobs } = await import('./job-store.js');
       await pruneJobs();
     } catch { /* 保留策略失败不影响任务结果 */ }
   } finally {

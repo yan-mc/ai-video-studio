@@ -19,7 +19,7 @@ description: 从零部署九章工作室插件（DSH 视频/图像创作插件�
 |---|---|---|
 | **GPU 显存** | ≥ 12 GB（H3 视频 33B + H3-Image 33B 靠量化 + lowvram 运行） | `nvidia-smi --query-gpu=memory.total --format=csv,noheader` |
 | **磁盘** | ≥ 95 GB 空闲（模型约 70 GB + Blender 0.4 GB + 工作区） | `Get-PSDrive` / `df -h` |
-| **ComfyUI** | **0.45.0 或更高**（0.44 无 `MiniMaxH3ImageConditioning`） | `curl http://127.0.0.1:8188/system_stats` |
+| **ComfyUI** | **0.45.0 或更高**（0.44 无 `MiniMaxH3ImageConditioning`） | `curl http://127.0.0.1:8488/system_stats` |
 | **Blender**（可选） | **5.2 或更高**；不装则 3D 预演不可用，其它功能不受影响 | `blender --version` |
 
 显存不足时的取舍：
@@ -112,16 +112,16 @@ git pull origin master
 
 ```powershell
 # H3-Image 图像节点
-curl.exe -s http://127.0.0.1:8188/object_info/MiniMaxH3ImageConditioning
+curl.exe -s http://127.0.0.1:8488/object_info/MiniMaxH3ImageConditioning
 
 # 任意帧锚定节点（Ref2VA 没有 first_frame 口，靠它）
-curl.exe -s http://127.0.0.1:8188/object_info/MiniMaxH3AddGuide
+curl.exe -s http://127.0.0.1:8488/object_info/MiniMaxH3AddGuide
 ```
 
 启动（12 GB 显存必须 `--lowvram`）：
 
 ```powershell
-<工作区>\ai-runtime\venv\Scripts\python.exe main.py --lowvram --listen 127.0.0.1 --port 8188
+<工作区>\ai-runtime\venv\Scripts\python.exe main.py --lowvram --listen 127.0.0.1 --port 8488
 ```
 
 > 端口被 Hyper-V 占用时报 `WinError 10013`，换个端口即可（插件会自动跟随 `.comfy-port` 文件）。
@@ -173,7 +173,7 @@ pwsh -File vendor/nanfeng/deploy-vendor.ps1 -ComfyDir "..." -Force
 ### 验收
 
 ```powershell
-# 节点已注册（返回 JSON，含 217 个参数）
+# 节点已注册（返回 JSON，含 221 个参数）
 curl.exe -s http://127.0.0.1:8488/object_info/NanFengH3MultiReferenceGeneratorV15
 
 # 插件侧自检
@@ -364,7 +364,7 @@ cd app-src && node --import ./tests/register.mjs tests/runAll.mjs
 curl.exe -s "http://127.0.0.1:<端口>/jiuzhang/api/image/meta"
 # 期望：{"status":{"ready":true, ...}}
 
-curl.exe -s "http://127.0.0.1:8188/object_info/ModelPatchLoader"
+curl.exe -s "http://127.0.0.1:8488/object_info/ModelPatchLoader"
 
 # 6) Blender 就绪
 curl.exe -s "http://127.0.0.1:<端口>/jiuzhang/api/blender/health"

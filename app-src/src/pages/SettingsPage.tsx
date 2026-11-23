@@ -172,7 +172,7 @@ export function SettingsPage() {
                     value={String(draft['comfyUrl'] ?? '')}
                     onChange={(e) => set('comfyUrl', e.target.value)}
                     mono
-                    placeholder="http://127.0.0.1:8188"
+                    placeholder="http://127.0.0.1:8488"
                   />
                 </Field>
                 <Field label={t('settings.comfyInputDir')}>

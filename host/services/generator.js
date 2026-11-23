@@ -6,20 +6,21 @@
  */
 import path from 'node:path';
 import fs from 'node:fs';
-import { createHash } from 'node:crypto';
 import { loadConfig } from '../config.js';
 import { PROFILES, resolutionFor, h3Length } from '../store/models.js';
-import { safeJoin, resolveUserPath } from '../security.js';
+import {
+  resolveRefImages as resolveRefImagesCore,
+  resolveMediaEntries as resolveMediaEntriesCore,
+  resolvePrevizArtifacts as resolvePrevizArtifactsCore,
+  planImageSlots as planImageSlotsCore,
+  MAX_REF_VIDEOS,
+  MAX_REF_AUDIOS,
+} from './ref-images.js';
 import * as comfy from './comfy-client.js';
 import { decideRefImageSize } from './render-plan.js';
 import { NodeGraph } from './h3-graph.js';
-import { planForShot, resolveAccelForFiles, accelPlanOf, checkSteps, DEFAULT_ACCEL_PLAN } from './accel-plan.js';
+import { planForShot, resolveAccelForFiles, checkSteps, DEFAULT_ACCEL_PLAN } from './accel-plan.js';
 import { solveLoraStack, baseNameOf } from './lora-catalog.js';
-
-/** 内联图片落盘用短哈希，同图复用同一文件 */
-function hashShort(text) {
-  return createHash('sha1').update(String(text)).digest('hex').slice(0, 16);
-}
 
 /**
  * H3 模型文件名。
@@ -90,287 +91,20 @@ export function resolveModelNames(cfg = loadConfig(), available = {}) {
   return out;
 }
 
-/** 兼容旧引用：这些是**默认名**，实际用 resolveModelNames() */
-const UNET_REF = MODEL_DEFAULTS.UNET_REF;
-const UNET_FL2V = MODEL_DEFAULTS.UNET_FL2V;
-const CLIP_NAME = MODEL_DEFAULTS.CLIP;
-const VAE_NAME = MODEL_DEFAULTS.VAE;
-const AUDIO_VAE_NAME = MODEL_DEFAULTS.AUDIO_VAE;
-const LORA_REF = MODEL_DEFAULTS.LORA_REF;
-const LORA_FL2V = MODEL_DEFAULTS.LORA_FL2V;
-
-/**
- * 解析镜头的参考图绝对路径（**提交顺序即提示词里的 <Picture N> 顺序**）。
- *
- * 顺序与 `render-plan.buildRenderPlan` 保持完全一致，两处必须同步修改：
- *   0. 角色卡仓库（最高优先级，一致性锚点）
- *   1. characterRefs（历史字段，兼容老数据）
- *   2. 手工参考图
- *   3. 场景 / 道具
- * 首尾帧不在此列（它们走 previz 通道，单独接线）。
- *
- * 上限 9 张（H3 Ref2VA 硬约束）。
- */
-export function resolveRefImages(shot, cfg = loadConfig(), opts = {}) {
-  const out = [];
-  const seen = new Set();
-  const toAbs = (ref) => {
-    if (!ref) return '';
-    if (typeof ref === 'string') {
-      // 内联 data URL：浏览器端（画布节点、拖拽上传）常常只给这个形态。
-      // 旧实现一律丢弃 → 表现就是"图片没进模型"。这里落盘成临时文件后再走 staging。
-      if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(ref)) {
-        try {
-          const m = /^data:image\/([a-z0-9.+-]+);base64,(.*)$/i.exec(ref);
-          const ext = m[1].replace('jpeg', 'jpg');
-          const dir = path.join(cfg.dataDir, 'tmp-inline');
-          fs.mkdirSync(dir, { recursive: true });
-          const file = path.join(dir, `${hashShort(ref)}.${ext}`);
-          if (!fs.existsSync(file)) fs.writeFileSync(file, Buffer.from(m[2], 'base64'));
-          return file;
-        } catch { return ''; }
-      }
-      // ⚠️ win32 上 path.isAbsolute('/jiuzhang/api/file?path=x') === true，
-      //    而画布把上游产物写成同源 URL —— 会被误当绝对路径后 existsSync 失败、
-      //    静默丢图（画布串联第二跳断链）。所以 URL 形态必须**先于** isAbsolute 判断。
-      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(ref)) return '';   // 远程 URL 后端取不到
-      if (ref.startsWith('/')) {
-        try {
-          const q = ref.includes('?') ? ref.slice(ref.indexOf('?') + 1) : '';
-          const p = new URLSearchParams(q).get('path');
-          if (p) {
-            const a = safeJoin(cfg.dataDir, p);
-            if (fs.existsSync(a)) return a;
-          }
-        } catch { /* ignore */ }
-        return '';
-      }
-      /**
-       * ⚠️ 绝对路径**必须**限定在 dataDir 内。
-       *
-       * 历史漏洞（安全级）：这里是 `return fs.existsSync(ref) ? ref : ''` ——
-       * 绝对路径**完全放行**。于是
-       *   POST /image/generate    {"refImages":["C:/Windows/win.ini"]}
-       *   POST /breakdown/generate{"refImages":["C:/Users/x/.ssh/id_rsa"]}
-       * 都能把任意本机文件读出来送进模型 / 复制进素材库。
-       *
-       * security.js 的注释里已经写明"所有接受路径的入口都必须走 resolveUserPath，
-       * 历史审计发现 6 处各写各的，其中 5 处漏掉绝对路径分支" ——
-       * 这里正是漏改的一处。
-       */
-      if (path.isAbsolute(ref)) {
-        try {
-          return resolveUserPath({ root: cfg.dataDir, input: ref, mustExist: true });
-        } catch { return ''; }
-      }
-      try {
-        const a = safeJoin(cfg.dataDir, ref);
-        if (fs.existsSync(a)) return a;
-      } catch { /* ignore */ }
-      return '';
-    }
-    if (ref && typeof ref === 'object') {
-      if (ref.absPath) {
-        try {
-          return resolveUserPath({ root: cfg.dataDir, input: ref.absPath, mustExist: true });
-        } catch { return ''; }
-      }
-      if (ref.rel) {
-        try {
-          const a = safeJoin(cfg.dataDir, ref.rel);
-          if (fs.existsSync(a)) return a;
-        } catch { /* ignore */ }
-      }
-    }
-    return '';
-  };
-
-  const push = (abs, source, meta = {}) => {
-    if (!abs || seen.has(abs)) return false;
-    if (out.length >= 9) return false;
-    seen.add(abs);
-    out.push({ key: `{{REF_${out.length + 1}}}`, abs, source, ...meta });
-    return true;
-  };
-
-  // 0) 角色卡仓库（最高优先级）—— 项目/镜头选中的卡，按其 refPolicy 取图
-  //    这里只处理**已经解析好**的卡对象（含 resolvedImages），避免重复读盘。
-  for (const card of (shot.characterCards || [])) {
-    if (out.length >= 9) break;
-    const imgs = Array.isArray(card.resolvedImages) ? card.resolvedImages : [];
-    for (const img of imgs) {
-      if (out.length >= 9) break;
-      push(toAbs(img.rel), 'vault-card', { cardId: card.id, cardName: card.name, slot: img.slot });
-    }
-  }
-
-  // 1) 人设卡优先（characterRefs）
-  for (const ref of (shot.characterRefs || [])) {
-    if (out.length >= 9) break;
-    // 人设卡可能是资产 id / rel 路径 / 对象
-    if (ref && typeof ref === 'object' && Array.isArray(ref.images)) {
-      // 一个人设卡带多张分图（三视图各一张的情况）
-      for (const img of ref.images) {
-        if (!push(toAbs(img), 'character-sheet')) break;
-      }
-    } else {
-      push(toAbs(ref), 'character-sheet');
-    }
-  }
-
-  // 2) 手工参考图
-  for (const ref of (shot.refs?.images || [])) {
-    if (out.length >= 9) break;
-    push(toAbs(ref), 'manual');
-  }
-
-  // 3) 场景 / 道具
-  for (const ref of [...(shot.sceneRefs || []), ...(shot.itemRefs || [])]) {
-    if (out.length >= 9) break;
-    push(toAbs(ref), 'scene-item');
-  }
-
-  return out;
-}
-
-/**
- * 解析镜头的参考视频 / 参考音频 → `[{ rel, abs, key, index }]`。
- *
- * ============================================================================
- * 为什么必须是单独一个函数
- * ============================================================================
- *
- * 镜头卡上**只有** `shot.refs.videos` / `shot.refs.audios`（见 store/models.js 的
- * `newShot()`），顶层从来没有 `shot.videos` / `shot.audios` 这两个字段。
- *
- * 但 generator.js 的两条执行路径（runH3Local / runH3Nanfeng）都写成了
- * `Array.isArray(shot.videos)` —— 恒为 false，于是：
- *
- *   · videoEntries 恒为空 → stage 不上传 → `视频1..3` 永远是「未选择」
- *   · 南风路径更糟：`shotForNanfeng.refs.videos = stagedVideos.map(...)` 把
- *     **本来正确的 refs.videos 覆盖成 []**
- *
- * 结果是 3D 预演渲出的白模视频在提示词里被写成 `<Video 1>`，
- * 提交时却根本没有这个素材 —— 用户看到"已挂上"、出片却不含白模约束。
- *
- * 这里统一从 `refs.videos` / `refs.audios` 取，并解析成绝对路径（与
- * resolveRefImages 用同一套 safeJoin 规则）。
- *
- * 兼容三种历史形态：字符串 rel、`{ rel }`、`{ abs }`。
- */
-export function resolveMediaEntries(list, cfg = loadConfig()) {
-  const out = [];
-  for (const item of (Array.isArray(list) ? list : [])) {
-    const rel = typeof item === 'string' ? item : (item?.rel ?? '');
-    let abs = '';
-    if (typeof item === 'object' && item?.abs && fs.existsSync(item.abs)) {
-      abs = item.abs;
-    } else if (rel) {
-      try {
-        const a = safeJoin(cfg.dataDir, rel);
-        if (fs.existsSync(a)) abs = a;
-      } catch { /* 越界 / 不存在 → 交给调用方告警 */ }
-    }
-    // 解析不到的也要保留占位，否则编号会整体前移（<Video 2> 变成 <Video 1>）
-    out.push({
-      rel: rel || '',
-      abs,
-      name: (typeof item === 'object' && item.name) || (rel ? path.basename(rel) : ''),
-      hasAudio: typeof item === 'object' && typeof item.hasAudio === 'boolean' ? item.hasAudio : null,
-      missing: !abs,
-    });
-  }
-  return out;
-}
-
 /**
  * 参考视频 / 音频解析失败时写一条 job 警告（不静默）。
  *
  * 静默丢素材是这个仓库历史上最顽固的失败模式：用户看到镜头上"已挂上"、
  * 提示词里也有 `<Video 1>`，出片却完全不受它约束，且任何日志都不说。
  */
-function warnMissingMedia(job, shot) {
+function warnMissingMedia(job, shot, cfg = loadConfig()) {
   const miss = [
-    ...resolveMediaEntries(shot.refs?.videos).filter((v) => v.missing && v.rel).map((v) => `视频 ${v.rel}`),
-    ...resolveMediaEntries(shot.refs?.audios).filter((a) => a.missing && a.rel).map((a) => `音频 ${a.rel}`),
+    ...resolveMediaEntriesCore(shot.refs?.videos, cfg).filter((v) => v.missing && v.rel).map((v) => `视频 ${v.rel}`),
+    ...resolveMediaEntriesCore(shot.refs?.audios, cfg).filter((a) => a.missing && a.rel).map((a) => `音频 ${a.rel}`),
   ];
   if (!miss.length) return;
   job.warnings = [...(job.warnings ?? []),
-    `以下参考素材在 dataDir 内找不到，已跳过（提示词里的引用会变成悬空）：${miss.join('、')}`];
-}
-
-/** 从镜头卡 previz 绑定解析首尾帧 */
-export function resolvePrevizArtifacts(shot, cfg = loadConfig()) {
-  const out = {};
-  const p = shot?.previz;
-  if (!p) return out;
-  const abs = (rel) => {
-    if (!rel) return '';
-    try {
-      const a = path.isAbsolute(rel) ? rel : safeJoin(cfg.dataDir, rel);
-      return fs.existsSync(a) ? a : '';
-    } catch { return ''; }
-  };
-  if (p.firstFramePath) out['{{FIRST_FRAME}}'] = abs(p.firstFramePath);
-  if (p.lastFramePath) out['{{LAST_FRAME}}'] = abs(p.lastFramePath);
-  return out;
-}
-
-/**
- * 规划最终的 `图片1..9` 槽位分配。
- *
- * ============================================================================
- * 为什么需要单独一层
- * ============================================================================
- *
- * 南风节点的 `图片1..9` 是**固定编号槽位**，而首尾帧模式要求：
- *   · 图生视频（i2va）：image_count 必须 == 1，且那一张就是首帧
- *   · 首尾帧（fl2va）：image_count 必须 == 2，图片1=首帧、图片2=尾帧
- *
- * 参考图（角色卡 / 手工图）与首尾帧**抢同一批槽位**。历史实现直接让首/尾帧
- * 覆盖 `图片1/图片2`，参考图被静默顶掉，而提示词里的 `<Picture N>` 仍按
- * "参考图第 N 张"写 —— 指令与实物对不上。
- *
- * 这里统一决策，并返回：
- *   · images          —— 最终要填进 图片1..9 的参考图文件名（**已避开保留槽位**）
- *   · frameSlots      —— 首/尾帧要写的槽位
- *   · reserved        —— 被占用的槽位号（1-based）
- *   · pictureIndexMap —— 参考图原始下标（0-based）→ 最终 `<Picture N>` 编号
- *   · dropped         —— 因槽位不足被丢弃的参考图
- *
- * @param {string} mode
- * @param {string[]} refImages  staged 后的参考图文件名（保序，可含空串）
- * @param {string} first        staged 后的首帧文件名
- * @param {string} last         staged 后的尾帧文件名
- */
-export function planImageSlots(mode, refImages, first, last) {
-  const m = String(mode ?? '');
-  const refs = (Array.isArray(refImages) ? refImages : []).filter(Boolean);
-  const frameSlots = {};
-  const reserved = [];
-
-  if (m === 'i2va' && first) {
-    frameSlots['图片1'] = first;
-    reserved.push(1);
-  } else if (m === 'fl2va') {
-    if (first) { frameSlots['图片1'] = first; reserved.push(1); }
-    if (last) { frameSlots['图片2'] = last; reserved.push(2); }
-  }
-
-  // 参考图按原顺序填充到未被占用的槽位
-  const images = [];
-  const pictureIndexMap = new Map();
-  const dropped = [];
-  let slot = 1;
-  for (let i = 0; i < refs.length; i += 1) {
-    while (reserved.includes(slot)) slot += 1;
-    if (slot > 9) { dropped.push(refs[i]); continue; }
-    pictureIndexMap.set(i, slot);
-    images.push(refs[i]);
-    slot += 1;
-  }
-
-  return { images, frameSlots, reserved, pictureIndexMap, dropped };
+    `以下参考素材在 dataDir 内找不到，对应槽位会留空（提示词里的 <Video N>/<Audio N> 不会指向其它素材）：${miss.join('、')}`];
 }
 
 
@@ -477,8 +211,8 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
     job.params = { ...(job.params ?? {}), refImageSizeDowngraded: refSizeDecision.reason };
   }
 
-  const refList = resolveRefImages(shot, cfg);
-  const previz = resolvePrevizArtifacts(shot, cfg);
+  const refList = resolveRefImagesCore(shot, cfg);
+  const previz = resolvePrevizArtifactsCore(shot, cfg);
 
   // 角色卡的文字设定注入提示词。
   // 关键：把"这张卡是第几张参考图"算准，模型才知道该看哪张。
@@ -493,25 +227,38 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
   //    历史上这里写的是 `shot.videos`，而镜头卡上从来没有这个顶层字段 ——
   //    于是视频/音频恒为空，`视频1..3` 永远是「未选择」，
   //    3D 预演的白模参考视频整条链路在提交阶段被静默丢弃。
-  const videoEntries = resolveMediaEntries(shot.refs?.videos, cfg)
-    .filter((v) => v.abs)
-    .map((v, i) => ({ ...v, key: `{{REF_VIDEO_${i + 1}}}` }));
-  const audioEntries = resolveMediaEntries(shot.refs?.audios, cfg)
-    .filter((a) => a.abs)
-    .map((a, i) => ({ ...a, key: `{{REF_AUDIO_${i + 1}}}` }));
-  warnMissingMedia(job, shot);
+  /**
+   * 参考视频/音频：编号 = **挂载顺序的槽位号**（下标 + 1）。
+   *
+   * 两个必须同时满足的约束：
+   *   1) `index` 必须显式赋值 —— 下游按 `ref_videos.ref_video_${v.index}` 拼输入名，
+   *      漏赋值会让所有素材塌缩成 `ref_video_undefined`（ComfyUI 的 AUTOGROW
+   *      输入允许多余/缺失键，因此不会报错，只会静默失效）。
+   *   2) 不能先 `.filter(v => v.abs)` 再重排 index —— 提示词里的 `<Video N>` 是
+   *      按挂载顺序写的，压缩数组会让第 3 段前移成第 2 位，指令与实物错位。
+   *      缺失项保留（abs=''），下游 `staged[v.key]` 为空即表示"该槽位留空"。
+   */
+  const videoEntries = resolveMediaEntriesCore(shot.refs?.videos, cfg)
+    .slice(0, MAX_REF_VIDEOS)
+    .map((v, i) => ({ ...v, index: i + 1, key: `{{REF_VIDEO_${i + 1}}}` }));
+  const audioEntries = resolveMediaEntriesCore(shot.refs?.audios, cfg)
+    .slice(0, MAX_REF_AUDIOS)
+    .map((a, i) => ({ ...a, index: i + 1, key: `{{REF_AUDIO_${i + 1}}}` }));
+  warnMissingMedia(job, shot, cfg);
 
   const toStage = {
-    ...Object.fromEntries(refList.map((r) => [r.key, r.abs])),
+    ...Object.fromEntries(refList.filter((r) => r.abs).map((r) => [r.key, r.abs])),
     ...previz,
-    ...Object.fromEntries(videoEntries.map((v) => [v.key, v.abs])),
-    ...Object.fromEntries(audioEntries.map((a) => [a.key, a.abs])),
+    ...Object.fromEntries(videoEntries.filter((v) => v.abs).map((v) => [v.key, v.abs])),
+    ...Object.fromEntries(audioEntries.filter((a) => a.abs).map((a) => [a.key, a.abs])),
   };
   const staged = await comfy.stageToComfyInput(cfg, toStage, job.id);
 
+  // 判定"是否真的接了参考素材"必须看**已落地的** staged 文件名，而不是解析出来的条目数：
+  // 条目存在但全部 stage 失败时，挂上 ReferenceToVideo 却零参考会退化成静默纯文生。
   const useRef = refList.length > 0
-    || videoEntries.length > 0
-    || audioEntries.length > 0;
+    || videoEntries.some((v) => staged[v.key])
+    || audioEntries.some((a) => staged[a.key]);
   const useFirstLast = Boolean(staged['{{FIRST_FRAME}}'] || staged['{{LAST_FRAME}}']);   // 供日志/计划展示
 
   // 模型名：优先用 ComfyUI 实际可用的文件（用户可能装的是 int8 而非 fp8）。
@@ -799,8 +546,6 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
   return comfy.runWorkflow({ cfg, workflow: wfCopy, map, job, outputsDir, onSubmitted });
 }
 
-export const H3_MODEL_NAMES = { UNET_REF, UNET_FL2V, CLIP_NAME, VAE_NAME, AUDIO_VAE_NAME, LORA_REF, LORA_FL2V };
-
 /* ============================================================ 图像生成 */
 
 /**
@@ -818,7 +563,7 @@ export async function runH3ImageLocal({ workflow, job, prompt, shot, cfg = loadC
     sizeId: params.imageSizeId ?? shot?.imageSizeId ?? 'auto',
     width: params.width,
     height: params.height,
-    refImages: resolveRefImages(shot ?? {}, cfg).map((r) => r.abs),
+    refImages: resolveRefImagesCore(shot ?? {}, cfg).map((r) => r.abs),
     onSubmitted,
   });
 }
@@ -838,7 +583,7 @@ export function jobKind(job) {
  * ============================================================================
  *
  *   runH3Local（旧）  ：加载 data/workflows/h3.json 模板 → {{占位符}} 替换 → 提交
- *   runH3Nanfeng（新）：镜头卡 → 217 参数 → 南风节点内部 GraphBuilder 展开 → 提交
+ *   runH3Nanfeng（新）：镜头卡 → 221 参数 → 南风节点内部 GraphBuilder 展开 → 提交
  *
  * 南风节点把所有模型加载、条件编码、采样、放大、解码都封在节点内部，
  * 我们的后端只负责：① 选预设 ② 传参 ③ 接输出节点 ④ 轮询结果。
@@ -873,7 +618,7 @@ export async function runH3Nanfeng({
   outputsDir,
   onSubmitted,
 }) {
-  const nanfeng = await import('./nanfeng/index.js');
+  const nanfeng = (await import('../bridge/index.js')).nanfeng;
 
   /* ==================================================================
    * 1) 加速方案（DMAD）—— 映射到南风参数
@@ -1097,23 +842,28 @@ export async function runH3Nanfeng({
   };
 
   // ---------- 2) 解析参考素材并 stage ----------
-  const refList = resolveRefImages(shot, cfg);
-  const previz = resolvePrevizArtifacts(shot, cfg);
+  const refList = resolveRefImagesCore(shot, cfg);
+  const previz = resolvePrevizArtifactsCore(shot, cfg);
 
-  // ⚠️ 必须读 `shot.refs.videos` / `shot.refs.audios` —— 见上方同名注释。
-  const videoEntries = resolveMediaEntries(shot.refs?.videos, cfg)
-    .filter((v) => v.abs)
-    .map((v, i) => ({ ...v, key: `{{REF_VIDEO_${i + 1}}}` }));
-  const audioEntries = resolveMediaEntries(shot.refs?.audios, cfg)
-    .filter((a) => a.abs)
-    .map((a, i) => ({ ...a, key: `{{REF_AUDIO_${i + 1}}}` }));
-  warnMissingMedia(job, shot);
+  // ⚠️ 必须读 `shot.refs.videos` / `shot.refs.audios`。
+  //    历史上这里写的是 `shot.videos`，而镜头卡上从来没有这个顶层字段 ——
+  //    于是视频/音频恒为空，`视频1..3` 永远是「未选择」，整条参考视频链路被静默丢弃。
+  //
+  // 编号 = **挂载顺序的槽位号**（下标 + 1），不能先 filter 缺失项再重排；
+  // 理由见 runH3Local 里同一段代码的注释（`<Video N>` 与实物必须同号）。
+  const videoEntries = resolveMediaEntriesCore(shot.refs?.videos, cfg)
+    .slice(0, MAX_REF_VIDEOS)
+    .map((v, i) => ({ ...v, index: i + 1, key: `{{REF_VIDEO_${i + 1}}}` }));
+  const audioEntries = resolveMediaEntriesCore(shot.refs?.audios, cfg)
+    .slice(0, MAX_REF_AUDIOS)
+    .map((a, i) => ({ ...a, index: i + 1, key: `{{REF_AUDIO_${i + 1}}}` }));
+  warnMissingMedia(job, shot, cfg);
 
   const toStage = {
-    ...Object.fromEntries(refList.map((r) => [r.key, r.abs])),
+    ...Object.fromEntries(refList.filter((r) => r.abs).map((r) => [r.key, r.abs])),
     ...previz,
-    ...Object.fromEntries(videoEntries.map((v) => [v.key, v.abs])),
-    ...Object.fromEntries(audioEntries.map((a) => [a.key, a.abs])),
+    ...Object.fromEntries(videoEntries.filter((v) => v.abs).map((v) => [v.key, v.abs])),
+    ...Object.fromEntries(audioEntries.filter((a) => a.abs).map((a) => [a.key, a.abs])),
   };
   const staged = await comfy.stageToComfyInput(cfg, toStage, job.id);
 
@@ -1178,7 +928,7 @@ export async function runH3Nanfeng({
    * 现在的做法：首/尾帧占用的编号从参考图里剔除，其余按原顺序补位，
    * 并把最终槽位安排写进 job.params 供排查。
    */
-  const slotPlan = planImageSlots(mode ?? shot.mode, stagedImages, staged['{{FIRST_FRAME}}'] ?? '', staged['{{LAST_FRAME}}'] ?? '');
+  const slotPlan = planImageSlotsCore(mode ?? shot.mode, stagedImages, staged['{{FIRST_FRAME}}'] ?? '', staged['{{LAST_FRAME}}'] ?? '');
   if (slotPlan.dropped.length) {
     job.warnings = [...(job.warnings ?? []),
       `首/尾帧占用了 图片${slotPlan.reserved.join('、图片') || '—'}，`
@@ -1192,8 +942,19 @@ export async function runH3Nanfeng({
     refs: {
       ...(shot.refs ?? {}),
       images: slotPlan.images,
-      videos: stagedVideos.filter(Boolean),
-      audios: stagedAudios.filter(Boolean),
+      /**
+       * ⚠️ 视频/音频必须**保位**，不能 `.filter(Boolean)` 压缩。
+       *
+       *    buildShotOverrides 的写法是 `视频${i+1} = videos[i]` ——
+       *    **数组下标就是槽位号**（与图片同一机制）。
+       *    压缩数组会让"第 2 段上传失败"变成"第 3 段前移到第 2 位"，
+       *    而提示词里写的还是 `<Video 3>` —— 指令与实物错位且不报错。
+       *
+       *    空串占位由 buildShotOverrides 内部的 toComfyFileName 转成「未选择」，
+       *    所以留空串是安全且正确的。
+       */
+      videos: stagedVideos,
+      audios: stagedAudios,
     },
   };
 
@@ -1265,7 +1026,7 @@ export async function runH3Nanfeng({
 }
 
 /**
- * 只保留「非默认值」的参数，避免把 217 个字段全塞进 job.params。
+ * 只保留「非默认值」的参数，避免把 221 个字段全塞进 job.params。
  *
  * @param {Record<string, unknown>} params
  * @returns {Record<string, unknown>}

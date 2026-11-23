@@ -41,6 +41,14 @@ export interface AssetPickerProps {
   onAudios: (v: PickedMedia[]) => void;
   /** 刷新素材库 */
   onRefresh?: () => void;
+  /**
+   * 允许的素材类别。默认三类全开。
+   *
+   * 为什么需要：某些页面（智能分镜）的生成接口只接受参考图，
+   * 视频/音频 tab 点得动但选了也没用 —— 那是**UI 在撒谎**。
+   * 传 ['image'] 就只渲染图片 tab，不给用户假入口。
+   */
+  kinds?: ReadonlyArray<'image' | 'video' | 'audio'>;
 }
 
 const LIMITS = { image: 9, video: 3, audio: 3 } as const;
@@ -57,6 +65,7 @@ export function AssetPicker({
   onVideos,
   onAudios,
   onRefresh,
+  kinds = ['image', 'video', 'audio'],
 }: AssetPickerProps) {
   const [query, setQuery] = useState('');
   const [tab, setTab] = useState<'image' | 'video' | 'audio'>('image');
@@ -103,7 +112,7 @@ export function AssetPicker({
     >
       {/* 分类 */}
       <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
-        {(['image', 'video', 'audio'] as const).map((k) => (
+        {kinds.map((k) => (
           <Button
             key={k}
             variant={tab === k ? 'primary' : 'ghost'}

@@ -284,14 +284,19 @@ async function waitJob(
 
   while (Date.now() < timeoutAt) {
     await new Promise((r) => setTimeout(r, pollMs));
-    let jobs: unknown;
+    let cur: { id: string; status: string; outputs?: JobOutput[]; error?: string } | null;
     try {
-      jobs = await api.listJobs();
+      /**
+       * 单任务查询，**不要**拉全量列表再 find。
+       *
+       * 历史实现是 `listJobs().find(...)`：每次响应 300 KB 级（126 条任务 ×
+       * prompt 全文 + 221 参数快照），单节点执行 30 分钟按 2.5s 轮询
+       * ≈ 450 MB 纯流量浪费，还会把 jobs.json 全量读盘一遍。
+       */
+      cur = await api.getJob(jobId) as { id: string; status: string; outputs?: JobOutput[]; error?: string };
     } catch {
       continue;
     }
-    const cur = (jobs as { id: string; status: string; outputs?: JobOutput[]; error?: string }[])
-      .find((j) => j.id === jobId);
     if (!cur) continue;
     last = cur.status;
 
@@ -382,7 +387,17 @@ export async function runNodeGeneration(opts: RunOptions): Promise<RunResult> {
   /* ---------------- 视频路线 ---------------- */
   // 2) 组装 shot
   const shotInput = nodeToShot(node, projectId);
-  shotInput.refs.images = images;
+  /**
+   * ⚠️ 上游参考图要**并入**手填参考图，不能直接覆盖。
+   *
+   * 旧实现是 `shotInput.refs.images = images`，于是节点上「手填参考图」
+   * （`data.params.referenceImages`，nodeToShot 已解析到 refs.images）在
+   * 有上游连线时被**静默清空**：用户在节点里填的图一个字都不提，
+   * 生成的只有上游那几张。合并顺序 = 手填在前（用户显式指定的优先），
+   * 且按 ≤9 张截断（与 ref-images 的硬上限一致）。
+   */
+  const mergedImages = [...new Set([...(shotInput.refs?.images ?? []), ...images])].slice(0, 9);
+  shotInput.refs.images = mergedImages;
 
   onProgress?.(15, '保存镜头卡');
 
@@ -421,14 +436,13 @@ export async function runNodeGeneration(opts: RunOptions): Promise<RunResult> {
 
   while (Date.now() < timeoutAt) {
     await new Promise((r) => setTimeout(r, pollMs));
-    let jobs;
+    let cur: { id: string; status: string; outputs?: unknown[]; error?: string } | null;
     try {
-      jobs = await api.listJobs();
+      // 同 waitJob：单任务查询，避免每 2.5s 拉一遍全量列表
+      cur = await api.getJob(job.id) as { id: string; status: string; outputs?: unknown[]; error?: string };
     } catch {
       continue;   // 网络抖动不中断
     }
-    const cur = (jobs as { id: string; status: string; outputs?: unknown[]; error?: string }[])
-      .find((j) => j.id === job.id);
     if (!cur) continue;
 
     lastStatus = cur.status;

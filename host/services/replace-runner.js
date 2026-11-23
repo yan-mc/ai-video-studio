@@ -85,8 +85,20 @@ export async function runReplaceBatch({ replaceId, cfg = loadConfig(), onProgres
    */
   let baseline = task;
   const emit = async (patch) => {
-    await store.upsert({ ...baseline, ...patch });
-    const fresh = await store.get(replaceId);
+    /**
+     * 直接用 upsert 的返回值当新基准，不再回读。
+     *
+     * `replaceStore().upsert()` 的契约就是「返回合并后的**单条**记录」
+     * （replace.js:318-329，`return written`）。那个"返回整个数组"的历史
+     * 缺陷在 store 层已经收口，这里不必再防御。
+     *
+     * 为什么不再 `await store.get(replaceId)`：
+     *   replace.json 实测 152KB。emit 在每个段边界都调用（每段 2 次），
+     *   30 段批次 = 60 次 upsert + 60 次全量回读。upsert 内部已经读过一次
+     *   磁盘，再 get 一次是纯重复的 152KB 读 + JSON.parse —— 段数越多放大
+     *   越明显，正是"跑久了越来越慢"的一个来源。
+     */
+    const fresh = await store.upsert({ ...baseline, ...patch });
     if (fresh) baseline = fresh;
     onProgress({ replaceId, ...patch });
     return fresh;
@@ -106,7 +118,7 @@ export async function runReplaceBatch({ replaceId, cfg = loadConfig(), onProgres
    */
   const lifecycle = await import('./comfy-lifecycle.js');
   try {
-    await lifecycle.ensureComfyRunning(cfg, (m) => onProgress({ replaceId, note: m }));
+    await lifecycle.ensureComfyRunning(cfg, (m) => onProgress({ replaceId, note: m }), replaceId);
   } catch (e) {
     return emit({
       status: 'failed',
@@ -143,25 +155,61 @@ export async function runReplaceBatch({ replaceId, cfg = loadConfig(), onProgres
     if (!numChk.ok) warnings.push(numChk.warning);
 
     /**
+     * ⚠️ **必须在 emit 覆盖 current 之前**快照上一轮的段表。
+     *
+     * `emit({segments})` 会把 `current` 换成新计划（全 pending），
+     * 之后再也读不到"上次哪些段已完成"。断点续跑判定依赖这份快照 ——
+     * 早先直接在阶段 2.5 读 `current.segments`，拿到的是刚写进去的全 pending，
+     * `doneCount` 恒为 0，续跑永远不生效（而且不报错，只是默默从头跑）。
+     */
+    const prevSnapshot = {
+      segments: Array.isArray(current.segments) ? [...current.segments] : [],
+      continuation: current.continuation ? { ...current.continuation } : null,
+      sourceRel: String(current.sourceRel || ''),
+    };
+
+    /**
      * 段表：保留已完成的段（重跑时用），新增的段补上。
      *
-     * ⚠️ 续写模式下**不能复用已完成段**：链条是强依赖的，
-     *    第 n 段的 latent 来自第 n-1 段的实际生成结果。如果第 1 段被复用
-     *    （来自上一次运行），它的 clip_1 在新的 batchId 下根本不存在，
-     *    第 2 段去 Load 必然失败。所以续写模式一律从头跑。
+     * ==========================================================================
+     * 续写模式的复用条件（2.20.0 起放宽）
+     * ==========================================================================
      *
-     * 独立模式的匹配键用 `startSec` 而不是 index —— 用户重跑时如果改了
-     * segmentSec，段的切点全变了，靠 index 匹配会把错误的产物当成"已完成"。
+     * 旧实现：续写模式一律从头跑，理由是「第 n 段的 latent 来自第 n-1 段的
+     * 实际生成结果，复用的段在新 batchId 下没有 clip 文件，第 2 段必然失败」。
+     *
+     * 那个理由**只在新开了 batchId 时成立**。真实使用的常见场景是
+     * 「跑了 3 段、第 4 段卡住/超时，想从第 4 段续跑」—— 这时上下文缓存
+     * （`clip_00001..0000n`）**还在原处**，链条其实没断。
+     *
+     * 现在的判定在下面 `阶段 2.5` 里完成（需要先算出续写批次与 folder），
+     * 这里先按「续写不复用」占位，稍后用 `resumeDecision` 覆盖。
      */
+    let resumeDecision = { reuse: false, keepSegments: 0, reason: '' };
+
+    /**
+     * 已完成的段按「源视频 + 段起点 + 段长」三元组复用。
+     *
+     * ⚠️ 不能只用 `startSec` 当键：段起点由固定段长算出来，用户换了一个视频、
+     *    或改了段长但起点恰好落在同一小数位时，旧记录会被误判成"这段已完成"，
+     *    于是带着**上一个视频的成片**进入拼接 —— 前半段是旧人、后半段是新人，
+     *    而且全程没有任何警告。
+     */
+    const segmentKey = (sourceRel, s) => `${sourceRel}|${Number(s.startSec).toFixed(3)}|${Number(s.durationSec).toFixed(3)}`;
+    const sameSource = String(current.sourceRel || '') !== ''
+      && prevSnapshot.sourceRel === String(current.sourceRel || '');
+    if (!sameSource && prevSnapshot.segments.some((s) => s && s.status === 'completed')) {
+      warnings.push('源视频已更换，历史分段不可复用，将从第 1 段重跑。');
+    }
     const prevByStart = new Map(
-      plan.mode === 'continuation'
-        ? []
-        : (Array.isArray(current.segments) ? current.segments : [])
+      plan.mode === 'continuation' || !sameSource
+        ? []   // 续写：具体复用在阶段 2.5 决定；换源：一律不复用
+        : prevSnapshot.segments
           .filter((s) => s && s.status === 'completed' && s.outputRel)
-          .map((s) => [Number(s.startSec).toFixed(3), s]),
+          .map((s) => [segmentKey(current.sourceRel, s), s]),
     );
-    const segments = plan.segments.map((s) => {
-      const hit = prevByStart.get(Number(s.startSec).toFixed(3));
+    let segments = plan.segments.map((s) => {
+      const hit = prevByStart.get(segmentKey(current.sourceRel, s));
       return hit
         ? { ...s, status: 'completed', outputRel: hit.outputRel, jobId: hit.jobId, fromCache: true }
         : { ...s, status: 'pending', outputRel: null, jobId: null, fromCache: false };
@@ -209,6 +257,80 @@ export async function runReplaceBatch({ replaceId, cfg = loadConfig(), onProgres
     let contBatch = null;
     if (isContinuation) {
       const CONT = (await import('../bridge/index.js')).continuation;
+
+      /**
+       * ======================================================================
+       * 断点续跑判定：能不能沿用上次的上下文 folder
+       * ======================================================================
+       *
+       * 判据（三个都要满足）：
+       *   ① 上次跑过、且有已完成段
+       *   ② 上次记录的 contextFolder 还在
+       *   ③ `clip_00001 .. clip_0000(done)` 逐个存在
+       *
+       * ③ 是硬门槛：少一个文件，第 done+1 段去 Load 就会报
+       * "is neither a file nor a folder"。宁可整条重跑，也不要跑到一半炸。
+       *
+       * 复用时要同时沿用 batchId 与 runId —— 南风的 folder 是
+       * sha256(workflow=batchId, node, group=batchId, run=runId)，
+       * 只改一个都会算出不同的目录。
+       */
+      const prevSegs = prevSnapshot.segments;
+      const doneCount = prevSegs.filter((s) => s && s.status === 'completed' && s.outputRel).length;
+      const prevFolder = prevSnapshot.continuation?.contextFolder ?? '';
+      const prevBatchId = prevSnapshot.continuation?.batchId ?? '';
+
+      if (doneCount > 0 && prevFolder && prevBatchId) {
+        /**
+         * ⚠️ 上下文目录必须用 `findRuntimeDir()` 定位，不能拿 `cfg.dataDir/..` 猜。
+         *
+         * `dataDir` 指向 `<plugin>/data`，而 ComfyUI 的 output 在
+         * `<ai-runtime>/ComfyUI/output` —— 那是**同级目录**，不是上一级。
+         * 早先用 `path.join(cfg.dataDir,'..','ai-runtime',...)` 算出来的路径
+         * 根本不存在，于是 `clip_00001` 全部判为缺失 → 续跑永远不生效，
+         * 而且不报错（只是默默从第 1 段重跑）。
+         *
+         * `findRuntimeDir()` 会从插件目录逐层向上找带 `start-h3.ps1` 的目录，
+         * 与 ComfyUI 启停用的是同一套规则，不会走样。
+         */
+        const runtimeDir = (await import('./comfy-control.js')).findRuntimeDir();
+        const absDir = runtimeDir
+          ? path.join(runtimeDir, 'ComfyUI', 'output', prevFolder)
+          : '';
+        let allPresent = Boolean(absDir);
+        if (!absDir) {
+          warnings.push(
+            '找不到 ai-runtime 目录，无法校验上下文缓存 —— 本次从第 1 段重跑。',
+          );
+        }
+        for (let i = 1; absDir && i <= doneCount; i += 1) {
+          const f = path.join(absDir, `clip_${String(i).padStart(5, '0')}.safetensors`);
+          if (!fs.existsSync(f)) {
+            allPresent = false;
+            warnings.push(
+              `上下文缓存缺 clip_${String(i).padStart(5, '0')}（${prevFolder.split('/').pop()}），`
+              + `续写链已断 —— 本次从第 1 段重跑，无法从第 ${doneCount + 1} 段续跑。`,
+            );
+            break;
+          }
+        }
+        if (allPresent) {
+          // 从任务记录里恢复 runId（存在 continuation.runId 或解析 folder 不现实，退化用 batchId）
+          resumeDecision = {
+            reuse: true,
+            keepSegments: doneCount,
+            reason: `复用前 ${doneCount} 段，从第 ${doneCount + 1} 段开始`,
+            prevBatchId,
+            prevRunId: prevSnapshot.continuation?.runId ?? prevBatchId,
+            prevFolder,
+          };
+        }
+      }
+
+      const reuseArg = resumeDecision.reuse
+        ? { batchId: resumeDecision.prevBatchId, runId: resumeDecision.prevRunId, contextLength: prevSnapshot.continuation?.contextLength }
+        : null;
+
       contBatch = CONT.createBatch({
         projectId: `replace:${replaceId}`,
         // 段数就是批次里的段数 —— createBatch 只用来生成 id 与 folder
@@ -216,7 +338,36 @@ export async function runReplaceBatch({ replaceId, cfg = loadConfig(), onProgres
         preset: task.preset ?? REPLACE_DEFAULTS.preset,
         contextLength: plan.contextLength ?? REPLACE_DEFAULTS.contextLength,
         audioContextLength: 24,
+        ...(reuseArg ? { reuse: reuseArg } : {}),
       });
+
+      /**
+       * ⚠️ 复用时**必须以记录里的 contextFolder 为准**。
+       *
+       * `createBatch` 的 folder 是 sha256(batchId, node, group, runId) 算出来的，
+       * 而老任务只存了 batchId、没存 runId（2.20.0 之前）。用 batchId 顶替
+       * runId 会算出完全不同的目录 → 缓存全部对不上 → 续跑失效。
+       *
+       * 所以只要之前记录过 folder，就直接用它覆盖 —— folder 才是磁盘上
+       * 真实存在的那个目录，算出来的值只用于"新建批次"。
+       */
+      if (resumeDecision.reuse && resumeDecision.prevFolder) {
+        contBatch.contextFolder = resumeDecision.prevFolder;
+      }
+
+      if (resumeDecision.reuse) {
+        // 复用段：沿用原 folder，把已完成段标回来
+        const byIndex = new Map(prevSegs.map((s) => [s.index, s]));
+        segments = segments.map((s) => {
+          const old = byIndex.get(s.index);
+          return old && old.status === 'completed' && old.outputRel
+            ? { ...s, status: 'completed', outputRel: old.outputRel, jobId: old.jobId, fromCache: true }
+            : s;
+        });
+        warnings.push(
+          `断点续跑：${resumeDecision.reason}（沿用上下文 ${contBatch.contextFolder.split('/').pop().slice(0, 12)}）`,
+        );
+      }
       warnings.push(
         `续写链路已建立：重叠窗口 ${plan.trimFrames} 帧（${(plan.overlapSec ?? 0).toFixed(2)}s），`
         + '段间通过真实 AV latent 传递，不是靠提示词推断。',
@@ -226,6 +377,14 @@ export async function runReplaceBatch({ replaceId, cfg = loadConfig(), onProgres
         segments,
         continuation: {
           batchId: contBatch.batchId,
+          /**
+           * runId 也要存 —— 南风的 contextFolder 是
+           * sha256(workflow=batchId, node, group=batchId, run=runId)，
+           * 断点续跑时必须用**同一个 runId** 才能算出同一个目录。
+           * 早先只存了 batchId，续跑时拿不到 runId 就只能退回 batchId，
+           * folder 对不上 → 缓存全部作废。
+           */
+          runId: contBatch.runId,
           contextLength: contBatch.contextLength,
           contextFolder: contBatch.contextFolder,
           trimFrames: plan.trimFrames,
@@ -497,7 +656,7 @@ export async function runReplaceBatch({ replaceId, cfg = loadConfig(), onProgres
      * 记一条 warning 即可。
      */
     try {
-      const r = await lifecycle.releaseComfy((m) => onProgress({ replaceId, note: m }));
+      const r = await lifecycle.releaseComfy((m) => onProgress({ replaceId, note: m }), replaceId);
       if (!r.stopped && !r.skipped) warnings.push(`ComfyUI 关闭失败：${r.detail}`);
     } catch (e) {
       warnings.push(`ComfyUI 关闭异常：${String(e?.message || e).slice(0, 200)}`);
@@ -513,14 +672,14 @@ export async function runReplaceBatch({ replaceId, cfg = loadConfig(), onProgres
      * 翻译模型直接 OOM —— 这个连锁反应比原错误更难排查。
      */
     try {
-      await lifecycle.releaseComfy(() => {});
+      await lifecycle.releaseComfy(() => {}, replaceId);
     } catch { /* 失败路径不再叠加错误 */ }
     return emit({ status: 'failed', error: msg, finishedAt: Date.now(), warnings });
   }
 }
 
 /**
- * 把任务参数翻译成南风的 217 参数覆盖。
+ * 把任务参数翻译成南风的 221 参数覆盖。
  *
  * ⚠️ 这里刻意**不写** `H3完整Sigma序列` / `V81一采使用手动Sigma`。
  *    实测确认（vendor/nanfeng/h3_generator.py:1687 + param-docs）：
@@ -614,22 +773,40 @@ export function buildOverrides(task, ctx = {}) {
     out.context_length = ctx;
 
     /**
-     * 音频上下文窗口。
+     * 音频上下文窗口 —— 换人线固定取**最小值**，不跟随视频窗口放缩。
      *
-     * 换算关系是 H3 自身的时序常数：音频 latent 跑 40 Hz，画面 24 fps，
-     * 所以 1 像素帧 = 40/24 = 5/3 个音频步。context_length=56 帧
-     * 只需要 round(56*5/3)=93 步。
+     * ==========================================================================
+     * 为什么不再按 ctx 比例换算
+     * ==========================================================================
      *
-     * ⚠️ 早先这里写的是 `Number(ctx) * 4`（56→224 步），比实际需要
-     *    多出 **2.4 倍**。多出来的每一步都会作为 conditioning row
-     *    钉进序列、走完整 DiT，是纯浪费。而换人线在切段阶段就已
-     *    剥掉音轨（`-an`），这些音频行对换人任务的价值本来就是零。
+     * 节点侧换算关系是 H3 的时序常数（音频 40Hz / 画面 24fps，
+     * 1 像素帧 = 5/3 个音频步）。按它算：
      *
-     * 节点侧 audio_context_length 允许 0～240；0 表示「跟随画面窗口」，
-     * 这里显式给换算后的值，避免依赖节点默认。
+     *     ctx=5  → audio_context_length = 8
+     *     ctx=22 → audio_context_length = 37   ← 4.6 倍
+     *
+     * 而**换人线在切段阶段就已经剥掉音轨**（`-an`，见 §5.1 铁律 1），
+     * 这些音频 conditioning 行对结果的价值是**零** —— 它们只是被钉进序列、
+     * 走完整 DiT，纯烧算力。
+     *
+     * 实测代价（同一台机器，同 8 步 lcm）：
+     *
+     *     段1 冷启动（不读音频上下文）        951 秒
+     *     段2 ctx=5  → audio=8                2326 秒
+     *     段2 ctx=22 → audio=37               > 3500 秒（仍在跑）
+     *
+     * 也就是说把 ctx 从 5 提到 22 本是为了"多继承上一段"，
+     * 结果音频窗口被动放大 4.6 倍，净效果是**更慢**。
+     *
+     * 现在固定给 AUDIO_CTX_MIN（8 = 0.33 秒），与视频窗口解耦：
+     *   · 视频窗口该多大就多大（22 / 39 / 56 按需）
+     *   · 音频窗口恒定最小，不随视频膨胀
+     *
+     * 节点侧允许 0～240；传 0 表示"跟随画面窗口"，那正是我们要避免的行为，
+     * 所以显式给 8 而不是 0。
      */
-    const audioSteps = Math.round((Number(ctx) * 40) / 24);
-    out.audio_context_length = Math.min(240, Math.max(0, audioSteps));
+    const AUDIO_CTX_MIN = 8;
+    out.audio_context_length = AUDIO_CTX_MIN;
 
     /**
      * 换人续写链的抗身份漂移：给上下文注入锥形噪声。

@@ -30,7 +30,13 @@ interface ImageMeta {
 }
 interface Job {
   id: string; status: string; prompt?: string;
-  outputs?: { role?: string; path?: string; bytes?: number }[];
+  /**
+   * 轻量模式（`?fields=list`）下后端只回 `{rel}`，没有 `path`/`role`。
+   *
+   * 所以类型里必须写 `rel`，展示走 `outputUrl()`（它优先用 rel）——
+   * 只认 `path` 的话轻量模式下"查看"按钮会永远拿不到地址。
+   */
+  outputs?: { role?: string; path?: string; rel?: string; bytes?: number }[];
   error?: string;
 }
 
@@ -67,7 +73,14 @@ export function ImagePage() {
     const timer = window.setInterval(() => {
       void (async () => {
         try {
-          const all = await api.listJobs() as Job[];
+          /**
+           * 这一页要的是**最近任务列表**（不是单个任务的轮询），所以走轻量模式。
+           *
+           * 以前是 `listJobs()` 全量：每次 300 KB 级（prompt 全文 + 221 参数快照），
+           * 4 秒一轮。列表里真正用到的只有 id/status/outputs[0]/prompt 摘要/error，
+           * `?fields=list` 会让后端做投影，响应小一个数量级。
+           */
+          const all = await api.listJobs({ fields: 'list' }) as Job[];
           // 只显示**真正的 H3-Image 出图任务**。
           //
           // ⚠️ 以前的正则 `/^h3-image$|image/i` 有两个问题：

@@ -68,7 +68,7 @@ export function apply(ctx) {
    * Cordis 的 `ctx.llm` 只有把 llm 写进 inject 才存在；写进去就等于硬依赖，
    * 缺模型服务的环境会让整个插件 failed。智能分镜只是可选功能，
    * 所以用 `ctx.get(name)` 可选取用，再挂到自有属性上供
-   * services/nanfeng/dsh-llm.js 读取。
+   * bridge/llm/dsh-llm.js 读取。
    *
    * 取不到时不影响插件加载 —— llmStatus() 会把原因报给前端。
    */
@@ -104,16 +104,17 @@ export function apply(ctx) {
     }
   });
 
-  /** 加载 H3-Image 工作流（画布 Agent 的 generate_image 用） */
-  let _imgWf = null;
+  /**
+   * 加载 H3-Image 工作流（画布 Agent 的 generate_image 用）。
+   *
+   * ⚠️ 不再自己缓存：`readWorkflowCached` 已经按 workflowDir 缓存，并且
+   *    注册了配置失效订阅（config.js 的 wireConfigInvalidation）。这里再包一层
+   *    永不失效的 `_imgWf` 会让用户改 workflowDir 后画布仍用旧模板。
+   */
   function loadImageWorkflowForGen() {
-    if (_imgWf) return _imgWf;
     try {
       // 工作流模板随插件分发，**不跟随 dataDir**（见 services/workflow-paths.js）
-      const wf = readWorkflowCached('image', loadConfig());
-      if (!wf) return null;
-      _imgWf = wf;
-      return _imgWf;
+      return readWorkflowCached('image', loadConfig());
     } catch { return null; }
   }
 
@@ -151,14 +152,12 @@ export function apply(ctx) {
    */
   const getCfg = () => loadConfig();
 
-  const h3 = createH3Workshop({ root, cfg, getCfg });
-  const post = createPostService({ cfg, getCfg });
-  const edit = createEditService({ cfg, getCfg });
-  const assets = createAssetService({ cfg, getCfg });
-  const vault = createVaultService({ cfg, getCfg });
+  const h3 = createH3Workshop({ root, getCfg });
+  const post = createPostService({ getCfg });
+  const edit = createEditService({ getCfg });
+  const assets = createAssetService({ getCfg });
+  const vault = createVaultService({ getCfg });
   const canvasAgent = createCanvasAgent({
-    cfg,
-    getCfg,
     // ⚠️ 必须注入 runGenerate：旧实现没传 → generate_image / generate_video
     //    恒抛 GENERATE_UNAVAILABLE，画布 AI 助手的"花钱"工具全废。
     runGenerate: async ({ kind, prompt, options = {} }) => {
@@ -179,13 +178,13 @@ export function apply(ctx) {
       if (kind === 'image') job.kind = 'image';
       await jobsStore().upsert(job);
       runJob(job, async (running, hooks) => (kind === 'video'
-        ? runH3Local({ workflow, job: running, shot: options.shot ?? {}, prompt: String(prompt ?? ''), cfg, onSubmitted: hooks?.onSubmitted })
+        ? runH3Local({ workflow, job: running, shot: options.shot ?? {}, prompt: String(prompt ?? ''), cfg: loadConfig(), onSubmitted: hooks?.onSubmitted })
         : runH3ImageLocal({
           workflow,
           job: running,
           prompt: String(prompt ?? ''),
           shot: { refs: { images: options.refImages ?? [] }, imageSizeId: options.sizeId ?? 'sq-2048' },
-          cfg,
+          cfg: loadConfig(),
           onSubmitted: hooks?.onSubmitted,
         }))).catch(() => {});
       return { jobId: job.id, status: job.status, backendId: job.backendId };
@@ -219,7 +218,7 @@ export function apply(ctx) {
       }
     },
   });
-  const extras = createExtrasService({ cfg });
+  const extras = createExtrasService({ getCfg });
   attachControllers({ h3, post, edit, assets, canvasAgent, extras, vault });
 
   /* ---------------------------- HTTP 路由 ---------------------------- */
@@ -288,12 +287,6 @@ export function apply(ctx) {
 
   ctx.logger?.info?.(
     `[jiuzhang] 已挂载：${API_PREFIX} · ${APP_PREFIX} · ${ASSET_PREFIX}；`
-    + `后端=${cfg.defaultBackend} 并发=${cfg.maxConcurrentLocal} 运行统计=${JSON.stringify(runtimeStats())}`,
+    + `后端=${loadConfig().defaultBackend} 并发=${loadConfig().maxConcurrentLocal} 运行统计=${JSON.stringify(runtimeStats())}`,
   );
 }
-
-
-
-
-
-

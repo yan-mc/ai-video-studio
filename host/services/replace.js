@@ -370,7 +370,7 @@ export function newReplaceId() {
  *                    mode:'independent'|'continuation', contextLength?:string,
  *                    trimFrames?:number}>}
  */
-export async function planSegments(abs, cfg = loadConfig(), opts = {}) {
+export async function planSourceSegments(abs, cfg = loadConfig(), opts = {}) {
   const segmentSec = Number(opts.segmentSec) > 0 ? Number(opts.segmentSec) : REPLACE_DEFAULTS.segmentSec;
   const maxSourceSec = Number(opts.maxSourceSec) > 0 ? Number(opts.maxSourceSec) : REPLACE_DEFAULTS.maxSourceSec;
   const maxSegments = Number(opts.maxSegments) > 0 ? Number(opts.maxSegments) : REPLACE_DEFAULTS.maxSegments;
@@ -400,7 +400,7 @@ export async function planSegments(abs, cfg = loadConfig(), opts = {}) {
 
   /* ---------------- 续写模式：从目标时长反推每段 ---------------- */
   if (useContinuation) {
-    const CONT = await import('./nanfeng/continuation.js');
+    const CONT = (await import('../bridge/index.js')).continuation;
     const contextLength = String(opts.contextLength ?? REPLACE_DEFAULTS.contextLength);
     if (!CONT.CONTEXT_LENGTHS.includes(contextLength)) {
       throw new Error(`context_length 必须是 ${CONT.CONTEXT_LENGTHS.join('/')}，收到 ${contextLength}`);

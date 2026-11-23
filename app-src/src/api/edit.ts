@@ -9,7 +9,7 @@
  * 再导出一遍 ensureToken 口径。写令牌、错误形状、BAD_RESPONSE 重试
  * 都只有一处实现 —— 这是本项目最容易各写各的、写出 403 的地方。
  */
-import { API_BASE, ApiHttpError, describeError, ensureToken } from './client';
+import { API_BASE, describeError, request } from './client';
 
 /* ------------------------------------------------------------- 类型 */
 
@@ -108,49 +108,17 @@ export interface EditOpResult {
 /* --------------------------------------------------------- fetch 核心 */
 
 /**
- * 与 client.ts 的 request 同语义的最小子集。
+ * 剪辑线的请求走 `client.ts` 的 `request` —— **不再自建一份**。
  *
- * 复制而不是导出的理由：client.ts 的 `request` 是模块私有的（没 export），
- * 而把它改成 export 会扩大 client.ts 的公共面。这里的实现只有 20 行，
- * 且 token / 错误形状 / 非 JSON 防御全部对齐 —— 真正的重复风险在
- * 「token 怎么带」和「错误怎么解」，那两处都已复用。
+ * ⚠️ 这里原本复制了 20 行 fetch，理由是"client.ts 的 request 是模块私有的"。
+ *    后果是复制出来的那份把刚修好的两件事全丢了：
+ *      · 没有 `AbortSignal.timeout()` → 出片中途切页，请求挂到进程结束，
+ *        状态栏永远停在"渲染中"；`/edit/render` 的 600s 长超时对它也不生效。
+ *      · 没有 403 `WRITE_TOKEN_REQUIRED` 重取 token → Host 重启后整个剪辑页
+ *        （trim/concat/audio/render/工程保存）全部永久失败，只能手动刷新。
  */
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const headers: Record<string, string> = { Accept: 'application/json' };
-  const isWrite = method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
-  if (isWrite) headers['X-JZ-Token'] = await ensureToken();
-  if (body !== undefined) headers['Content-Type'] = 'application/json; charset=utf-8';
-
-  const url = `${API_BASE}/edit${path.startsWith('/') ? path : `/${path}`}`;
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-      cache: 'no-store',
-      credentials: 'same-origin',
-    });
-  } catch (err) {
-    throw new ApiHttpError(0, 'NETWORK_ERROR', err instanceof Error ? err.message : String(err));
-  }
-
-  let text = '';
-  try { text = await res.text(); } catch { /* ignore */ }
-  let payload: unknown = null;
-  if (text.trim()) {
-    try { payload = JSON.parse(text); } catch { /* 非 JSON，下面按 BAD_RESPONSE 处理 */ }
-  }
-
-  if (!res.ok) {
-    const p = payload as { error?: string; detail?: string } | null;
-    throw new ApiHttpError(res.status, p?.error || `HTTP_${res.status}`, p?.detail);
-  }
-  // 后端路由没挂上时 SPA fallback 会返回 HTML —— 报清楚，别让调用方在 null 上崩
-  if (payload === null) {
-    throw new ApiHttpError(res.status, 'BAD_RESPONSE', '剪辑接口返回的不是 JSON；请刷新页面后重试。');
-  }
-  return payload as T;
+function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  return request<T>(method, `/edit${path.startsWith('/') ? path : `/${path}`}`, body);
 }
 
 /* ------------------------------------------------------------- 接口 */

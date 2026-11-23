@@ -1,4 +1,4 @@
-# 南风 V15 · 217 参数有效性审计
+# 南风 V15 · 221 参数有效性审计
 
 > 生成方式：`npm run audit:params`（`tools/audit-params.mjs`）
 > 判据：逐项对照 `vendor/nanfeng/h3_generator.py` 及其兄弟模块，
@@ -20,7 +20,7 @@
 | **B** | **有效但默认没开**（有收益，建议开） | **8** | 4% |
 | **C** | 死参数：上游硬编码关闭 / 完全无读取 | **47** | 22% |
 | **D** | 缺依赖：本机未装对应节点，开了报错 | **48** | 22% |
-| | **合计** | **217** | |
+| | **合计** | **221** | |
 | | **真正可用（A+B）** | **122** | **56%** |
 | | **无效（C+D）** | **95** | **44%** |
 
@@ -42,7 +42,7 @@
 自检命令：
 
 ```powershell
-node -e "import('./host/services/nanfeng/schema.js').then(m=>{const i=m.inertParams();console.log(i.length,i.filter(p=>p.flag==='dead').length,'dead',i.filter(p=>p.flag==='banned').length,'banned')})"
+node -e "import('./host/bridge/vendors/nanfeng/schema.js').then(m=>{const i=m.inertParams();console.log(i.length,i.filter(p=>p.flag==='dead').length,'dead',i.filter(p=>p.flag==='banned').length,'banned')})"
 # 期望：95 47 dead 48 banned
 ```
 
@@ -77,7 +77,7 @@ node -e "import('./host/services/nanfeng/schema.js').then(m=>{const i=m.inertPar
 
 ## 三、C 类：死参数（**47 个**）
 
-> **计数权威**：`host/services/nanfeng/schema.js` 的 `inertParams()`，
+> **计数权威**：`host/bridge/vendors/nanfeng/schema.js` 的 `inertParams()`，
 > 它返回 `flag === 'dead'` 的 37 项。下面逐组列出并与上游源码行号对照。
 >
 > ⚠️ 旧版本文档写的是 54 个 —— 那个数字把「缺依赖（D 类）」的一部分
@@ -357,8 +357,8 @@ simple/shift12  8步: 1.000000, 0.988235, 0.972973, 0.952381, 0.923077, 0.878049
 
 ### 本插件怎么支持
 
-南风 **217 个参数里没有任何打光参数** —— H3 是纯提示词驱动的，打光只能靠文字。
-所以本轮新增 **`LIGHTING_PRESETS` 通道**（`host/services/h3-prompt.js`），
+南风 **221 个参数里没有任何打光参数** —— H3 是纯提示词驱动的，打光只能靠文字。
+所以本轮新增 **`LIGHTING_PRESETS` 通道**（`host/bridge/prompt/h3-prompt.js`），
 把摄影术语翻译成模型能执行的句子（光比 + 档数 + 阴影硬度 + 暗部保留度）：
 
 | id | 名称 | 说明 |
@@ -435,6 +435,6 @@ simple/shift12  8步: 1.000000, 0.988235, 0.972973, 0.952381, 0.923077, 0.878049
 ### 复现命令
 
 ```powershell
-node -e "import('./host/services/nanfeng/schema.js').then(m=>{const i=m.inertParams();console.log('total',i.length,'dead',i.filter(p=>p.flag==='dead').length,'banned',i.filter(p=>p.flag==='banned').length)})"
+node -e "import('./host/bridge/vendors/nanfeng/schema.js').then(m=>{const i=m.inertParams();console.log('total',i.length,'dead',i.filter(p=>p.flag==='dead').length,'banned',i.filter(p=>p.flag==='banned').length)})"
 # 期望输出：total 95 dead 47 banned 48
 ```

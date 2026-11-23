@@ -16,6 +16,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { collectionStore } from './json-store.js';
 import { loadConfig } from '../config.js';
+import { H3_MODE_ALIASES, H3_MODES, normalizeMode } from './mode-aliases.js';
+
+export { H3_MODE_ALIASES, H3_MODES, normalizeMode };
 
 /* ------------------------------------------------------------------ 常量 */
 
@@ -91,34 +94,6 @@ export const NODE_LABELS = Object.freeze({
  *
  * 这里统一成编译器认的长名（t2va 系），并保留短名作为输入别名。
  */
-export const H3_MODE_ALIASES = Object.freeze({
-  t2v: 't2va', T2V: 't2va',
-  i2v: 'i2va', I2V: 'i2va',
-  fl2v: 'fl2va', FL2V: 'fl2va', flf: 'fl2va',
-  l2v: 'l2va', L2V: 'l2va',
-  ref: 'ref2va', ref2v: 'ref2va', ref2va: 'ref2va', REF: 'ref2va',
-  t2va: 't2va', i2va: 'i2va', fl2va: 'fl2va', l2va: 'l2va',
-});
-
-/** H3 编译器认的规范模式名 */
-export const H3_MODES = Object.freeze(['t2va', 'i2va', 'fl2va', 'l2va', 'ref2va']);
-
-/**
- * 把任意写法归一成规范模式名。
- * @param {unknown} mode
- * @param {{hasRefImages?: boolean, fallback?: string}} [opts]
- */
-export function normalizeMode(mode, opts = {}) {
-  const raw = String(mode ?? '').trim();
-  // 兼容带前缀的档位写法（如 h3:T2V）
-  const bare = raw.includes(':') ? raw.slice(raw.indexOf(':') + 1) : raw;
-  const hit = H3_MODE_ALIASES[bare] ?? H3_MODE_ALIASES[bare.toUpperCase()] ?? H3_MODE_ALIASES[bare.toLowerCase()];
-  if (hit) return hit;
-  // 未识别：有参考图走全参考，无图走文生（与画布 runner 的兜底一致）
-  if (opts.fallback) return opts.fallback;
-  return opts.hasRefImages ? 'ref2va' : 't2va';
-}
-
 /** 这个模式是否"需要至少 N 张参考图" */
 export function modeImageRequirement(mode) {
   const m = normalizeMode(mode);
@@ -363,7 +338,7 @@ export function newShot({ title = '', episodeIndex = 1, shotIndex = 1, ...rest }
     /**
      * 打光通道（光比预设 id）。
      *
-     * 南风 217 参数里没有打光参数，光比只能靠提示词表达。
+     * 南风 221 参数里没有打光参数，光比只能靠提示词表达。
      * 取值见 services/h3-prompt.js 的 LIGHTING_PRESETS：
      *   none / high-key-2-1 / classic-3-1 / dramatic-4-1 / noir-8-1 / rim-backlit
      */

@@ -5,6 +5,520 @@
 
 ---
 
+## 3.2.0 — 全量审计：44 项缺陷修复 + 重构补丁清理 + 运行时数据清空（2026-11-23）
+
+> 一次性彻底审计：按模块逐文件审阅 6 个分区（入口/REST、桥接层、服务与存储、前端、vendor 与
+> Blender、文档与脚本），共 628 条 findings，按级别修复 P1/P2 全部与 P3 清理项。
+> 审计报告原文见 `docs/AUDIT-3.2.0.md`。
+
+### 修复：数据正确性（P1）
+
+- **参考视频 / 音频编号被压缩后重排**（`services/generator.js`，两条执行链各一处）：
+  `.filter(v => v.abs)` 会删掉解析失败的条目再 `index = i+1` 重编号，而提示词里的
+  `<Video N>` / `<Audio N>` 是按挂载顺序写的 → 第 3 段前移成第 2 位，指令与实物错位，
+  且 ComfyUI 的 AUTOGROW 输入不报错。现在按**原位置**编号，缺失项留空槽（`staged[key]` 为空）。
+  同时修正 `warnMissingMedia` 的文案（不是"悬空"而是"槽位留空"）并透传 `cfg`。
+- **`useRef` 判定与实际接线脱节**：改为看**已落地的 staged 文件名**，而不是解析出的条目数 ——
+  否则 staging 部分失败时会挂 `ReferenceToVideo` 却零参考，静默退化成纯文生。
+- **ComfyUI 生命周期用布尔标记持有权**（`services/comfy-lifecycle.js`）：
+  两个批次并发时后来的会把前一个的标记清掉（显存永不释放）或把别人正在用的实例关掉。
+  改为 `startedByUs`（全局事实）+ `owners` 集合（持有者），并把 `ownerId` 透传到
+  `replace-runner` 的 ensure/release。
+- **`stopComfy` 以过期端口文件为唯一判据**（`services/comfy-control.js`）：端口文件缺失/搬目录时
+  误报"本来就没在运行"，ComfyUI 继续占 10–14GB。改为先探端口文件、再探可达地址（`resolveLivePort`）。
+- **换人断点续跑只比对段起点**（`services/replace-runner.js`）：换源视频或改段长后旧记录被误判为
+  "已完成"，成品前半段旧人、后半段新人且无警告。改用「源视频 + 起点 + 段长」三元组，并在
+  换源时显式告警 + 整体不复用。
+- **`pruneJobs` 的并发窗口**（`services/job-store.js`）：原先 `list()` 与 `replaceAll()` 之间
+  新落盘的记录会被覆盖（`maxConcurrentLocal>1` 时真实可达）。改为在同一个 `updateJson`
+  mutator 内完成读-算-写；`TERMINAL` 导出为终态唯一真源，`job-runner` 的取消判定补上 `interrupted`。
+
+### 修复：静默失败与吞错（P1/P2）
+
+- **`extras.js` 的读-改-写绕过串行队列**：`writeJson` 是同步裸写，两个并发 upsert 互相覆盖。
+  模板 / 服化道 / 动态条的 6 处写操作改走 `updateJson`（同文件串行队列）。
+- **`json-store` 的 `.bak` / `.corrupt` 只写不读**：主文件损坏后读取链路持续抛 `CORRUPT_JSON`，
+  只能人工恢复。`readSync` 现在解析失败时自动回退 `.bak` 并 warn（回退写入不经过 `backupSync`，
+  避免把好的备份覆盖成损坏内容）。
+- **ComfyUI 探测失败被缓存 5 秒**：刚启动的实例会被报"不可达"。失败不写缓存。
+- **轮询吞掉 `/history` 的所有错误**：ComfyUI 被打挂时要等满 2 小时才报"超时"。
+  现在只对网络抖动继续等，HTTP 层面连续 5 次硬失败即抛真实错误码。
+- **只取第一个产物**：二采 / 续写同时产出多份时其余被静默丢弃，而任务记录自称"含全部 outputs"。
+  现在全部下载，产物文件名按序号区分，下载失败进 `job.warnings` 并冒泡到任务记录。
+- **`studio_generate` 的未知 preset 静默落空层**（`bridge/vendors/nanfeng/presets.js`）：
+  拼错 preset id 会用"零覆盖"跑一次与意图无关的生成。改为抛 `UNKNOWN_PRESET` 并列出可用值。
+- **`coerceTypes` 把非法值变成 `null` / `NaN` 后照原样提交**（`bridge/vendors/nanfeng/graph.js`）：
+  用户看到的是 ComfyUI 的 "Value not in list"。现在强转失败收集成 `INVALID_PARAM_TYPE`；
+  BOOLEAN 的"未提供"不再被写成 `false`（未提供 ≠ 明确关闭）。
+- **`edit.js` 流复制的形状校验**：显式 `reencode:false` 且片段规格不一致时静默产出时长错乱的坏片；
+  现在直接报 `COPY_SHAPE_MISMATCH`。单片段 concat 不再强制重编码。
+- **`studio_jobs` 缺 retry**：Agent 侧无法重跑任务（REST 有）。补 `retry`，与
+  `studio_generate` 共用 `runGenerationFor`（避免后端分流在两处漂移）。
+- **`studio_jobs` 的 retry** 与 REST 一致：复用同一镜头卡快照，不再新建一份。
+
+### 修复：安全（P1）
+
+- **`validateComfyUrl` 仍用 `/^127\./`**（`host/config.js`）：`127.0.0.1.evil.com` / `0.0.0.0`
+  都能通过 → 配置值这条出口的 SSRF。改为复用 `security.js` 的 `isLoopbackHostname`
+  （严格四段 IPv4 + localhost + ::1，不接受 `0.0.0.0`），并**在读取路径也校验一次**
+  （手改 config.json 不再能绕过）。
+- **`resolveUserPath` 相对路径分支没 realpath**（`host/security.js`）：dataDir 内放一个指向 `C:\`
+  的 junction 就能读出 root 外的文件（实测复现；绝对路径分支因为走了 realpath 则正确拒绝）。
+  新增 `realpathLoose()`（解析最长的已存在祖先），所有分支统一在最后物理化再比对。
+- **`/file` 改用 `resolveUserPath`**（`host/api/index.js`）：裸 `safeJoin` 看不出 symlink/junction 指向。
+- **`saveConfig` 全量写盘会把 `dataDir` 的内存回落永久写死**（`host/config.js`）：
+  用户只是改了个主题色，自定义数据目录就被覆盖丢失。现在只写白名单键，
+  且 `dataDir` 未出现在 patch 里时保留文件原值；`ffmpegDir` 这类不可写键不再出现在配置文件里。
+
+### 修复：单一真源（P2）
+
+- 新增 `host/store/mode-aliases.js`：模式别名原本有两份（`store/models.js` 会剥 `h3:` 前缀，
+  而 `services/ref-images.js` 不会、还少两个别名），同一个镜头卡在"提示词编译器"与
+  "槽位规划"两边得出不同模式 → fl2va/i2va 下差 1–2 个槽位号。现合并为无 IO 依赖的唯一实现。
+- `ref-images.js` 的 `if (!push(...)) break`：push 在"解析失败 / 重复 / 到上限"三种情况下都返回
+  false，同一张立绘既在卡仓库又在人设卡时（常见）会让这张卡后面所有分图被跳过。改为只在到上限时停。
+- `job-runner` 把 `pruneJobs` 的动态 import 改回静态（同模块已静态 import 三个符号）。
+- `host/index.js` 的 `_imgWf` 模块级缓存永不失效 → 删掉（`readWorkflowCached` 本身有缓存与失效订阅）；
+  `runGenerate` 闭包改用 `loadConfig()` 现取，不再持启动期 `cfg` 快照。
+- 前端 `api/edit.ts` 自建的 fetch 核心删除，改走 `client.ts` 导出的 `request`
+  （原来丢掉了超时表、403 重取 token，等于把已修好的 P1 在新文件里复现）。
+- 前端 `client.ts` 的 BAD_RESPONSE 重放**只对幂等方法**生效（204/空 body 的成功写操作曾被重发一次，
+  非幂等接口 = 任务重复入队）。
+- 前端画布 `runner.ts`：手填参考图与上游参考图**合并**，不再被上游连线静默清空。
+
+### 修复：前端静默撒谎（P1）
+
+- `ContinuationPanel`：`catch { setBatches([]) }` 把"请求失败"渲染成"没有批次" → 增加错误条。
+- `LoraPicker`：约束求解失败渲染成"没选 LoRA"的空态 → 增加错误条。
+- `ReplacementPage`：「创建并立即执行」把执行失败当成功 → 拆分 toast，明确"任务已创建但没跑起来"。
+- `PrevizPage`：渲完自动挂参考视频失败只 `setErr`（错误条在页面顶部，用户看不到）→ 加 toast。
+
+### 清理
+
+- 删除 `tools/_mk.mjs`（一次性复现脚本）与整个 `tools/oneoff/`（实验脚本）。
+- 删除 `vendor/nanfeng/__pycache__`、`host/blender/__pycache__`。
+- 删除 `docs/history/`（上一轮 PLAN/AUDIT 过程文档）。
+- 清空全部运行时数据：`data/{assets,outputs,replace,post,previz,projects,shots,vault,runs,edit,extras}`、
+  `data/{jobs,projects,assets-index}.json(.bak)`、`data/_abprompt.txt`、`data/config.json`
+  （**保留 `data/workflows/{h3,h3-image}.json`**，它们是随插件分发的模板）。
+- 清理工作区级残留：`_backup_pre3`(466MB 旧版快照)、`_audit`(上轮报告)、`_work`、`_h3res`、`_临时`、`- 临时`；
+  `ai-runtime` 的 6 个 `.prev` 日志、`_node_backups`、`models/.cache`、
+  `ComfyUI/{input,output}` 历史产物（1.9GB）与 `__pycache__`。
+- 修正全仓 37 处陈旧数字与旧路径（217→221 参数、`host/services/nanfeng/*`→`host/bridge/*`、
+  冒烟 187→207、路由 115→105+参数化、README 的 host 59→66 文件 / 24,900→27,700 行、services 29→30 等）。
+- `package.json` version `3.1.0` → **`3.2.0`**，`app-dist` 重新构建并注入新版本号。
+
+### 验证
+
+| 门禁 | 结果 |
+|---|---|
+| `node --check`（61 个 host JS） | **0 失败** |
+| `tsc --noEmit`（前端） | **0 错** |
+| `node tools/smoke-api.mjs` | **207 / 207 全过** |
+| `vite build` | **成功**，包内版本 `3.2.0` |
+| 安全回归（手测） | symlink 越界被拒 `FORBIDDEN_PATH`；`127.0.0.1.evil.com` / `0.0.0.0` 被拒；`.bak` 自动恢复生效 |
+
+---
+
+## 3.1.0 — 运行时稳定性：卡死与内存累积（2026-11-23）
+
+> 针对「连续跑多个项目越来越慢、第 4 段完全跑不动」的现场排查。
+> 完整分析见 **`docs/MEMORY-ANALYSIS.md`**（含复现样本、日志证据、实测数据）。
+>
+> 核心结论：**不是典型内存泄漏**。实测 4 段连续生成，私有内存 13.77GB 峰值
+> → 结束回落到 4.54GB，无单调上升。真实原因是三件事叠加。
+
+### 修复
+
+- **GPU 驱动 TDR 导致任务卡死（致命）**
+  `nvlddmkm` 事件 153 精确对应卡死窗口（`03:03:56` 卡 111.9 分钟的任务）。
+  驱动复位期间 GPU 停摆、功耗从 150W 掉到 44W，「很久之后自己恢复」正是复位完成。
+  已在 `start-h3.ps1` 加 `--vram-headroom 1`，给 WDDM 留余量避免共享显存溢出。
+
+- **放大器 MODEL_CACHE 无界累积**
+  `Comfyui_Minimax_h3_latent_Upscaler` 三个模块的 `MODEL_CACHE` 只写不删，
+  键含 device/precision，换精度就多一份模型常驻。改为单槽淘汰（装新前清旧）。
+  同时 `h3_generator.py` 的清理节点原先只匹配 `h3_upscaler_common`，
+  扫不到 `minimax_h3_latent_upscaler_2d/3d` —— 已改为同时匹配
+  `h3_upscaler` 与 `latent_upscaler`。
+
+- **job-store 的 IO 放大**
+  `pruneJobs()` 逐条 `remove(id)` 删 100 条 = 100 次 608KB 读改写，
+  Windows 上还会撞 EPERM 重试。改为一次 `replaceAll(kept)`，
+  走的是同一个 per-file 串行队列，不绕过并发保护。
+
+- **replace-runner 的重复回读**
+  `emit()` 在 `upsert()` 之后又 `get()` 一次 152KB。每段 2 次、30 段批次 = 60 次
+  重复全量读。改为直接用 `upsert()` 的返回值（契约本就是返回合并后的单条记录）。
+
+### 变更
+
+- **启动参数重排**（`ai-runtime/start-h3.ps1`）
+  - 删 `--lowvram` —— DynamicVRAM 下是空操作（ComfyUI 帮助文本自己写明），
+    留着只会让日志打 `Set vram state to: LOW_VRAM` 误导排查
+  - 加 `--cache-none` —— RAM pressure cache 的 inactive 阈值（32GB）在本机不可达，
+    导致每节点都清缓存+压 pin；H3 每段换提示词，跨 prompt 缓存本无命中率
+  - 加 `--fast-disk`（显式）—— 本机模型在 F: NVMe，自动探测本就为 True
+  - 保留 `--disable-pinned-memory`（治上游 #11775 那条 20-30GB 泄漏）
+  - 保留 `--use-ck-attention`（实测快 15%）
+
+- **`vendor/nanfeng` 重新部署到 ComfyUI**
+  发现 `vendor/nanfeng/h3_generator.py`（134,914 B，v3.0.0 重构后）
+  与 ComfyUI 里实际在跑的版本（144,251 B，仍带 3 个 `if False:` 死分支）
+  是两个不同版本 —— 后者与 `_backup_pre3` 快照只差本次编辑，
+  说明**从未重新部署过**。已用 `deploy-vendor.ps1 -Force -Clean` 部署，
+  补回缺失的 `nodes.py`，31 个注册节点全部核对一致。
+  旧版备份在 `ai-runtime/_node_backups/nanfeng_20261123-095646`。
+
+- **冒烟测试断言同步**
+  三处 `audio_context_length` 断言仍在验旧公式（按 40Hz/24fps 换算），
+  而实现早已改为 `AUDIO_CTX_MIN = 8`（与视频窗口解耦，原因见
+  `replace-runner.js` 的实测注释：ctx=22 会让每段多烧 1000+ 秒）。
+  断言已改为验「恒为 8」。
+
+### 验证
+
+- 冒烟测试 **207/207 全部通过**（含全部 ComfyUI 集成项）
+- 路由一致性：前端 71 条 / 后端 155 条，三方一致
+- 端到端连续生成 4 段：private 内存 `8.02 → 8.71 → 11.61 → 4.54 GB`，回落正常
+- GPU 采样期间 `153.95W / 100%`（故障态是 44W）
+
+### 已知未修（需要单独决策）
+
+- **每段仍重复 staged 66GB**：`ReleaseBeforeConditionLoaders` 与
+  `ReleaseBeforeSampling` 两个屏障节点仍在图中。摘掉预计能把每段
+  3 次 staged 降到 1-2 次，但需长跑验证 OOM 不回归。
+- **文本编码器 25.9GB**：每段完整跑一遍是最大的单项开销。
+  换 NVFP4 版（约 15.7GB）可省 10GB 读取 + 约 1/3 前向时间，
+  只需替换模型文件（`resolveModelNames()` 会自动探测）。
+
+### 关于 cu128（曾误判，已更正）
+
+初版报告称「cu128 导致量化算力腰斩 2.3 倍」——**该结论是冷启动噪声误判，已证伪**。
+用 `torch.utils.benchmark` 稳态测量后：
+
+| 路径 | 耗时（4096 tokens, 5120→13824） |
+|---|---|
+| eager int8_linear（当前在用） | 17.7 ms |
+| cuda 后端（强制启用） | 18.7 ms（无收益） |
+| `torch._int_mm` 原生 int8 | 11.5 ms |
+| 反量化 → bf16 再乘 | 9.4 ms |
+
+进一步查明：`comfy-kitchen` 的 CUDA 后端把 `int8_linear` 的注册条件卡在
+`_C.HAS_CUBLASLT`（**编译期常量**，本机为 False），所以 int8 GEMM 无论
+CUDA 版本都回退 eager；而 cuda 后端相对 eager 多出来的能力只有 3D 网格算子，
+H3 一个都用不到。
+
+**结论：升级 cu130 对本问题收益接近于零，不建议。** 详见 `docs/CU128-ASSESSMENT.md`。
+
+---
+
+## 3.0.0 — 架构重构与全量修复（2026-11-22）
+
+> 一次基于**全量代码审计**（176 文件 / 60,398 行逐行审阅 + 212 次运行时只读探测）
+> 的结构性重构。审计报告见 `_audit/00-总报告.md`（另有 7 份分报告）。
+>
+> 这次改动**不是加功能**，而是把「同一件事写了 3~6 遍」的地方收敛成一处，
+> 让若干类 bug 从"要小心避免"变成"结构上不可能再发生"。
+
+### ⓪ 第二轮深度复查（同日追加）
+
+审计报告（`_audit/12-rev2-api.md`、`13-rev2-services.md`）复查后又修掉 6 个真实缺陷，
+其中 **2 个 P0 会让生成结果是错的**：
+
+- **P0｜`planImageSlots` 返回压缩数组 → 三张参考图丢两张。**
+  南风槽位参数 `图片1..9` 的写法是 `out['图片'+(i+1)] = images[i]` ——
+  **数组下标就是槽位号**。而 `planImageSlots` 返回的是压缩后的列表，
+  于是 fl2va 下 `['c1','c2','c3']` 被写成 图片1/2/3，紧接着 `frameSlots`
+  把 图片1/2 覆盖成首尾帧 → **c1、c2 静默消失**，只有 c3 落在 图片3，
+  而提示词里引用的是 `<Picture 3/4/5>`（三张都要）。
+  实测修复前：三张参考图 → 最终只有 图片3=c3.png，图片4/5 为空。
+  修复：`images` 改为**按槽位号定位的定长 9 数组**，另给 `present` 作为有效列表。
+
+- **P0｜`deriveSubjectsFromShot` 与真实提交相差 2。**
+  它调 `planImageSlots` 时首尾帧传的是空串（等于"没有首尾帧"），
+  于是 fl2va 下算出 `<Picture 1>`，而真实提交是 `<Picture 3>` ——
+  同一镜头，编译出的提示词认为角色是 1 号、实际提交是 3 号，**串脸且不报错**。
+  修复：传 `resolvePrevizArtifacts` 的解析结果。
+
+- **P1｜`/file` 缺 nosniff 与 SVG 强制下载 → 同源存储型 XSS。**
+  `/assets/item` 早就有这两项防护，`/file` 没有。用户把 `.svg` 传进素材库，
+  任何人打开 `/file?path=assets/x.svg` 就在插件同源下执行脚本，
+  而该源上挂着全部写接口（token 可从 `/token` 拿）。实测修复前
+  `GET /file?path=assets/asset_x.svg` → `200 image/svg+xml` 且 body 原样返回。
+
+- **P1｜错误码映射只按 message 正则猜，全部落 500。**
+  `resolveUserPath` 抛的 `NOT_FOUND` / `INLINE_DATA_URL`、剪辑的 `FILE_NOT_FOUND`
+  都变成 500，前端只能显示"服务端炸了"；`BODY_TOO_LARGE` 该是 413。
+  修复：改用 `err.code` → 状态码的显式映射表。
+
+- **P1｜`lora-catalog` 的裸 `step` / `acc` 正则把画风判成加速学生。**
+  加速学生是"单选 + 强度锁 1.0"，误判会**顶掉真正的 DMAD** →
+  4 步跑在未蒸馏原模型上，能出片但质量悄悄崩。
+  实测误判：`art_steps_style`、`step_by_step_anime`、`accelerate_motion_pack`。
+  修复：正则要求成词边界 + 明确语义词（`4step`/`turbo`/`lightx2v`/`dmd`…）。
+
+- **P1｜`accel-plan` 命中子目录时清空 warnings。**
+  `const note = exactFile.dir ? [] : warnings` 逻辑写反了 —— 本机 LoRA 就在
+  `00_turbo/` 下，于是「未知加速方案已回退」这类警告**一句都看不到**。
+  修复：改为追加一条说明，不清空。
+
+另有 4 处一并修掉：
+- `replace-tasks` 的对象字面量有**重复键 `continuation`**（后者覆盖前者），
+  导致"按独立重绘算分段、按续写存盘"——分段表与实际执行链不符；
+- `generator` 的视频/音频用 `.filter(Boolean)` 压缩，让"第 2 段失败"
+  变成"第 3 段前移"，与提示词里的 `<Video 3>` 错位（改为保位）；
+- `job-runner` 的取消早退返回 `undefined`（改为 `{outputs:[],remoteId,cancelled:true}`）；
+- `StoryboardPage` 的视频/音频 tab 可点但选择被丢弃（UI 撒谎）——
+  改为 `AssetPicker kinds={['image']}` 直接不渲染假入口。
+
+**防护**：冒烟测试 177 → **195 项**，新增守卫覆盖上面每一条
+（槽位定位、编号一致性、LoRA 分类、错误码映射、安全头、重复键、路由遮蔽）。
+
+---
+### ① ★ 新增 `host/bridge/` —— H3 桥接层从 services 里独立出来
+
+改造前，「上游南风 V15 长什么样」这件事散在 `host/services/nanfeng/`（8 个文件）
++ `services/h3-prompt.js`（2,142 行）+ `services/prompt-normalizer.js`，
+与素材库、ffmpeg、剪辑这些业务服务平铺在一起。后果是上游改名要改多处、
+业务层反向依赖上游参数表。
+
+现在收进独立一层，**每个子目录只承担一种变化原因**：
+
+```
+host/bridge/
+├─ index.js              门面（业务层唯一 import 点）
+├─ README.md             职责边界 + 上游升级流程
+├─ vendors/nanfeng/      上游节点包镜像（schema / param-docs / graph / presets /
+│                        index / continuation 六个文件）
+├─ prompt/               提示词通道（h3-prompt / prompt-normalizer）
+└─ llm/                  DSH LLM 桥接（dsh-llm / storyboard）
+```
+
+- 业务层 **26 处**对桥接子目录的直接 import 全部改为走门面
+- `services/nanfeng/` 目录删除
+- 门面导出门面符号与 9 个命名空间，`BRIDGE_LAYOUT` 供结构性自检
+- **新增架构守卫**：业务层再直接 import `bridge/vendors|prompt|llm` 会被冒烟测试拦下
+
+### ② ★ 新增 `host/services/ref-images.js` —— 参考图编号四合一（修复 P0）
+
+「一张镜头卡到底提交哪些参考图、各是第几张」原来被写了 **4 遍**
+（`generator.resolveRefImages`、`render-plan.buildRenderPlan`、
+`shot-context.resolvePictureIndices`、`api.deriveSubjectsFromShot`），
+顺序规则**不完全一致**，于是产生了真实事故：
+
+> 预览显示 `<Picture 1>` 是角色卡、`<Picture 2>` 是道具，
+> 实际提交时角色卡排到第 2 位 —— 模型把道具当成了人。
+
+现在只有一份实现，并修掉两个确证缺陷：
+
+- **P0**：`fl2va` + 参考图时首尾帧占用 `图片1/2`，而参考图没有剔除被占槽位，
+  `<Picture N>` 与实际槽位错位（3 图时指向道具图，2 图时产生悬空引用）
+- **P1**：模式别名归一漏了历史短名 `i2v`/`fl2v` → 首尾帧**不占槽位 → 静默丢失**
+
+### ③ ★ 新增 `host/config-reader.js` —— 消灭「配置分裂脑」
+
+服务工厂原来同时收 `cfg`（启动快照）和 `getCfg`（每次现取），
+于是同一进程里有两套配置：改 `dataDir` 之后「一半数据在新目录、一半在旧目录」，
+用户看到「项目还在、内容空了」。
+
+现在规则只有一条：**服务只允许持有 `getCfg`**。`configReader()` 统一写法，
+`findConfigSnapshotReads()` 提供扫描器，冒烟测试据此拦住回退。
+
+顺带修掉：`h3-workshop.js` 8 处用闭包 `cfg`、`canvas-agent` 的权限文件路径
+模块级一次性缓存（改 dataDir 后仍读写旧目录）。
+
+### ④ ★ `store/json-store.js` 重写 —— 修掉一条丢整份数据的路径（P0）
+
+旧实现在 Windows EPERM 重试里**先 `fs.rmSync(file)` 删掉目标文件**再 rename。
+8 次重试全失败时目标已被删、随后 tmp 也被删 → `jobs.json` / `projects.json` /
+`shots.json` **整份归零且无备份**。修并发写引入的新故障比原故障更严重。
+
+现在：重试只针对同一 tmp、**全程不删目标**；始终失败时退回覆盖写（非原子但
+不会两份都没了）；写前保留 `.bak`；读盘去掉 `existsSync` 的 TOCTOU；
+同步重试改用 `Atomics.wait` 真睡眠（原来 `while(Date.now()<until){}` 最长冻结
+事件循环 0.7 秒，连带 SSE 与生成轮询全部停摆）；新增 `flushJsonStore()`。
+
+### ⑤ ★ `host/api/index.js` 拆分（3,149 → 2,343 行）
+
+单文件原来住着 5 种职责，`tools.js` 反向依赖 REST 层。现在拆出 7 个模块：
+
+| 文件 | 职责 |
+|---|---|
+| `http.js` | body 解析 / sendJson / Range / multipart |
+| `shots.js` | 镜头卡 CRUD |
+| `prompt-compile.js` | `compilePrompt` / `deriveSubjectsFromShot` |
+| `projects.js` | 项目摘要投影 / 可写字段白名单 |
+| `monitor.js` | `/monitor` 负载 |
+| `replace-tasks.js` | 换人任务创建 |
+| `archive.js` | 产物归档 / 字体 / 可读路径白名单 |
+
+### ⑥ ★ 新增 `GET /jobs/:id` + `GET /jobs?fields=list`
+
+实测 `GET /jobs` 单次响应 **417,415 字节**（134 条任务全量，含 prompt 全文 +
+221 参数快照）。前端有 4 处「拉全量再 find」的轮询，画布单节点执行 30 分钟
+≈ 286 MB 流量。
+
+- 新增 `/jobs/:id`：单任务查询 **8,099 字节**（省 98%）
+- `/jobs?fields=list`：轻量投影 **40,057 字节**（省 90%，5.2×）
+- 前端 4 处改为单任务查询 / 轻量投影
+- ⚠️ 路由正则显式排除 `batch-progress`（否则工具箱「批量进度」会被 404）
+
+### ⑦ vendor：修帧数下限不一致 + 删死代码
+
+- **P1**：`duration_to_frames` **没有 124 帧下限**，而宿主 `h3Length` 有 →
+  2 秒镜头 vendor 出 56 帧、宿主规划 124 帧，**参考视频比成片长 121%**，
+  动作演一半断掉。现在两侧同值（124–362）
+- **P1**：一采画布误读二采参数 `H3潜空间对齐`（默认 2 → 864×480，设 32 →
+  1024×512，token +26.7%）。一采固定 `align=2`
+- 删除 `nodes.py`（287 行，从未被 `__init__.py` import，3 个节点从未注册）
+- 删除 14 处不可达分支（`if False` / `not is_v81` 系列），含 2 处悬空引用
+  （`NanFengH3RebuildAVLatent` 节点无定义、`_select_face_refine_turbo_lora`
+  函数无定义）
+- `h3_generator.py` 2,402 → 2,227 行
+
+### ⑧ 前端：修 3 个 P0 与一批 P1
+
+- **P0**：RenderPage 的 `loadShots` 无条件把选中镜头改成 `updatedAt` 最新的那个
+  → 编辑 A 时 Agent 改 B，界面跳到 B、未保存内容丢失。现在默认保留当前选中
+- **P0**：RenderPage 回填 effect 的 deps 含 `shots` → 任何列表刷新都把用户
+  正在输入的提示词**静默回滚**。现在只响应 `shotId`
+- **P0**：CanvasArea「重新载入项目 / 重试」两个按钮**完全无效**（effect deps
+  不变）。现在按钮 `setReloadTick` 进 deps；顺带修了 hydration 解除定时器
+  未清理（切项目时把半加载画布写回后端）
+- **P1**：`request()` 加默认超时（30s，长任务路径单独放宽）与
+  403 `WRITE_TOKEN_REQUIRED` 自动重取 token 重试
+- **P1**：`events.ts` 改可订阅连接状态（`useSyncExternalStore`）——
+  原来 SSE 徽章**永远显示离线**
+- **P1**：补上 SettingsPage 快捷键表里早就写着却从未实现的 Delete / F
+- **P1**：store 的 error 改为 `unknown`（原来降级成 string →
+  `describeError` 恒显示「发生未知错误」）
+- **P1**：ContinuationPanel 不再整体替换 `nanfeng` 对象（原来会**静默清空
+  用户的 LoRA 栈**）
+
+### ⑨ 清理
+
+- 删除 `store/image-pool.js`（113 行）：前端从不产生 `data:image` 内联图
+  （画布用 `blob:` + `/assets/item`），且其启发式会把 aiTextNode 的长正文
+  误判成图片、搬进 pool 后**正文静默消失**
+- 删除 `tools/` 里 8 个一次性脚本（`build-prompts` / `_e2e-*` / `fix-negations*` /
+  `cont-plan-probe` / `cost-model`）
+- `.gitignore` 补 `data/replace/` 等 11 条规则（原来 77 个文件、41.88 MB
+  运行期产物被提交进仓库，且运行时持续写入让 `git status` 永远脏）
+
+### ⑩ 防护：冒烟测试从 177 → 187 项，新增 10 项架构守卫
+
+守的不是功能，是**结构性约束**——防止以后又不小心退回旧形态：
+
+| 守卫 | 守什么 |
+|---|---|
+| 桥接层门面完整 | 9 个命名空间 + 4 个直出符号 + `BRIDGE_LAYOUT` |
+| `services/nanfeng` 已迁走 | 旧目录不能再出现 |
+| 业务层只走门面 | 不允许直接 import `bridge/vendors\|prompt\|llm` |
+| 参考图编号唯一实现 | `planImageSlots` 只允许定义在 `ref-images.js` |
+| 无 cfg 快照读 | `findConfigSnapshotReads` 扫描 services 层 |
+| 全仓相对 import 可解析 | 搬文件最容易断这里 |
+| Host 校验用严格 IP | `127.0.0.1.evil.com` 必须被拒 |
+| 原子写不删目标文件 | 写路径不能出现 `rmSync(file)` |
+| 前端 request 带超时 | `DEFAULT_TIMEOUT_MS` + 403 重试 |
+| SSE 连接状态可订阅 | `useSyncExternalStore` |
+
+### 数字校正（全仓 60+ 处陈旧文案）
+
+| 项 | 旧 | 实 |
+|---|---|---|
+| 南风参数 | 217（60+ 处） | **221**（差额 4 在 I 组换人加噪参数；`GROUPS.I.count` 早已是 11，只有文件头注释没改） |
+| REST 路由 | 92 / 102 | **115** 精确 (method,path) + 5 前缀族 + 7 参数化族 |
+| Agent 工具 | 13（README）/ 14（architecture） | **14** |
+| 前端页面 | 12 | **15 个文件 / 14 条路由** |
+| 冒烟测试 | 111 / 165 | **187** |
+
+---
+## 2.19.0 — 分镜按段切分（2026-11-22）
+
+> 用户实测：49 秒视频切 7 段，提示词写了 7 个 `[Shot N]`，
+> 但每段都收到完整 7 个 —— 每段都在演整场戏。
+
+### ① 根因：提示词从不按段切分
+
+`replace-runner.js` 的 `segmentPrompt` 只做一件事：续写时插身份锚定句。
+它**从不切割 `[Shot N]`** —— 整份提示词原样发给每一段。
+
+实测证据（用户那次 7 段任务）：
+
+```
+段 1 | 提示词 1912 字 | [Shot] 7 个: Shot 1..7
+段 2 | 提示词 2155 字 | [Shot] 7 个: Shot 1..7
+```
+
+模型看到「7 段戏全都要演」，自然把动作挤成一团。
+**这不是 DMAD 的问题** —— DMAD 只影响采样质量，不影响提示词内容。
+
+### ② 修法：行过滤，不做块切分
+
+前提约定（用户明确）：**`[Shot N]` 一定独占一行，该段内容都在这一行内，不跨行。**
+
+于是切分规则极简：
+
+> **删掉不属于本段的 `[Shot N]` 行，其余一个字节都不动。**
+
+- `[Shot N]` 行 → 该段专属动作
+- 其余所有行（触发词、身份绑定、通用要求、防漂移声明）→ **每段都带**
+
+### ③ 踩过的坑：块切分导致段 1~6 各丢 5 条约束
+
+第一版按「`[Shot N]` 到下一个 `[Shot N]` 之间的所有文字」切块。
+用户把 7 个 Shot 写成连续 7 行，后面跟 6 行通用要求 ——
+这些行被算进 `[Shot 7]` 的内容里，于是：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| 段 1–6 | **各丢 5 条**（只有段 7 有）| 12/12 全保留 |
+| 段 7 | 完整 | 完整 |
+
+丢的正是画质、表情、服装细节这些约束 —— 等于没写。
+
+### ④ 重号也能正确分派
+
+用户手误写成两个 `[Shot 6]` 时，**按行下标**定位而非按编号匹配：
+段 6 拿第一个、段 7 拿第二个，不会两个都塞进同一段。
+
+### ⑤ 配不上时不瞎猜
+
+| 情况 | 策略 |
+|---|---|
+| M == N | `one-to-one`，段 i 取第 i 行 |
+| M > N 且整除 | `grouped`，每段 M/N 个 |
+| 其余 | `whole`，**整份发** + 明确警告 |
+
+`whole` 的取舍：与其瞎猜配对关系（比不切更糟），不如保留全文并让用户看到警告。
+
+### ⑥ 排障可见性
+
+每段的 `job.params.shotSplit` 记录切分策略与实得 Shot 编号：
+
+```js
+{ mode: 'one-to-one', shots: [4] }
+```
+
+`mode: 'whole'` 一眼看出「这段收到的是整份提示词」。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 用户真实提示词（7 段 7 镜）| 每段通用要求 **12/12 全保留** |
+| 每段只含 1 行 `[Shot]` | ✅ |
+| 重号 `[Shot 6]`×2 | 段 6/段 7 各取其一，不串 |
+| 3 Shot 切 2 段（不整除）| `whole` + 警告 |
+| 4 Shot 切 2 段（整除）| `grouped`，段 1 得 [1,2] |
+| 检测重号 / 缺号 | ✅ |
+| 冒烟测试 | **207 / 207** |
+
+新增 3 条回归测试。
+
+---
+
 ## 2.18.1 — 翻译覆盖全字段 + 占位符校验（2026-11-21）
 
 > 首次实测本地 7B 翻译后的两处修正。

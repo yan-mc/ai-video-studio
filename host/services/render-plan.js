@@ -23,6 +23,8 @@
  */
 
 import { H3_MAX_REF_IMAGES, H3_MAX_TOTAL_REFS, cardImagesFor } from './character-vault.js';
+// 参考图编号的唯一实现 —— 预览与真实提交必须同源
+import { planImageSlots } from './ref-images.js';
 
 /** 参考图的来源分类（决定优先级与提示词里的说明方式） */
 export const REF_SOURCES = Object.freeze({
@@ -147,7 +149,7 @@ export function decideRefImageSize(requested, vram) {
  * @param {object} opts
  * @param {object[]} [opts.cards]        已解析的角色卡（含 resolvedImages）
  * @param {string[]} [opts.manualImages] 手工参考图（rel 或绝对路径）
- * @param {object}   [opts.previz]       { firstRel, lastRel }
+ * @param {object}   [opts.previz]       { firstFramePath, lastFramePath }（与 store/models.js 的镜头卡字段一致）
  * @param {string[]} [opts.sceneImages]  场景/道具参考
  * @param {Array<{rel:string,name?:string,hasAudio?:boolean}>} [opts.videos]
  *        参考视频（rel 指向素材库里的视频文件）
@@ -162,6 +164,8 @@ export function buildRenderPlan({
   videos = [],
   audios = [],
   refImageSize = 'match',
+  /** 镜头的真实生成模式。首尾帧占不占槽位取决于它（见 planImageSlots）。 */
+  mode = null,
   vram = null,
 } = {}) {
   const images = [];
@@ -195,8 +199,8 @@ export function buildRenderPlan({
   }
 
   // ---- 2) 预演首尾帧（优先级仅次于角色卡，它们有明确构图约束）----
-  if (previz?.firstRel) pushImage(previz.firstRel, REF_SOURCES.PREVIZ_FIRST);
-  if (previz?.lastRel) pushImage(previz.lastRel, REF_SOURCES.PREVIZ_LAST);
+  if (previz?.firstFramePath) pushImage(previz.firstFramePath, REF_SOURCES.PREVIZ_FIRST);
+  if (previz?.lastFramePath) pushImage(previz.lastFramePath, REF_SOURCES.PREVIZ_LAST);
 
   // ---- 3) 手工参考图 ----
   for (const rel of manualImages) pushImage(rel, REF_SOURCES.MANUAL);
@@ -363,6 +367,59 @@ export function buildRenderPlan({
     warnings.push(`参考文件合计 ${totalRefs} 个，超过保守上限 ${H3_MAX_TOTAL_REFS}`);
   }
 
+
+  // ---- 7) 模式推断 ----
+  //  Ref2VA 能带全部四类参考（图/视频/音频），是本工程的主力模式。
+  //  只要有任何参考就建议 ref2va；纯首尾帧走 FL2VA/I2VA；什么都没有才是 T2VA。
+  const hasRefShots = images.some((x) => x.source === REF_SOURCES.CARD_SHEET
+    || x.source === REF_SOURCES.CARD_ORIGIN
+    || x.source === REF_SOURCES.MANUAL
+    || x.source === REF_SOURCES.SCENE);
+  const hasFirst = images.some((x) => x.source === REF_SOURCES.PREVIZ_FIRST);
+  const hasLast = images.some((x) => x.source === REF_SOURCES.PREVIZ_LAST);
+  const hasVideo = videoList.length > 0;
+  const hasAudio = audioList.length > 0 || videoList.some((v) => v.hasAudio);
+  let suggestedMode = 'ref2va';
+  if (hasRefShots || hasVideo || hasAudio) suggestedMode = 'ref2va';
+  else if (hasFirst && hasLast) suggestedMode = 'fl2va';
+  else if (hasFirst || hasLast) suggestedMode = 'i2va';
+  else suggestedMode = 't2va';
+
+  /**
+   * ============================================================================
+   * 把「预览编号」对齐到「真实提交编号」（历史 P0）
+   * ============================================================================
+   *
+   * ⚠️ 这里原来直接把 `images[i].index = i + 1` 当作 `<Picture N>`。
+   *    但真实提交走的是 `ref-images.planImageSlots`：**首尾帧会占用
+   *    图片1 / 图片2**，参考图从后面的槽位开始填。
+   *
+   *    实测（fl2va，1 张角色卡 + 1 张手工图 + 首尾帧）：
+   *      真实提交：card.png = <Picture 3>、manual.png = <Picture 4>
+   *      本函数：  card.png = <Picture 1>、manual.png = <Picture 2>
+   *
+   *    于是渲染页显示的编号与提示词里的编号**整体差 2** ——
+   *    用户以为 <Picture 1> 是角色，模型看到的是首帧。串脸且不报错。
+   *
+   * 现在：参考图部分用 `planImageSlots` 重算 index；首尾帧单独列出，
+   *      不再混进 images 数组（它们不是"参考图"，是槽位占用者）。
+   */
+  const refOnly = images.filter((x) => x.source !== REF_SOURCES.PREVIZ_FIRST
+    && x.source !== REF_SOURCES.PREVIZ_LAST);
+  const firstRel = previz?.firstFramePath ?? '';
+  const lastRel = previz?.lastFramePath ?? '';
+  /** 用**镜头卡的真实 mode**；调用方没传时才退回推断值。 */
+  const slotMode = mode ?? suggestedMode;
+  const slotPlan = planImageSlots(
+    slotMode,
+    refOnly.map((x) => x.rel),
+    firstRel,
+    lastRel,
+  );
+  refOnly.forEach((x, i) => {
+    // 被槽位规划丢弃的图 index = null（调用方据此判"这张不会提交"）
+    x.index = slotPlan.pictureIndexMap.get(i) ?? null;
+  });
   // ---- 6) 由图片清单反推 subjects（编号来自实际位置）----
   const subjects = [];
   for (const { card } of cardPlans) {
@@ -396,25 +453,13 @@ export function buildRenderPlan({
     });
   }
 
-  // ---- 7) 模式推断 ----
-  //  Ref2VA 能带全部四类参考（图/视频/音频），是本工程的主力模式。
-  //  只要有任何参考就建议 ref2va；纯首尾帧走 FL2VA/I2VA；什么都没有才是 T2VA。
-  const hasRefShots = images.some((x) => x.source === REF_SOURCES.CARD_SHEET
-    || x.source === REF_SOURCES.CARD_ORIGIN
-    || x.source === REF_SOURCES.MANUAL
-    || x.source === REF_SOURCES.SCENE);
-  const hasFirst = images.some((x) => x.source === REF_SOURCES.PREVIZ_FIRST);
-  const hasLast = images.some((x) => x.source === REF_SOURCES.PREVIZ_LAST);
-  const hasVideo = videoList.length > 0;
-  const hasAudio = audioList.length > 0 || videoList.some((v) => v.hasAudio);
-  let suggestedMode = 'ref2va';
-  if (hasRefShots || hasVideo || hasAudio) suggestedMode = 'ref2va';
-  else if (hasFirst && hasLast) suggestedMode = 'fl2va';
-  else if (hasFirst || hasLast) suggestedMode = 'i2va';
-  else suggestedMode = 't2va';
-
   return {
-    images,
+    /** 参考图（**index 已是真实 `<Picture N>`**；null = 不会提交） */
+    images: refOnly,
+    /** 首/尾帧要写的槽位（如 `{ 图片1: first.png }`）—— 它们不是参考图 */
+    frameSlots: slotPlan.frameSlots,
+    /** 因槽位不足被丢弃的参考图 */
+    droppedImages: slotPlan.dropped,
     videos: videoList,
     audios: audioList,
     subjects,

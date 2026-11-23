@@ -30,6 +30,9 @@ import { api, describeError } from '../api/client';
 import { Alert, Badge, Button, Field, Input, Page, Panel, Select, Spinner, useToast } from '../ui';
 import { AssetPicker, type AssetItem, type PickedMedia } from '../components/AssetPicker';
 
+/** 智能分镜不用视频/音频；给 AssetPicker 一个只读空数组占位（kinds 已把入口去掉） */
+const EMPTY_MEDIA: PickedMedia[] = [];
+
 interface StoryboardResult {
   mode: string;
   count: number;
@@ -44,8 +47,6 @@ export function StoryboardPage() {
 
   const [assets, setAssets] = useState<AssetItem[]>([]);
   const [images, setImages] = useState<PickedMedia[]>([]);
-  const [videos] = useState<PickedMedia[]>([]);
-  const [audios] = useState<PickedMedia[]>([]);
 
   const [meta, setMeta] = useState<{
     modes: Record<string, string>;
@@ -137,11 +138,18 @@ export function StoryboardPage() {
           <AssetPicker
             assets={assets}
             images={images}
-            videos={videos}
-            audios={audios}
+            videos={EMPTY_MEDIA}
+            audios={EMPTY_MEDIA}
             onImages={setImages}
+            /**
+             * ⚠️ 智能分镜的接口只接受参考图（imageRels）。
+             *    旧代码这里传的是 () => {} —— 视频/音频 tab 点得动、
+             *    选了却什么都不会发生，是**UI 在撒谎**。
+             *    现在用 kinds={['image']} 把假入口整个去掉。
+             */
             onVideos={() => {}}
             onAudios={() => {}}
+            kinds={['image']}
             onRefresh={() => void loadAssets()}
           />
 

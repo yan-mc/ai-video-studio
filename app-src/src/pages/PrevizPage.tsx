@@ -14,7 +14,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { api, describeError } from '../api/client';
-import { Alert, Badge, Button, Field, Icon, Page, Panel, Select, useT } from '../ui';
+import { Alert, Badge, Button, Field, Icon, Page, Panel, Select, useT, useToast } from '../ui';
 import { fileUrl } from '../api/url';
 import { useProjectStore } from '../store/project';
 import type { BlenderHealth, BlenderRenderResult } from '../api/types';
@@ -54,6 +54,7 @@ function videoRel(v: string | { rel?: string } | null | undefined): string {
 
 export function PrevizPage() {
   const t = useT();
+  const toast = useToast();
   const currentProjectId = useProjectStore((s) => s.currentProjectId);
   const loadProjects = useProjectStore((s) => s.loadProjects);
   const projects = useProjectStore((s) => s.projects);
@@ -188,8 +189,19 @@ export function PrevizPage() {
    * 语义：顶部插入（保证最新渲的排在 视频1，即 <Video 1>），去重，最多 3 条。
    */
   async function attachAsReference(r: BlenderRenderResult | null) {
-    if (!r?.rel) { setErr('这只产物还没有可用的相对路径'); return; }
-    if (!currentProjectId || !shotId) { setErr('先选项目和镜头'); return; }
+    /**
+     * ⚠️ 失败必须用 toast，不能只 `setErr`。
+     *
+     * 渲染成功后自动挂载这条路径在 `render()` 内部，此时页面已经滚到预览区，
+     * 而错误条只在页面顶部 —— 用户根本看不到，以为"视频渲好了也挂上了"，
+     * 结果镜头卡里没有任何参考视频（Ref2VA 的 <Video 1> 静默失效）。
+     */
+    if (!r?.rel) { setErr('这只产物还没有可用的相对路径'); toast.error('参考视频挂载失败：产物没有相对路径'); return; }
+    if (!currentProjectId || !shotId) {
+      setErr('先选项目和镜头');
+      toast.error('参考视频挂载失败：还没选项目或镜头');
+      return;
+    }
     setAttaching(true);
     setErr('');
     try {
@@ -210,6 +222,7 @@ export function PrevizPage() {
       await loadShots(currentProjectId);
     } catch (e) {
       setErr(describeError(e));
+      toast.error(`参考视频挂载失败：${describeError(e)}`);
     } finally {
       setAttaching(false);
     }

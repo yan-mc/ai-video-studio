@@ -12,6 +12,7 @@ import path from 'node:path';
 import { assets, ASSET_TYPES } from '../store/models.js';
 import { safeId, safeJoin } from '../security.js';
 import { loadConfig } from '../config.js';
+import { configReader } from '../config-reader.js';
 
 const ALLOWED_EXT = new Set([
   '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.tif', '.tiff',
@@ -31,7 +32,7 @@ const KIND_BY_EXT = {
   doc: ['.json', '.txt', '.md'],
 };
 
-export function createAssetService({ cfg, getCfg = loadConfig }) {
+export function createAssetService({ getCfg = loadConfig } = {}) {
   /**
    * 配置访问器。
    *
@@ -41,7 +42,7 @@ export function createAssetService({ cfg, getCfg = loadConfig }) {
    *    "项目列表在、项目内容空"，且没有任何报错。
    *    这里每次现取，保证全进程看到同一份配置。
    */
-  const C = () => (typeof getCfg === 'function' ? getCfg() : cfg);
+  const C = configReader(getCfg);
   function assetRootDir() {
     const d = path.join(C().dataDir, 'assets');
     fs.mkdirSync(d, { recursive: true });

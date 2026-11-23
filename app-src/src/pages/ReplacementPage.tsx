@@ -650,9 +650,20 @@ export function ReplacementPage() {
       await loadTasks();
       setActiveId(id);
 
+      /**
+       * ⚠️ 创建成功 ≠ 执行成功。旧实现把 `replaceRun` 放在同一个 try 里，
+       *    一旦它抛错就落进下面的 catch，而 catch 只 toast 一句错误 ——
+       *    前半句"已创建"的 toast 还在屏幕上，用户看到的是"成功"。
+       *    现在执行失败单独提示，并明确"任务已创建但没跑起来"。
+       */
       if (startNow && id) {
-        await api.replaceRun(id);
-        toast.ok('已开始执行');
+        try {
+          await api.replaceRun(id);
+          toast.ok('已开始执行');
+          void loadTasks();
+        } catch (runErr) {
+          toast.error(`任务已创建，但执行未能启动：${describeError(runErr)}`);
+        }
       }
     } catch (e) {
       toast.error(describeError(e));

@@ -86,7 +86,7 @@ if bool(kwargs.get("启用H3潜空间放大二采", False)):
     raise ValueError("V15 潜空间续写要求前后采样画布相同，请关闭潜空间放大二采；像素域RTX超分不受影响。")
 ```
 
-插件侧同口径（`host/services/nanfeng/index.js:356-364` 的 `CONSTRAINT_RULES`），
+插件侧同口径（`host/bridge/vendors/nanfeng/index.js` 的 `CONSTRAINT_RULES`（本文写作时该文件还在 `host/services/nanfeng/`，现已迁入 bridge）），
 好处是在提交 GPU 之前就报错。
 
 ## 那有没有「合法」的用法？

@@ -9,6 +9,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { isLoopbackHostname } from './security.js';
 
 const PLUGIN_ROOT_FOR_CONFIG = path.resolve(import.meta.dirname, '..');
 const CONFIG_FILE = process.env.DSH_JZ_CONFIG_FILE
@@ -31,7 +32,15 @@ const DEFAULTS = Object.freeze({
   // ComfyUI 工作流模板目录。空 = 自动推导为 <插件根>/data/workflows
   // （模板随插件分发，**不跟随 dataDir**；见 services/workflow-paths.js）
   workflowDir: '',
-  comfyUrl: 'http://127.0.0.1:8188',
+  /**
+   * ComfyUI 地址。
+   *
+   * ⚠️ 真正决定连哪个端口的是 `ai-runtime/.comfy-port`（由 `start-h3.ps1` 启动后写入），
+   *    `resolveComfyUrl()` 的优先级是：环境变量 > 端口文件 > 本配置 > 常见端口探测。
+   *    所以这里只是**兜底默认值**，必须与 `start-h3.ps1` 的默认端口一致（8488），
+   *    否则用户会看到"配置写 8188、实际跑 8488"这种改了没反应的僵尸设置。
+   */
+  comfyUrl: 'http://127.0.0.1:8488',
   /**
    * 单任务等待超时（分钟）。默认 120 = 2 小时。
    *
@@ -153,24 +162,29 @@ function readJsonSafe(file, fallback) {
 export function loadConfig() {
   if (cache) return cache;
   const raw = readJsonSafe(CONFIG_FILE, {});
-  const merged = { ...DEFAULTS, ...pick(raw, WRITABLE_CONFIG_KEYS) };
+  cache = loadConfigDefaults(raw);
+  return cache;
+}
 
-  /**
-   * ⚠️ dataDir 的**可移植性**修正。
-   *
-   * `data/config.json` 会被写进实际路径（本机是 `F:\AI视频\dsh-jiuzhang-studio\data`）。
-   * 仓库克隆到别的机器、或整个目录被搬走之后，那个绝对路径就指向一个
-   * 不存在的盘 —— 而 `loadConfig()` 不校验存在性，启动时
-   * `fs.mkdirSync(c.dataDir, { recursive: true })`（host/index.js）
-   * 会试图在别的盘上建目录，或者直接 ENOENT，用户完全看不出原因。
-   *
-   * 规则：只有当配置里的 dataDir **确实存在**时才采用它；否则回退到
-   * `<插件根>/data`。这样"搬家/clone 后开箱即用"，而用户显式指定一个
-   * 已存在的自定义目录仍然被尊重。
-   *
-   * 注意只能改 dataDir：`ffmpegDir` / `workflowDir` 不在 WRITABLE_CONFIG_KEYS 里，
-   * 本来就不会从文件读入。
-   */
+/**
+ * 把落盘的（只含白名单键的）对象合并成运行时配置（含 DEFAULTS 与可移植性修正）。
+ *
+ * ⚠️ `dataDir` 的**可移植性**修正只发生在内存里：
+ *
+ * `data/config.json` 会被写进实际路径（本机是 `F:\AI视频\dsh-jiuzhang-studio\data`）。
+ * 仓库克隆到别的机器、或整个目录被搬走之后，那个绝对路径就指向一个
+ * 不存在的盘 —— 启动时 `fs.mkdirSync(c.dataDir, { recursive: true })` 会
+ * 试图在别的盘上建目录，或者直接 ENOENT，用户完全看不出原因。
+ *
+ * 规则：只有当配置里的 dataDir **确实存在**时才采用它；否则回退到
+ * `<插件根>/data`。这样"搬家/clone 后开箱即用"，而用户显式指定一个
+ * 已存在的自定义目录仍然被尊重。
+ *
+ * ⚠️ 这个回落**绝不能写回文件**（`saveConfig` 只写白名单键 + 文件里的原始 dataDir），
+ *    否则一次无关的 `POST /config {theme}` 就会把用户的自定义目录永久覆盖掉。
+ */
+function loadConfigDefaults(raw) {
+  const merged = { ...DEFAULTS, ...pick(raw, WRITABLE_CONFIG_KEYS) };
   const configuredDir = merged.dataDir;
   if (configuredDir && path.resolve(configuredDir) !== path.resolve(DEFAULT_DATA_DIR)) {
     let ok = false;
@@ -178,7 +192,21 @@ export function loadConfig() {
     if (!ok) merged.dataDir = DEFAULT_DATA_DIR;
   }
 
-  cache = merged;
+  /**
+   * `comfyUrl` 的 SSRF 校验必须在**读路径**也做一次。
+   *
+   * 只在 `sanitizeConfigPatch`（写路径）上校验是不够的：手改 data/config.json、
+   * 或任何不经过 `POST /config` 的落盘途径，都能把任意 URL 直接送进运行时配置，
+   * 而后端会拿它主动发请求（health / vram / submit / upload）。
+   * 校验失败时回落到默认值并 warn —— 让"读入的配置一定合法"成为不变量。
+   */
+  try {
+    merged.comfyUrl = validateComfyUrl(merged.comfyUrl) || DEFAULTS.comfyUrl;
+  } catch (e) {
+    console.warn(`[jiuzhang] config.json 里的 comfyUrl 不合法，已回落到默认值：${e.message}`);
+    merged.comfyUrl = DEFAULTS.comfyUrl;
+  }
+
   return merged;
 }
 
@@ -187,15 +215,38 @@ export function resetConfigCache() { cache = null; }
 
 export function saveConfig(patch) {
   const current = loadConfig();
-  const next = { ...current, ...pick(patch, WRITABLE_CONFIG_KEYS) };
+  const merged = { ...current, ...sanitizeConfigPatch(patch) };
+  /**
+   * ⚠️ 只写**白名单键**，不写 `current` 里的推导/回落值。
+   *
+   * 两个真实事故都来自"全量写盘"：
+   *   1) `dataDir` 在 loadConfig 里做「不存在就回落到 <插件根>/data」的**内存**修正，
+   *      一旦被全量写盘，用户原来的自定义目录就**永久丢失**（重启也不会回来，
+   *      因为文件里已经是回落值）。用户可能只是改了个主题色。
+   *   2) `ffmpegDir` / `workflowDir` 等不可写键会出现在 config.json 里，
+   *      用户照文件改却不生效（读取时被白名单过滤），形成"改了没反应"的诱饵。
+   *
+   * 现在文件里出现的键 == 可改的键，`dataDir` 的回落永远只活在内存里。
+   */
+  const next = {};
+  for (const key of WRITABLE_CONFIG_KEYS) {
+    if (key in merged) next[key] = merged[key];
+  }
+  // 保留原始（未被回落）的 dataDir：它不在 patch 里时，必须继续用文件里的原值
+  if (!('dataDir' in patch && patch.dataDir !== undefined)) {
+    const raw = readJsonSafe(CONFIG_FILE, {});
+    const rawDir = typeof raw?.dataDir === 'string' ? raw.dataDir.trim() : '';
+    if (rawDir) next.dataDir = rawDir;
+    else delete next.dataDir;
+  }
   const dir = path.dirname(CONFIG_FILE);
   fs.mkdirSync(dir, { recursive: true });
   const tmp = CONFIG_FILE + '.' + process.pid + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(next, null, 2), 'utf8');
   fs.renameSync(tmp, CONFIG_FILE);        // 原子替换
-  cache = next;
-  notifyConfigChange(next);
-  return next;
+  cache = { ...loadConfigDefaults(next) };
+  notifyConfigChange(cache);
+  return cache;
 }
 
 /**
@@ -248,14 +299,14 @@ export function validateComfyUrl(raw) {
   if (u.protocol !== 'http:' && u.protocol !== 'https:') {
     throw new Error(`INVALID_COMFY_URL: 只支持 http/https，收到 ${u.protocol}`);
   }
-  const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  const isLoopback = host === 'localhost'
-    || host === '::1'
-    || host === '0.0.0.0'
-    || /^127\./.test(host);
-  if (!isLoopback) {
+  const host = u.hostname.replace(/^\[|\]$/g, '');
+  // ⚠️ 必须用 security.js 的**严格四段**判定（全仓唯一实现）。
+  //    这里曾用 `/^127\./`，于是 `127.0.0.1.evil.com` / `127.evil.com` 都能通过，
+  //    后端随后拿这个 URL 主动发请求 → SSRF 出口。
+  //    也不接受 `0.0.0.0`（"任意地址"不是本机）。
+  if (!isLoopbackHostname(host)) {
     throw new Error(
-      `INVALID_COMFY_URL: 只允许本机地址（localhost / 127.x / ::1），收到 ${host}。`
+      `INVALID_COMFY_URL: 只允许本机地址（localhost / 127.x.x.x / ::1），收到 ${host}。`
       + '需要连远程 ComfyUI 请用环境变量 DSH_COMFY_URL 指定。',
     );
   }

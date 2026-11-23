@@ -14,6 +14,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { runProcess, resolveFfmpeg, resolveFfprobe } from './ffmpeg-tools.js';
 import { resolveUserPath } from '../security.js';
+import { loadConfig } from '../config.js';
+import { configReader } from '../config-reader.js';
 import { readWorkflow, resolveWorkflowFile } from './workflow-paths.js';
 import { h3Length, resolutionFor, assets as assetStore } from '../store/models.js';
 
@@ -137,14 +139,14 @@ export function extractAssets(segments) {
  * 注意：`root` 参数**已不再需要**（历史上用来拼 workflows 路径，现在统一走
  * services/workflow-paths.js）。保留参数是为了不破坏既有调用点，但不再读取它。
  */
-export function createH3Workshop({ cfg, getCfg } = {}) {
+export function createH3Workshop({ getCfg = loadConfig } = {}) {
   /**
    * 读配置：优先用 getCfg（每次现取），退回启动快照。
    *
    * ⚠️ 历史缺陷：这里以前只用闭包 `cfg` —— 启动快照。用户在设置页改了
    * dataDir 之后，本模块仍然读写旧目录（"项目还在、内容空了"那类现象）。
    */
-  const config = () => (typeof getCfg === 'function' ? getCfg() : cfg);
+  const config = configReader(getCfg);
 
   /**
    * 目录扫描：列出可分析的文本文件。
@@ -334,7 +336,7 @@ export function createH3Workshop({ cfg, getCfg } = {}) {
   let filmTask = { status: 'idle', progress: 0, message: '' };
 
   function filmStatus() {
-    return { ...filmTask, ffmpeg: fs.existsSync(resolveFfmpeg(cfg)) ? 'ready' : 'missing' };
+    return { ...filmTask, ffmpeg: fs.existsSync(resolveFfmpeg(config())) ? 'ready' : 'missing' };
   }
 
   /**
@@ -345,14 +347,14 @@ export function createH3Workshop({ cfg, getCfg } = {}) {
     const inputs = Array.isArray(body.inputs) ? body.inputs : [];
     if (!inputs.length) throw new Error('NO_INPUTS');
     const outRel = body.output || `film_${Date.now()}.mp4`;
-    const outputsDir = path.join(cfg.dataDir, 'outputs');
+    const outputsDir = path.join(config().dataDir, 'outputs');
     fs.mkdirSync(outputsDir, { recursive: true });
     const outAbs = path.join(outputsDir, path.basename(outRel));
 
     filmTask = { status: 'running', progress: 0, message: '准备合成' };
 
     try {
-      const ffmpeg = resolveFfmpeg(cfg);
+      const ffmpeg = resolveFfmpeg(config());
       if (!fs.existsSync(ffmpeg)) throw new Error('FFMPEG_MISSING');
 
       // 写 concat 清单
@@ -368,7 +370,7 @@ export function createH3Workshop({ cfg, getCfg } = {}) {
       //    能让 ffmpeg 去读机器上任何文件（审计实测读到了 data/jobs.json）。
       //    现在统一走 resolveUserPath：绝对路径必须在 dataDir 之内，否则 FORBIDDEN_PATH。
       const lines = inputs.map((p) => {
-        const abs = resolveUserPath({ root: cfg.dataDir, input: p, mustExist: true });
+        const abs = resolveUserPath({ root: config().dataDir, input: p, mustExist: true });
         return `file '${abs.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`;
       });
       fs.writeFileSync(listFile, lines.join('\n'), 'utf8');
@@ -379,7 +381,7 @@ export function createH3Workshop({ cfg, getCfg } = {}) {
       // 可选字幕烧录
       // 同样按 dataDir 解析相对路径（理由同上），并且同样不允许逃出 dataDir。
       const subAbs = body.subtitleFile
-        ? resolveUserPath({ root: cfg.dataDir, input: body.subtitleFile, mustExist: true })
+        ? resolveUserPath({ root: config().dataDir, input: body.subtitleFile, mustExist: true })
         : '';
       if (subAbs && fs.existsSync(subAbs)) {
         args.push('-vf', `subtitles='${subAbs.replace(/\\/g, '/').replace(/:/g, '\\:')}'`);
@@ -390,7 +392,7 @@ export function createH3Workshop({ cfg, getCfg } = {}) {
       try { fs.unlinkSync(listFile); } catch { /* ignore */ }
 
       const bytes = fs.statSync(outAbs).size;
-      const meta = await probe(outAbs, cfg);
+      const meta = await probe(outAbs, config());
       filmTask = { status: 'done', progress: 100, message: '合成完成', output: outAbs, bytes, meta };
       return filmTask;
     } catch (e) {
@@ -467,11 +469,11 @@ export function createH3Workshop({ cfg, getCfg } = {}) {
    *    明明存在的文件。现在统一走 resolveWorkflowFile（见 services/workflow-paths.js）。
    */
   function workflowFile() {
-    return resolveWorkflowFile('h3', cfg);
+    return resolveWorkflowFile('h3', config());
   }
 
   function loadWorkflow() {
-    return readWorkflow('h3', cfg);
+    return readWorkflow('h3', config());
   }
 
   function dispose() { filmTask = { status: 'idle', progress: 0, message: '' }; }

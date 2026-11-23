@@ -20,7 +20,7 @@ version: 1.0.0
 │ ① DSH Host 进程（Node ESM）                                        │
 │    host/index.js         插件入口：注册路由 + 工具 + 启动编排        │
 │    host/tools.js         14 个 studio_* Agent 工具                  │
-│    host/api/index.js     102 条 REST 路由（/jiuzhang/api/*）         │
+│    host/api/index.js     105 精确 + 5 参数化 + 5 前缀族路由（/jiuzhang/api/*）         │
 │    host/services/*       业务服务层（南风桥接 / Blender / 素材 …）    │
 │    host/blender/*.py     Blender 子进程脚本                         │
 └────────────────┬──────────────────────────────────┬───────────────┘
@@ -36,7 +36,7 @@ version: 1.0.0
                  ▼
 ┌───────────────────────────────────────────────────────────────────┐
 │ ③ ComfyUI 0.45.0 + vendor/nanfeng 自定义节点                       │
-│    NanFengH3MultiReferenceGeneratorV15（217 参数巨型节点）          │
+│    NanFengH3MultiReferenceGeneratorV15（221 参数巨型节点）          │
 │      → GraphBuilder 内部展开 ~40 个节点                            │
 │      → H3 模型出片（264×480 … 1472×832）                          │
 └───────────────────────────────────────────────────────────────────┘
@@ -55,30 +55,62 @@ dsh-jiuzhang-studio/
 │  ├─ static.js                 SPA + 静态文件（Range/ETag/301 补斜杠）
 │  ├─ runtime.js                模块级单例（Host 服务挂载）
 │  ├─ tools.js                  14 个 Agent 工具定义
-│  ├─ api/
-│  │  ├─ index.js               REST 路由总表
+│  ├─ config-reader.js          ★ 配置读取约定（configReader / 快照读扫描器）
+│  ├─ api/                      REST 层（路由 + 薄 HTTP 工具，拆成 9 个文件）
+│  │  ├─ index.js               路由分发（handleApi）+ executeBackend
+│  │  ├─ http.js                body 解析 / sendJson / Range / multipart
+│  │  ├─ shots.js               镜头卡 CRUD（listShots / upsertShot / writeShots）
+│  │  ├─ prompt-compile.js      compilePrompt / deriveSubjectsFromShot
+│  │  ├─ projects.js            项目摘要投影 / 可写字段白名单
+│  │  ├─ monitor.js             /monitor 负载
+│  │  ├─ replace-tasks.js       换人任务创建
+│  │  ├─ archive.js             产物归档 / 字体 / 路径白名单
 │  │  └─ events.js              SSE 事件总线
-│  ├─ services/
-│  │  ├─ nanfeng/               ★ 南风桥接层
-│  │  │  ├─ schema.js           217 参数定义（机读约束）
-│  │  │  ├─ param-docs.js       217 参数中文释义 + 有效性标记
+│  ├─ bridge/                   ★★ H3 桥接层（唯一知道「上游长什么样」的地方）
+│  │  ├─ index.js               门面：业务层只 import 这里
+│  │  ├─ README.md              职责边界 + 上游升级流程
+│  │  ├─ vendors/nanfeng/       上游节点包镜像
+│  │  │  ├─ schema.js           221 参数定义（机读约束）
+│  │  │  ├─ param-docs.js       221 参数中文释义 + 有效性标记
 │  │  │  ├─ graph.js            图组装 + 类型强制 + 能力探测
 │  │  │  ├─ presets.js          7 预设 + 3 层合并 + Sigma 序列校验
-│  │  │  ├─ continuation.js     续写批次编排 + 分段规划 + runBatch
-│  │  │  ├─ storyboard.js       智能分镜（加载 skills/prompt/*）
-│  │  │  └─ dsh-llm.js          DSH LLM 桥接（零凭据）
-│  │  ├─ h3-prompt.js           ★ 提示词编译器（2000+ 行，纯代码）
+│  │  │  ├─ index.js            buildShotWorkflow / CONSTRAINT_RULES
+│  │  │  └─ continuation.js     续写批次编排 + 分段规划 + runBatch
+│  │  ├─ prompt/                提示词通道（与参数通道正交）
+│  │  │  ├─ h3-prompt.js        ★ 六段式编译器（2100+ 行，纯代码）
+│  │  │  └─ prompt-normalizer.js 换人提示词规则化
+│  │  └─ llm/                   DSH LLM 桥接
+│  │     ├─ dsh-llm.js          文本 / 视觉调用（零凭据）
+│  │     └─ storyboard.js       智能分镜（装配 skills/prompt/*）
+│  ├─ services/                 业务服务层
+│  │  ├─ ref-images.js          ★★ 参考图编号唯一实现（原 4 份合一）
 │  │  ├─ generator.js           执行器（runH3Nanfeng / runH3Local）
 │  │  ├─ comfy-client.js        ComfyUI 客户端（探测/上传/轮询/取消）
+│  │  ├─ comfy-control.js       ComfyUI 进程启停
+│  │  ├─ comfy-lifecycle.js     批次级拉起/释放
 │  │  ├─ blender-service.js     Blender 子进程编排
 │  │  ├─ character-vault.js     角色卡仓库
-│  │  ├─ breakdown.js           立绘拆解：默认三视图提示词（唯一可编辑输入）
-│  │  ├─ render-plan.js         渲染计划（参考图编号权威）
+│  │  ├─ breakdown.js           立绘拆解：默认三视图提示词
+│  │  ├─ render-plan.js         渲染计划（消费 ref-images 的结果）
 │  │  ├─ shot-context.js        入参准备（REST 与工具共用）
 │  │  ├─ job-runner.js          任务队列 + 并发闸门
+│  │  ├─ job-store.js           jobs.json 串行集合
 │  │  ├─ accel-plan.js          DMAD 加速方案
-│  │  └─ …                      素材/后处理/画布 Agent 等
-│  ├─ store/                    数据模型与存储（projects/shots/models）
+│  │  ├─ lora-catalog.js        LoRA 分类 / 互斥 / 衰减
+│  │  ├─ media-probe.js         ffprobe 探测
+│  │  ├─ edit.js / post.js      剪辑 / 后处理
+│  │  ├─ replace.js / -runner   视频换人
+│  │  ├─ h3-workshop.js         剧本 → 分段 + 成片
+│  │  ├─ h3-image.js            H3-Image 出图
+│  │  ├─ asset-service.js       素材库
+│  │  ├─ extras.js              模板 / 服化道 / 导入 / 日志
+│  │  ├─ canvas-agent.js        画布 17 工具 + 权限位
+│  │  ├─ workflow-paths.js      工作流模板定位
+│  │  ├─ ffmpeg-tools.js        ffmpeg 定位
+│  │  └─ prompt-llm.js          本地翻译（被 bridge/prompt 调用）
+│  ├─ store/                    数据模型与存储
+│  │  ├─ json-store.js          原子写 + 串行队列 + .bak/.corrupt
+│  │  └─ models.js              档位 / 节点 / 资产 / 槽位 / 镜头校验
 │  └─ blender/                  render_shot.py / actions.py / list_actions.py
 │
 ├─ app-src/                     ← ② SPA 源码
@@ -126,9 +158,9 @@ dsh-jiuzhang-studio/
 │  └─ config.json               配置（运行时生成）
 │
 ├─ tools/                       ← 开发工具
-│  ├─ smoke-api.mjs             冒烟测试（105 项）
+│  ├─ smoke-api.mjs             冒烟测试（207 项）
 │  ├─ check-routes.mjs          三方路由一致性
-│  ├─ audit-params.mjs          217 参数有效性审计
+│  ├─ audit-params.mjs          221 参数有效性审计
 │  └─ preview-server.mjs        独立预览服务器
 │
 ├─ docs/                        审查报告与方案
@@ -157,7 +189,7 @@ dsh-jiuzhang-studio/
       → runH3Nanfeng()
           ├ planForShot(accelPlan)      DMAD → LoRA/sampler/steps
           ├ stageToComfyInput()         参考图上传到 ComfyUI input/
-          ├ nanfeng.buildShotWorkflow() 217 参数快照 + 图组装
+          ├ nanfeng.buildShotWorkflow() 221 参数快照 + 图组装
           │   ├ coerceTypes()            数值型 COMBO 转数字
           │   ├ applyFixes()             环境修正 + 能力探测
           │   ├ checkConstraints()       硬互斥校验
@@ -208,7 +240,7 @@ POST /blender/render {mode, projectId, shotId}
 > 全部挂在 `/jiuzhang/api`。写方法（POST/PUT/PATCH/DELETE）需 `X-JZ-Token`
 > （`GET /token` 拿，免 token）。跨源请求会被 `isSameOrigin()` 拒绝。
 >
-> **共 92 条**：86 条精确路径 + 6 条参数化（下表的 `:id` 展开）。
+> **实测 105 条精确路径 + 5 条参数化 + 5 个前缀族**（下表的 `:id` 展开）。
 > 本文与 `host/api/index.js` 逐条核对过（2026-11-18）；
 > 前端调用与后端路由的一致性由 `pnpm run check:routes` 守护。
 
@@ -255,7 +287,7 @@ POST /blender/render {mode, projectId, shotId}
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/nanfeng/schema` | 217 参数 + 中文释义 + 无效标记 |
+| GET | `/nanfeng/schema` | 221 参数 + 中文释义 + 无效标记 |
 | GET | `/nanfeng/presets` | 预设 + Sigma 序列 + 加速方案 |
 | GET | `/nanfeng/presets/:id` | 预设合并后的参数快照（**未经** applyFixes，见下方注）|
 | POST | `/nanfeng/continuation/plan` | 分段规划（从目标时长反推每段帧数）|
@@ -390,13 +422,13 @@ POST /blender/render {mode, projectId, shotId}
 
 | 工具 | 作用 | 关键限制 |
 |---|---|---|
-| `studio_meta` | 元信息（217 参数 / 12 组 / 7 预设 / 26 节点）| — |
+| `studio_meta` | 元信息（221 参数 / 12 组 / 7 预设 / 26 节点）| — |
 | `studio_config` | 读/写配置 | 写有 16 键白名单 |
 | `studio_project` | 项目 CRUD | — |
 | `studio_shot` | 镜头卡 CRUD | `list/create/save/delete`（**删镜头走这里**，没有 REST DELETE）|
 | `studio_prompt` | 提示词编译（meta/compile/fromShot）| `fromShot` 与 REST 共用同一份入参（含角色卡）|
 | `studio_generate` | 触发生成 | 异步，立即返回 job |
-| `studio_jobs` | 任务查询/取消 | **无 retry**（cancel 会真发 `/interrupt`）|
+| `studio_jobs` | 任务查询/取消/重试 | `retry` 与 REST 同语义（cancel 会真发 `/interrupt`）|
 | `studio_h3_workshop` | 剧本 → 分段 + 资产 | **只产文本**，不出图 |
 | `studio_blender` | Blender 预演 | `render` 会启子进程（~21s）|
 | `studio_post` | 图像/视频后处理 | `qc` 的入参形状与 REST 不同 |
@@ -454,13 +486,19 @@ POST /blender/render {mode, projectId, shotId}
 
 | 想改… | 动这里 |
 |---|---|
-| 参数默认值 / 选项 | `host/services/nanfeng/schema.js` |
-| 参数中文说明 | `host/services/nanfeng/param-docs.js` |
-| 预设档位 | `host/services/nanfeng/presets.js` |
-| 图组装 / 环境修正 | `host/services/nanfeng/graph.js` |
-| 硬互斥约束 | `host/services/nanfeng/index.js` 的 `CONSTRAINT_RULES` |
-| 续写批次逻辑 | `host/services/nanfeng/continuation.js` |
-| 提示词格式 / 画风 / 打光 | `host/services/h3-prompt.js` |
+| 参数默认值 / 选项 | `host/bridge/vendors/nanfeng/schema.js` |
+| 参数中文说明 | `host/bridge/vendors/nanfeng/param-docs.js` |
+| 预设档位 | `host/bridge/vendors/nanfeng/presets.js` |
+| 图组装 / 环境修正 | `host/bridge/vendors/nanfeng/graph.js` |
+| 硬互斥约束 | `host/bridge/vendors/nanfeng/index.js` 的 `CONSTRAINT_RULES` |
+| 续写批次逻辑 | `host/bridge/vendors/nanfeng/continuation.js` |
+| 提示词格式 / 画风 / 打光 | `host/bridge/prompt/h3-prompt.js` |
+| 换人提示词规则化 | `host/bridge/prompt/prompt-normalizer.js` |
+| 桥接层对外契约（**改上游先改这里**）| `host/bridge/index.js` |
+| 参考图编号 / 上限 9 张 | `host/services/ref-images.js` |
+| 配置读取约定 / 分裂脑扫描 | `host/config-reader.js` |
+| 原子写 / .bak / 队列 | `host/store/json-store.js` |
+| 单任务查询 / 列表投影 | `host/api/index.js` 的 `/jobs/:id` 与 `?fields=list` |
 | 智能分镜的 LLM 提示词 | `skills/prompt/h3-*/SKILL.md` |
 | 生成执行器 | `host/services/generator.js` |
 | ComfyUI 通信 | `host/services/comfy-client.js` |
@@ -480,11 +518,14 @@ POST /blender/render {mode, projectId, shotId}
 
 ```powershell
 npm run build          # 构建 SPA（tsc --noEmit && vite build）
-npm test               # 冒烟测试（165 项真执行）
+npm test               # 冒烟测试（207 项真执行，含 19 项架构守卫）
+# ↑ 架构守卫守的是「结构性约束」：桥接层边界 / 参考图编号唯一实现 /
+#   配置无快照读 / json-store 不删目标 / 前端 fetch 超时 / 相对 import 可解析。
+#   这些不是在测功能，是在防「以后又不小心退回旧形态」。
 npm run typecheck      # 仅类型检查
 npm run check:routes   # SPA/NAV/client 三方路由一致性
 node tools/verify-edit.mjs   # 剪辑功能验收（需 DSH 已重启并加载新路由）
-npm run audit:params   # 217 参数有效性审计
+npm run audit:params   # 221 参数有效性审计
 npm run preview        # 独立预览服务器（不启动 DSH）
 ```
 
@@ -502,7 +543,7 @@ npm run preview        # 独立预览服务器（不启动 DSH）
 
 | # | 限制 | 原因 |
 |---|---|---|
-| 1 | 217 参数中 47 个是死参数 | 上游硬编码关闭（见 docs/PARAM-AUDIT.md §十）|
+| 1 | 221 参数中 47 个是死参数 | 上游硬编码关闭（见 docs/PARAM-AUDIT.md §十）|
 | 2 | 48 个参数缺依赖 + 47 个死参数 = 95 个无效 | 本机没装 DLSS/TRT/SLA 节点；其余是上游关闭 |
 | 3 | DMAD 的 shift 12/2 设不了 | `sigma_requested=False` 硬编码，模型自带 12/3 |
 | 4 | ComfyUI 版本锁 0.45.0 | GraphBuilder 依赖内部结构 |

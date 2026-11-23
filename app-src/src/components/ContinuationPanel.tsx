@@ -77,15 +77,23 @@ export function ContinuationPanel({
   const [pickedShotIds, setPickedShotIds] = useState<string[]>([]);
   const [contextLength, setContextLength] = useState('22');
   const [busy, setBusy] = useState(false);
+  /** 批次列表加载失败的原因。空串 = 正常。失败不能渲染成"没有批次"。 */
+  const [loadErr, setLoadErr] = useState('');
 
   const active = batches.find((b) => b.batchId === activeId) ?? null;
 
   const loadBatches = useCallback(async () => {
-    if (!projectId) { setBatches([]); return; }
+    if (!projectId) { setBatches([]); setLoadErr(''); return; }
     try {
       const list = (await api.continuationList(projectId)) as unknown as Batch[];
       setBatches(Array.isArray(list) ? list : []);
-    } catch { setBatches([]); }
+      setLoadErr('');
+    } catch (e) {
+      // ⚠️ 旧实现 `catch { setBatches([]) }` 把"请求失败"渲染成"没有批次"，
+      //    用户以为自己没建过批次，实际是后端/网络挂了。
+      setBatches([]);
+      setLoadErr(describeError(e));
+    }
   }, [projectId]);
 
   useEffect(() => { void loadBatches(); }, [loadBatches]);
@@ -135,19 +143,35 @@ export function ContinuationPanel({
       if (next.done) { toast.info('批次已完成'); return; }
       if (!next.shotId || !next.task) { toast.error('取任务失败'); return; }
 
-      // 把续写任务写进镜头卡的 nanfeng 字段
-      await api.saveShot(active.projectId, {
-        id: next.shotId,
-        nanfeng: {
-          presets: 'continuation',
-          overrides: {
-            启用潜空间续写: true,
-            潜空间续写任务: next.task,
-            context_length: active.contextLength,
-            audio_context_length: active.audioContextLength,
-          },
+      /**
+       * 把续写任务写进镜头卡的 nanfeng 字段。
+       *
+       * ⚠️⚠️ 历史 P1（本次修复）：这里曾经**整体替换** `nanfeng` 对象 ——
+       *    `{ presets, overrides }` 一写，镜头卡上原有的
+       *    `nanfeng.loras`（用户精心调的 LoRA 栈）和任何其它 override
+       *    就被**静默清空**。用户看到的是"跑完续写，画风和角色全变了"，
+       *    且没有任何提示。
+       *
+       * 现在：先读回当前镜头卡，**合并**而不是替换。
+       */
+      const current = (await api.listShots(active.projectId)) as unknown as Array<{
+        id: string;
+        nanfeng?: { presets?: unknown; overrides?: Record<string, unknown>; loras?: unknown };
+      }>;
+      const mine = Array.isArray(current) ? current.find((s) => s.id === next.shotId) : undefined;
+      const prevNf = mine?.nanfeng ?? {};
+      const merged = {
+        ...prevNf,
+        presets: 'continuation',
+        overrides: {
+          ...(prevNf.overrides && typeof prevNf.overrides === 'object' ? prevNf.overrides : {}),
+          启用潜空间续写: true,
+          潜空间续写任务: next.task,
+          context_length: active.contextLength,
+          audio_context_length: active.audioContextLength,
         },
-      } as never);
+      };
+      await api.saveShot(active.projectId, { id: next.shotId, nanfeng: merged } as never);
 
       const job = await api.generate({
         projectId: active.projectId,
@@ -233,6 +257,11 @@ export function ContinuationPanel({
       </div>
 
       {/* 批次列表 */}
+      {loadErr ? (
+        <div className="jz-xs" style={{ marginTop: 10, color: 'var(--jz-text-danger, #d9534f)' }}>
+          批次列表加载失败：{loadErr}
+        </div>
+      ) : null}
       {batches.length > 0 ? (
         <div style={{ marginTop: 10, display: 'grid', gap: 4 }}>
           <div className="jz-xs jz-muted">已有批次：</div>

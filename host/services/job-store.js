@@ -3,7 +3,7 @@
  * 走 json-store 的串行队列，修掉"并发写丢字段"。
  */
 import path from 'node:path';
-import { collectionStore } from '../store/json-store.js';
+import { collectionStore, updateJson } from '../store/json-store.js';
 import { loadConfig } from '../config.js';
 
 /**
@@ -63,7 +63,7 @@ export function newJob({ projectId, shotId, backendId, prompt, params, mode }) {
  * 保留策略。
  *
  * 为什么需要：`jobs.json` 只增不减 —— 每次生成都会追加一条**完整**记录
- * （含 prompt 全文、217 参数快照、全部 outputs），而 `/jobs` 和 `/monitor`
+ * （含 prompt 全文、221 参数快照、全部 outputs），而 `/jobs` 和 `/monitor`
  * 每次请求都会全量读盘。长期用下去这个文件会膨胀到几十 MB，
  * 面板加载越来越慢，最后是一次编辑卡顿或 JSON 解析超时。
  *
@@ -77,47 +77,52 @@ export function newJob({ projectId, shotId, backendId, prompt, params, mode }) {
  */
 const MAX_FINISHED = 500;
 const FINISHED_TTL_MS = 30 * 24 * 60 * 60 * 1000;   // 30 天
-const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
+/** 任务终态集合 —— 全仓唯一真源 */
+export const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
 
 /**
  * 裁剪终态任务。返回 { removed } —— 只在真的删了东西时才写盘。
  *
+ * ⚠️ 整个"读-算-写"必须在**同一个** `updateJson` mutator 内完成。
+ *    先 `list()` 再 `replaceAll()` 会留下一个窗口：这期间新落盘的 completed
+ *    记录会被本次覆盖写回旧快照（丢一条任务历史）。窗口在
+ *    `maxConcurrentLocal>1` 时真实可达，而那个值用户可改。
+ *
  * @returns {Promise<{removed:number}>}
  */
 export async function pruneJobs() {
-  const store = jobs();
-  const list = await store.list();
-  const now = Date.now();
+  const file = jobsFile();
+  let removed = 0;
 
-  const live = [];
-  const finished = [];
-  for (const j of list) {
-    if (!j) continue;
-    if (TERMINAL.has(j.status)) finished.push(j);
-    else live.push(j);
-  }
-  if (!finished.length) return { removed: 0 };
+  await updateJson(file, [], (arr) => {
+    const list = Array.isArray(arr) ? arr : [];
+    const now = Date.now();
 
-  // 新的在前
-  finished.sort((a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0));
-  const keep = finished.filter((j, i) => {
-    if (i >= MAX_FINISHED) return false;
-    const at = j.updatedAt ?? j.createdAt ?? 0;
-    if (at && now - at > FINISHED_TTL_MS) return false;
-    return true;
+    const live = [];
+    const finished = [];
+    for (const j of list) {
+      if (!j) continue;
+      if (TERMINAL.has(j.status)) finished.push(j);
+      else live.push(j);
+    }
+    if (!finished.length) return list;
+
+    // 新的在前
+    finished.sort((a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0));
+    const keep = finished.filter((j, i) => {
+      if (i >= MAX_FINISHED) return false;
+      const at = j.updatedAt ?? j.createdAt ?? 0;
+      if (at && now - at > FINISHED_TTL_MS) return false;
+      return true;
+    });
+
+    removed = list.length - (live.length + keep.length);
+    if (removed <= 0) return list;
+
+    const kept = new Set([...live.map((j) => j?.id), ...keep.map((j) => j?.id)]);
+    // 保持原顺序：file 里是什么顺序，写回去就是什么顺序
+    return list.filter((j) => j && j.id && kept.has(j.id));
   });
 
-  const removed = finished.length - keep.length;
-  if (removed <= 0) return { removed: 0 };
-
-  // 用保留集覆盖写回（保持原顺序：进行中在前，然后是保留的终态）
-  //
-  // collectionStore 没有 replaceAll，只有 remove(id)。逐条删会走 N 次
-  // updateJson（每次都是完整的读-改-写），但被删的是**终态任务**，
-  // 而且 pruneJobs 只在任务终结时偶尔触发一次，代价可接受；
-  // 换成批量重写反而要绕过 json-store 的串行队列，多写者场景更危险。
-  const keptIds = new Set([...live.map((j) => j.id), ...keep.map((j) => j.id)]);
-  const drop = list.filter((j) => j && j.id && !keptIds.has(j.id));
-  for (const j of drop) await store.remove(j.id);
-  return { removed: drop.length };
+  return { removed };
 }

@@ -214,7 +214,29 @@ export const CATEGORY_BY_ID = Object.freeze(
  * `look_slider` 的 `exposure|daynight` 要先于 `quality`。
  */
 const NAME_RULES = Object.freeze([
-  { id: 'turbo', re: /turbo|acc(?:el)?|step|hyperflow|hyper.?flow|dmd|pdd|lightx2v|taomate|fasth3|vdn|distill|normflow/i },
+  /**
+   * 加速蒸馏（学生本体）。
+   *
+   * ⚠️ 正则必须**足够具体**：这一类是"单选 + 强度锁 1.0"，一旦误判，
+   *    真正的 DMAD 会被它顶掉（单选类后来的替换先来的），
+   *    结果就是"挂了一个画风 LoRA 当加速学生" —— 4 步跑在原模型上，
+   *    能出片但质量悄悄崩，且不报错。
+   *
+   *    历史缺陷：这里曾经是 /turbo|acc(?:el)?|step|.../：
+   *      · 裸 step 会命中 rt_steps_style、step_by_step_anime 等画风名；
+   *      · 裸 cc(?:el)? 会命中 ccelerate_motion（其实是动作类）；
+   *      · 裸 dmd 会命中 dmd_style_pack 这类非蒸馏包。
+   *
+   *    现在要求"成词边界 + 明确语义词"：
+   *      · 4step / 8step / 6-step 这类**步数标记**
+   *      · turbo / hyperflow / lightx2v / taomate / fasth3 这类专有名词
+   *      · distill / dmd / pdd 要求是独立词（前后不是字母，或紧跟 4/8 步数）
+   */
+  {
+    id: 'turbo',
+    // 用 [_\\-\\s.] 作分隔边界（JS 的 \\b 把下划线当单词字符，_4step_ 匹配不到）
+    re: /(?:^|[_\\-\\s.])(?:[468]|10|12)[-_\\s]?steps?(?:$|[_\\-\\s.])|(?:^|[_\\-\\s.])turbo(?:$|[_\\-\\s.])|hyper[-_\\s]?flow|lightx2v|taomate|fasth3|(?:^|[_\\-\\s.])dmd|(?:^|[_\\-\\s.])pdd|distill(?:ed|ation)?|norm[-_\\s]?flow/i,
+  },
   { id: 'motion_slider', re: /(?:motion|speed|accel|amplitude|gravity|kinetix).*slider|slider.*(?:motion|speed|amplitude|gravity)/i },
   { id: 'look_slider', re: /(?:exposure|daynight|day.?night|focus|vibrant|saturation|age).*slider|slider.*(?:exposure|focus|vibrant|age)/i },
   { id: 'camera', re: /camera|orbit|dolly|zoom|drone|handheld|shaky|bullet.?time|stabil|yunjing|headbob|turnaround|dutch|telephoto|crossview|orb360/i },

@@ -140,7 +140,58 @@ async function safeJson(res: Response): Promise<unknown> {
   }
 }
 
-async function request<T>(
+/**
+ * 默认请求超时（毫秒）。
+ *
+ * ⚠️ 历史 P1（本次修复）：全站 fetch **没有任何超时**，`signal` 参数声明了
+ *    但没有任何调用点传过它。Host 若因某个长任务卡住（例如 `/monitor` 里
+ *    ComfyUI 探测挂起、或 `/blender/render` 的子进程不收尾），前端就**永久
+ *    pending**：按钮一直转圈、没有错误、用户只能刷新。
+ *
+ * 现在所有请求带 `AbortSignal.timeout()`，默认 30 秒。
+ * 长任务（生成、渲染）走的是「立即返回 job」的接口，30 秒足够；
+ * 个别确实需要更久的（如 /replace/compile-prompt 走 LLM）单独放宽。
+ */
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+/** 需要更长超时的路径前缀 → 毫秒 */
+const LONG_TIMEOUT_PATHS: ReadonlyArray<[string, number]> = [
+  ['/replace/compile-prompt', 180_000],
+  ['/replace/preview-prompt', 60_000],
+  ['/h3/workshop/analyze', 120_000],
+  ['/breakdown/generate', 60_000],
+  ['/edit/render', 600_000],
+  ['/h3/film/render', 600_000],
+  ['/post/', 300_000],
+  ['/edit/probe', 60_000],
+];
+
+function timeoutFor(path: string): number {
+  for (const [prefix, ms] of LONG_TIMEOUT_PATHS) {
+    if (path.startsWith(prefix)) return ms;
+  }
+  return DEFAULT_TIMEOUT_MS;
+}
+
+/** 把外部 signal 与超时 signal 合起来（任一触发即中止） */
+function combineSignals(a: AbortSignal | undefined, ms: number): AbortSignal {
+  const timeout = AbortSignal.timeout(ms);
+  if (!a) return timeout;
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any([a, timeout]);
+  // 兜底：手动桥接（老浏览器）
+  const ctrl = new AbortController();
+  const abort = () => ctrl.abort();
+  a.addEventListener('abort', abort, { once: true });
+  timeout.addEventListener('abort', abort, { once: true });
+  return ctrl.signal;
+}
+
+/**
+ * 统一请求入口。**对外导出**：剪辑线（`api/edit.ts`）必须复用它，
+ * 否则超时表、403 重取 token、非 JSON 防御会在第二个地方重新实现一遍 ——
+ * 本项目最容易各写各的、写出 403 的地方。
+ */
+export async function request<T>(
   method: string,
   path: string,
   body?: unknown,
@@ -166,11 +217,40 @@ async function request<T>(
       body: body === undefined ? undefined : JSON.stringify(body),
       cache: 'no-store',
       credentials: 'same-origin',
-      signal: opts.signal,
+      signal: combineSignals(opts.signal, timeoutFor(path)),
     });
   } catch (err) {
-    // 网络层失败（Host 未启动、被中断等）
-    throw new ApiHttpError(0, 'NETWORK_ERROR', err instanceof Error ? err.message : String(err));
+    // 网络层失败（Host 未启动 / 超时 / 被中断）
+    const aborted = err instanceof DOMException && err.name === 'TimeoutError';
+    throw new ApiHttpError(
+      0,
+      aborted ? 'TIMEOUT' : 'NETWORK_ERROR',
+      aborted
+        ? `请求超时（${Math.round(timeoutFor(path) / 1000)}s）：后端可能被长任务占住，请稍后重试`
+        : (err instanceof Error ? err.message : String(err)),
+    );
+  }
+
+  /**
+   * ⚠️ 历史 P1（本次修复）：写令牌随 Host 进程重建而失效，
+   *    但旧实现只在「返回不是 JSON」时才重取 token。
+   *
+   *    实际最常见的形态是 Host 重启后写接口直接回 **403
+   *    WRITE_TOKEN_REQUIRED（合法 JSON）** —— 旧代码把它当普通错误抛给用户，
+   *    于是所有写操作永久失败，只能手动刷新页面。
+   *
+   *    现在 403 + WRITE_TOKEN_REQUIRED 会强制重取 token 并重试一次。
+   */
+  if (res.status === 403 && !opts._retried) {
+    const peek = (await safeJson(res)) as ApiError | null;
+    if (peek?.error === 'WRITE_TOKEN_REQUIRED' || peek?.error === 'FORBIDDEN_ORIGIN') {
+      try {
+        await ensureToken(true);
+        return await request<T>(method, path, body, { ...opts, _retried: true });
+      } catch { /* 落到下面按原错误抛 */ }
+      throw new ApiHttpError(403, peek.error, peek.detail);
+    }
+    throw new ApiHttpError(403, peek?.error || 'HTTP_403', peek?.detail);
   }
 
   if (!res.ok) {
@@ -184,15 +264,20 @@ async function request<T>(
 
   const payload = await safeJson(res);
 
-  // 关键防御：后端路由未挂载 / 被 SPA fallback 吃掉时，会返回 HTML 而不是 JSON。
-  // 若不在这里报错，调用方会拿到 null 并在 .find/.map 上崩掉（曾实测复现）。
+  /**
+   * 关键防御：后端路由未挂载 / 被 SPA fallback 吃掉时，会返回 HTML 而不是 JSON。
+   * 若不在这里报错，调用方会拿到 null 并在 .find/.map 上崩掉（曾实测复现）。
+   *
+   * ⚠️ 重放**只对幂等读方法**生效。`204 No Content` / 空 body 的成功响应
+   *    也会走到这里（safeJson 对空 body 返回 null），而对 POST /generate、
+   *    /replace/tasks、/jobs/:id/retry 这类**非幂等**接口无条件重发 =
+   *    任务重复入队、续批多跑一段、重试翻倍扣 GPU 时间。
+   */
   if (payload === null) {
-    // 常见诱因：页面是旧端口/旧版本的缓存，或 Host 刚重启导致 token 失效。
-    // 自动做一次 token 刷新 + 重试，仍失败才抛错。
-    if (!opts._retried) {
+    const idempotent = method === 'GET' || method === 'HEAD';
+    if (idempotent && !opts._retried) {
       try {
-        ensureToken(true);
-        await ensureToken(true);
+        await ensureToken(true);          // 旧实现连调两次且第一次未 await
         return await request<T>(method, path, body, { ...opts, _retried: true });
       } catch { /* 落到下面抛错 */ }
     }
@@ -205,7 +290,6 @@ async function request<T>(
 
   return payload as T;
 }
-
 /* -------------------------------------------------------------- 具体接口 */
 
 /**
@@ -273,7 +357,22 @@ export const api = {
 
   /* 生成 / 任务 */
   generate: (input: GenerateInput) => request<Job>('POST', '/generate', input),
-  listJobs: () => request<Job[]>('GET', '/jobs'),
+  /**
+   * 任务列表。
+   *
+   * `fields: 'list'` 走后端的轻量投影（只回 id/status/时间/后端/提示词摘要/
+   * outputs[].rel），响应体积比全量小一个数量级 —— 列表页、下拉、计数都该用它。
+   * 不传则行为与以往完全一致（全量记录）。
+   */
+  listJobs: (opts?: { fields?: 'list' }) =>
+    request<Job[]>('GET', opts?.fields ? `/jobs?fields=${encodeURIComponent(opts.fields)}` : '/jobs'),
+  /**
+   * 单任务查询。
+   *
+   * 为什么必须存在：轮询单个任务时以前是「拉全量列表再 find」——
+   * 每次响应 300 KB 级，画布单节点跑 30 分钟要白烧几百 MB。
+   */
+  getJob: (jobId: string) => request<Job>('GET', `/jobs/${encodeURIComponent(jobId)}`),
   cancelJob: (jobId: string) =>
     request<CancelResult>('POST', `/jobs/${encodeURIComponent(jobId)}/cancel`),
   retryJob: (jobId: string) =>
@@ -745,7 +844,3 @@ export function describeError(err: unknown): string {
   if (err instanceof Error) return err.message;
   return '发生未知错误';
 }
-
-
-
-

@@ -157,8 +157,7 @@ export function cardImagesFor(card) {
 
 /* ------------------------------------------------------------------ 服务 */
 
-export function createVaultService({ cfg: injectedCfg } = {}) {
-  const getCfg = () => injectedCfg ?? loadConfig();
+export function createVaultService({ getCfg = loadConfig } = {}) {
 
   function cardFile(card) {
     return { ...card, images: normalizeImages(card.images), refPolicy: normalizeRefPolicy(card.refPolicy) };

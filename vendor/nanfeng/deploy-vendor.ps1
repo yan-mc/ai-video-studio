@@ -16,10 +16,19 @@
 # 用法:
 #   .\deploy-vendor.ps1 -ComfyDir "F:\AI视频\ai-runtime\ComfyUI"
 #   .\deploy-vendor.ps1 -ComfyDir "..." -Force      # 覆盖已存在的目录
+#   .\deploy-vendor.ps1 -ComfyDir "..." -Force -Clean  # 覆盖前先清空目标的 *.py 与 __pycache__
+#
+# 关于 -Clean：
+#   Copy-Item -Force 只会覆盖同名文件，**从不删除**目标里已不存在的旧 .py。
+#   删掉某个模块后重新部署，ComfyUI 仍会 import 到那份残留旧文件。
+#   -Clean 会在复制前删除目标目录顶层的 *.py 与 __pycache__（只动这个节点包自己的
+#   目录 $DEST，且有 -WhatIf 支持与路径校验，不会碰到兄弟插件目录）。
 
 param(
   [Parameter(Mandatory = $true)][string]$ComfyDir,
-  [switch]$Force
+  [switch]$Force,
+  # 复制前清空目标里的 *.py 与 __pycache__，避免已删文件残留
+  [switch]$Clean
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,10 +57,38 @@ if (Test-Path $DEST) {
   Write-Host "覆盖已存在的节点目录..." -ForegroundColor Yellow
 }
 
+# ---------------------------------------------------------------- 可选清理
+
+if ($Clean -and (Test-Path $DEST)) {
+  # 安全护栏：只允许清理 custom_nodes 下的这个节点包目录本身，不做递归通配。
+  $destFull = (Resolve-Path -LiteralPath $DEST).ProviderPath
+  $customNodesFull = [System.IO.Path]::GetFullPath((Join-Path $ComfyDir "custom_nodes"))
+  if (-not $destFull.StartsWith($customNodesFull + [System.IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    Write-Host "❌ 安全检查未通过，拒绝清理: $destFull" -ForegroundColor Red
+    Write-Host "   目标必须位于 $customNodesFull 之下。" -ForegroundColor Red
+    exit 3
+  }
+  if ($destFull -eq $customNodesFull.TrimEnd([System.IO.Path]::DirectorySeparatorChar)) {
+    Write-Host "❌ 安全检查未通过：拒绝清理 custom_nodes 根目录本身。" -ForegroundColor Red
+    exit 3
+  }
+  Write-Host "清理目标目录中的旧 *.py 与 __pycache__（-Clean）..." -ForegroundColor Yellow
+  # -WhatIf 友好：Remove-Item 支持 SupportsShouldProcess，用 $WhatIfPreference 传递。
+  # 递归是安全的：上面已断言 $destFull 严格位于 custom_nodes 之下，且不等于它本身，
+  # 所以 -Recurse 只会触及本节点包目录内部，碰不到兄弟插件。
+  Get-ChildItem -LiteralPath $DEST -Recurse -File -Filter '*.py' |
+    Remove-Item -Force -WhatIf:$WhatIfPreference
+  Get-ChildItem -LiteralPath $DEST -Recurse -Directory -Filter '__pycache__' |
+    Remove-Item -Recurse -Force -WhatIf:$WhatIfPreference
+}
+
 # ---------------------------------------------------------------- 只复制运行所需
 
 # _removed/ 是历史参考（不被 __init__.py import），不进 ComfyUI
 $EXCLUDE_DIRS = @('_removed')
+# 运行所需：Python 代码、依赖的 JSON schema，以及给部署者看的 VENDOR.md
+# （VENDOR.md 在 ComfyUI 里不参与运行，但漏掉它会让部署后的包无法自查来源，V-13）
+$COPY_EXTS = @('.py', '.json', '.md')
 
 New-Item -ItemType Directory -Force -Path $DEST | Out-Null
 
@@ -60,8 +97,9 @@ Get-ChildItem $SRC -Recurse -File | ForEach-Object {
   $rel = $_.FullName.Substring($SRC.Length + 1)
   $top = ($rel -split '\\')[0]
   if ($EXCLUDE_DIRS -contains $top) { return }
-  # 只复制 Python 与它依赖的 JSON schema
-  if ($_.Extension -notin @('.py', '.json')) { return }
+  # 顶层只收 VENDOR.md 这一个 md，避免把 *-skill/ 里的技能书也倒进 ComfyUI
+  if ($_.Extension -eq '.md' -and $top -ne 'VENDOR.md') { return }
+  if ($_.Extension -notin $COPY_EXTS) { return }
   $to = Join-Path $DEST $rel
   New-Item -ItemType Directory -Force -Path (Split-Path $to) | Out-Null
   Copy-Item $_.FullName $to -Force

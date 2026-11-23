@@ -49,6 +49,8 @@ export function LoraPicker({ value, onChange, maxSlots = 8 }: LoraPickerProps) {
   const [probed, setProbed] = useState(true);
   const [probeError, setProbeError] = useState('');
   const [solved, setSolved] = useState<LoraSolveResult | null>(null);
+  /** 约束求解失败的原因。空串 = 正常。失败不能渲染成"没选 LoRA"的空态。 */
+  const [solveErr, setSolveErr] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -71,13 +73,15 @@ export function LoraPicker({ value, onChange, maxSlots = 8 }: LoraPickerProps) {
   /** 每次选择变化都让后端跑一遍约束求解 —— 前端不重复实现规则 */
   useEffect(() => {
     let alive = true;
-    if (!value.length) { setSolved(null); return () => { alive = false; }; }
+    if (!value.length) { setSolved(null); setSolveErr(''); return () => { alive = false; }; }
     void (async () => {
       try {
         const r = await api.loraSolve({ items: value, maxSlots });
-        if (alive) setSolved(r);
-      } catch {
-        if (alive) setSolved(null);
+        if (alive) { setSolved(r); setSolveErr(''); }
+      } catch (e) {
+        // ⚠️ 旧实现失败时只 setSolved(null)，UI 渲染成"没选任何 LoRA"的空态 ——
+        //    用户会以为自己的选择丢了（实际是后端求解失败）。
+        if (alive) { setSolved(null); setSolveErr(describeError(e)); }
       }
     })();
     return () => { alive = false; };
@@ -251,6 +255,7 @@ export function LoraPicker({ value, onChange, maxSlots = 8 }: LoraPickerProps) {
         })}
 
         {/* ---- 求解结果：让用户看到"我填的值实际变成了什么" ---- */}
+        {solveErr ? <Alert tone="danger">LoRA 约束求解失败：{solveErr}</Alert> : null}
         {solved ? (
           <div style={{ borderTop: '1px solid var(--jz-border)', paddingTop: 10, display: 'grid', gap: 6 }}>
             <div className="jz-sm">

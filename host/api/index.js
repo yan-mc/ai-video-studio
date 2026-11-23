@@ -8,27 +8,20 @@ import path from 'node:path';
 import { handleSse, emit, clientCount } from './events.js';
 import fs from 'node:fs';
 import { loadConfig, saveConfig, maskConfig, sanitizeConfigPatch, resetConfigCache } from '../config.js';
-import { guard, safeId, safeJoin, resolveUserPath, getWriteToken, isSameOrigin as _isSameOrigin, isLoopbackHost as _isLoopbackHost } from '../security.js';
-import { dirs, projects, newProject, newShot, validateShot, PROFILES, resolutionFor, h3Length, H3_MODEL_SLOTS, NODE_TYPES, NODE_LABELS, ASSET_TYPES, ASSET_TYPE_LABELS, PROJECT_CATEGORY_LABELS, normalizeMode, normalizeActors, normalizeProps, normalizeCamera3d, listActionCatalog } from '../store/models.js';
+import { guard, safeId, safeJoin, resolveUserPath, getWriteToken } from '../security.js';
+import { dirs, projects, newProject, newShot, PROFILES, resolutionFor, h3Length, H3_MODEL_SLOTS, NODE_TYPES, NODE_LABELS, ASSET_TYPES, ASSET_TYPE_LABELS, PROJECT_CATEGORY_LABELS, listActionCatalog } from '../store/models.js';
 import * as comfy from '../services/comfy-client.js';
 import * as comfyControl from '../services/comfy-control.js';
 import * as mockBackend from '../services/mock-backend.js';
-import { runJob, cancelJob, runtimeStats, CancelledError } from '../services/job-runner.js';
+import { cancelJob, CancelledError } from '../services/job-runner.js';
 import { newJob, jobs as jobsStore, isLocalBackendOf } from '../services/job-store.js';
 import { runH3Local, runH3Nanfeng, runH3ImageLocal, jobKind } from '../services/generator.js';
 import { ACCEL_PLANS, ACCEL_PLAN_IDS, DEFAULT_ACCEL_PLAN } from '../services/accel-plan.js';
 import { LORA_CATEGORIES, STRENGTH_LIMITS, catalogLoras, solveLoraStack } from '../services/lora-catalog.js';
-import { packGraph, unpackGraph, IMG_REF_PREFIX } from '../store/image-pool.js';
-import { readJson, writeJson, updateJson } from '../store/json-store.js';
-import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, LIGHTING_PRESETS, H3_MODES, H3_LIMITS, truncatePromptKeepFields } from '../services/h3-prompt.js';
+import { compileH3Prompt, toShotInputPackage, STYLE_PRESETS, LIGHTING_PRESETS, H3_MODES, H3_LIMITS } from '../bridge/index.js';
 import { H3_IMAGE_MODELS, H3_IMAGE_SIZES, IMAGE_VAE, IMAGE_CLIP, IMAGE_SAMPLING, checkImageModels } from '../services/h3-image.js';
-import {
-  BREAKDOWN_PROMPT_MAX_CHARS, BREAKDOWN_SIZE, DEFAULT_BREAKDOWN_PROMPT,
-  buildBreakdownPrompt, isDefaultBreakdownPrompt, legacyBreakdownFields, breakdownSize,
-} from '../services/breakdown.js';
-import {
-  readProjectCards, writeProjectCards,
-} from '../services/character-vault.js';
+import { BREAKDOWN_PROMPT_MAX_CHARS, BREAKDOWN_SIZE, DEFAULT_BREAKDOWN_PROMPT, buildBreakdownPrompt, isDefaultBreakdownPrompt, legacyBreakdownFields, breakdownSize } from '../services/breakdown.js';
+import { readProjectCards, writeProjectCards } from '../services/character-vault.js';
 import { buildRenderPlan, subjectsForPrompt, buildMediaNotes } from '../services/render-plan.js';
 import { probeMedia } from '../services/media-probe.js';
 import { blenderStatus, buildSceneSpec, renderControl, listModelAssets, listAssetActions, openInBlender, prunePrevizRuns } from '../services/blender-service.js';
@@ -36,56 +29,26 @@ import { getCanvasPermissions, setCanvasPermissions, loadCanvasPermissions } fro
 import { getRuntime } from '../runtime.js';
 // 工作流模板定位 —— 单一真源（模板随插件分发，不跟随 dataDir）
 import { readWorkflowCached, workflowDiagnostics } from '../services/workflow-paths.js';
+// 参考图编号的单一真源（不能再各写一份）
 // 生成入参准备 —— REST 与 Agent 工具共用同一份（角色卡解析 / 媒体探测 / 编号）
-import {
-  withVaultCards, resolveMediaRefs, writeBackProbe, resolvePictureIndices,
-} from '../services/shot-context.js';
+import { withVaultCards, resolveMediaRefs, writeBackProbe, resolvePictureIndices } from '../services/shot-context.js';
+// ── 拆分出的模块：HTTP 工具 / 镜头存储 / 提示词编译 / 项目辅助 / 监控 / 换人 / 归档
+import { readJsonBody, readRawBody, sendJson, parseRangeHeader, pipeStream, parseMultipart, MIME_BY_EXT } from './http.js';
+import { listShots, writeShots, upsertShot, cleanupProjectArtifacts } from './shots.js';
+import { compilePrompt, deriveSubjectsFromShot } from './prompt-compile.js';
+import { projectSummary, allowedProjectPatch, packProject, unpackProject } from './projects.js';
+import { monitorPayload } from './monitor.js';
+import { createReplaceTask } from './replace-tasks.js';
+import { runAndArchive, listChineseFonts, isServableDataPath, guardNoToken } from './archive.js';
 
+// re-export：host/tools.js:11 从 './api/index.js' import 的符号保持不变
+export { compilePrompt, listShots, writeShots, upsertShot, cleanupProjectArtifacts, deriveSubjectsFromShot };
+// 原文 2809 行就有的转发（保持既有调用点的 import 路径不变）
+export { withVaultCards, resolveMediaRefs, writeBackProbe, resolvePictureIndices } from '../services/shot-context.js';
 /* ------------------------------------------------------------- 工具函数 */
 
 /** 合法后端枚举 —— 单一真源，路由与执行器共用 */
 export const VALID_BACKENDS = new Set(['h3-nanfeng', 'h3-local', 'h3-image', 'mock']);
-
-async function readJsonBody(req, limit = 4 * 1024 * 1024) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    let stopped = false;
-    req.on('data', (c) => {
-      if (stopped) return;
-      size += c.length;
-      if (size > limit) {
-        stopped = true;
-        /**
-         * ⚠️ 不能先 destroy 再让上层 sendJson。
-         *
-         * 历史缺陷：`reject(...); req.destroy();` —— socket 被销毁后，
-         * 上层 `catch → sendJson(res, 400, ...)` 往一个已销毁的连接写，
-         * 客户端看到的是 ECONNRESET，**永远收不到那个 400**。
-         * "报错但用户看不到报错"是最伤支持成本的一类。
-         *
-         * 现在：暂停读取（不再消耗 body），让上层正常回 413。
-         */
-        try { req.pause(); } catch { /* ignore */ }
-        reject(new Error('BODY_TOO_LARGE'));
-        return;
-      }
-      chunks.push(c);
-    });
-    req.on('end', () => {
-      if (stopped) return;
-      const raw = Buffer.concat(chunks).toString('utf8');
-      if (!raw.trim()) return resolve({});
-      try { resolve(JSON.parse(raw)); } catch (e) { reject(new Error(`BAD_JSON: ${e.message}`)); }
-    });
-    req.on('error', reject);
-  });
-}
-
-function sendJson(res, code, value) {
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-  res.end(JSON.stringify(value));
-}
 
 /**
  * 加速方案的对外投影（供前端下拉与排障展示）。
@@ -118,136 +81,6 @@ function accelPlanList() {
       isDefault: id === DEFAULT_ACCEL_PLAN,
     };
   });
-}
-
-/* ------------------------------------------------- 二进制/流 辅助 */
-
-const MIME_BY_EXT = {
-  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp', '.gif': 'image/gif', '.svg': 'image/svg+xml',
-  '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
-  '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.m4a': 'audio/mp4',
-  '.glb': 'model/gltf-binary', '.gltf': 'model/gltf+json',
-  '.json': 'application/json', '.txt': 'text/plain; charset=utf-8',
-};
-
-function readRawBody(req, limit = 256 * 1024 * 1024) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    let stopped = false;
-    req.on('data', (c) => {
-      if (stopped) return;
-      size += c.length;
-      if (size > limit) {
-        // 同 readJsonBody：pause 而不是 destroy，否则上层返回的 413 发不出去
-        stopped = true;
-        try { req.pause(); } catch { /* ignore */ }
-        reject(new Error('BODY_TOO_LARGE'));
-        return;
-      }
-      chunks.push(c);
-    });
-    req.on('end', () => { if (!stopped) resolve(Buffer.concat(chunks)); });
-    req.on('error', reject);
-  });
-}
-
-/** 极简 multipart/form-data 解析（够用：文件 + 文本字段） */
-function parseMultipart(buf, contentType) {
-  const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType);
-  const boundary = (m?.[1] || m?.[2] || '').trim();
-  if (!boundary) return [];
-  const delim = Buffer.from(`--${boundary}`);
-  const parts = [];
-  let start = buf.indexOf(delim);
-  if (start < 0) return [];
-  start += delim.length;
-
-  for (;;) {
-    // 结束标记 --
-    if (buf[start] === 0x2d && buf[start + 1] === 0x2d) break;
-    // 跳过 CRLF
-    if (buf[start] === 0x0d && buf[start + 1] === 0x0a) start += 2;
-
-    const nextDelim = buf.indexOf(delim, start);
-    if (nextDelim < 0) break;
-    const headEnd = buf.indexOf('\r\n\r\n', start);
-    if (headEnd < 0 || headEnd > nextDelim) { start = nextDelim + delim.length; continue; }
-
-    const headers = buf.toString('utf8', start, headEnd);
-    const bodyStart = headEnd + 4;
-    // 去掉尾部的 CRLF
-    let bodyEnd = nextDelim;
-    if (buf[bodyEnd - 2] === 0x0d && buf[bodyEnd - 1] === 0x0a) bodyEnd -= 2;
-
-    const nameM = /name="([^"]*)"/i.exec(headers);
-    const fileM = /filename="([^"]*)"/i.exec(headers);
-    parts.push({
-      name: nameM?.[1] || '',
-      filename: fileM?.[1] ? decodeRfc2047(fileM[1]) : null,
-      data: buf.subarray(bodyStart, bodyEnd),
-    });
-
-    start = nextDelim + delim.length;
-    if (start >= buf.length) break;
-  }
-  return parts;
-}
-
-/**
- * 解码 RFC 2047 编码的中文文件名。
- *
- * 为什么要做：PowerShell 的 `-Form`、以及部分 HTTP 客户端会把非 ASCII 文件名
- * 编成 `=?utf-8?B?<base64>?=`。不过滤就会拿到一串编码字面量，
- * `path.extname()` 取不到扩展名 → 上传报 `UNSUPPORTED_FILE_TYPE: (none)`。
- * （实测：用 PowerShell 上传中文名立绘必失败，用 node 的 FormData 则正常。）
- */
-function decodeRfc2047(value) {
-  if (!value || !value.includes('=?')) return value;
-  try {
-    return value.replace(/=\?([^?]+)\?([BbQq])\?([^?]*)\?=/g, (whole, charset, enc, text) => {
-      const cs = String(charset).toLowerCase();
-      if (enc.toUpperCase() === 'B') {
-        const buf = Buffer.from(text, 'base64');
-        return cs.includes('8859') ? buf.toString('latin1') : buf.toString('utf8');
-      }
-      // Q 编码：_ 代表空格
-      const raw = text.replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
-      return Buffer.from(raw, 'latin1').toString('utf8');
-    });
-  } catch { return value; }
-}
-
-function parseRangeHeader(header, size) {
-  if (!header) return null;
-  const m = /^bytes=(\d*)-(\d*)$/.exec(String(header).trim());
-  if (!m) return null;
-  if (m[1] === '' && m[2] === '') return null;
-  let start; let end;
-  if (m[1] === '') {
-    const suffix = Number(m[2]);
-    if (!Number.isFinite(suffix) || suffix <= 0) return { invalid: true };
-    start = Math.max(0, size - suffix); end = size - 1;
-  } else {
-    start = Number(m[1]); end = m[2] === '' ? size - 1 : Number(m[2]);
-    if (!Number.isFinite(start) || !Number.isFinite(end)) return { invalid: true };
-  }
-  if (start > end || start >= size) return { invalid: true };
-  return { start, end: Math.min(end, size - 1) };
-}
-
-function pipeStream(res, abs, range) {
-  const stream = fs.createReadStream(abs, range ? { start: range.start, end: range.end } : {});
-  stream.on('error', () => {
-    if (!res.headersSent) {
-      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ error: 'READ_FAILED' }));
-    } else {
-      try { res.destroy(); } catch { /* ignore */ }
-    }
-  });
-  stream.pipe(res);
 }
 
 /* ---------------------------------------------------------------- 路由 */
@@ -318,11 +151,11 @@ export async function handleApi(req, res) {
      * 只返回元信息（名/组/类型/默认值/选项），不含当前值。
      */
     if (req.method === 'GET' && route === '/nanfeng/schema') {
-      const m = await import('../services/nanfeng/schema.js');
+      const m = (await import('../bridge/index.js')).nanfengSchema;
       /**
        * 用 enrichSchema() 而不是直接吐 PARAMS / GROUPS：
        * 参数的中文说明、调参建议、以及「死参数/禁用参数」标记都在
-       * services/nanfeng/param-docs.js 里，前端要靠这些字段渲染说明面板。
+       * bridge/vendors/nanfeng/param-docs.js 里，前端要靠这些字段渲染说明面板。
        *
        * PARAMS 本身保持纯净（机读约束），graph.js 的类型强制依赖它。
        */
@@ -338,7 +171,7 @@ export async function handleApi(req, res) {
 
     /** 内置预设列表 */
     if (req.method === 'GET' && route === '/nanfeng/presets') {
-      const m = await import('../services/nanfeng/presets.js');
+      const m = (await import('../bridge/index.js')).nanfengPresets;
       return sendJson(res, 200, {
         default: m.DEFAULT_PRESET,
         presets: m.listBuiltinPresets(),
@@ -370,8 +203,8 @@ export async function handleApi(req, res) {
     /** 取某预设合并后的完整参数（供前端"预览将提交什么"） */
     if (req.method === 'GET' && route.startsWith('/nanfeng/presets/')) {
       const id = safeId(decodeURIComponent(route.slice('/nanfeng/presets/'.length)));
-      const p = await import('../services/nanfeng/presets.js');
-      const g = await import('../services/nanfeng/graph.js');
+      const p = (await import('../bridge/index.js')).nanfengPresets;
+      const g = (await import('../bridge/index.js')).nanfengGraph;
       const { params, meta } = p.builtinPreset(id);
       if (!meta) return sendJson(res, 404, { error: 'PRESET_NOT_FOUND', id });
       const merged = g.mergeParams(params);
@@ -393,7 +226,7 @@ export async function handleApi(req, res) {
     if (req.method === 'POST' && route === '/nanfeng/continuation/batches') {
       const body = await readJsonBody(req);
       const pid = safeId(body.projectId);
-      const cont = await import('../services/nanfeng/continuation.js');
+      const cont = (await import('../bridge/index.js')).continuation;
       try {
         const batch = cont.createBatch({
           projectId: pid,
@@ -413,7 +246,7 @@ export async function handleApi(req, res) {
     /** 列批次 */
     if (req.method === 'GET' && route === '/nanfeng/continuation/batches') {
       const q = url.searchParams.get('projectId');
-      const cont = await import('../services/nanfeng/continuation.js');
+      const cont = (await import('../bridge/index.js')).continuation;
       const list = cont.listBatches(cfg.dataDir, q ? safeId(q) : null);
       return sendJson(res, 200, list);
     }
@@ -421,7 +254,7 @@ export async function handleApi(req, res) {
     /** 取单个批次 */
     if (req.method === 'GET' && route.startsWith('/nanfeng/continuation/batches/')) {
       const rest = route.slice('/nanfeng/continuation/batches/'.length);
-      const cont = await import('../services/nanfeng/continuation.js');
+      const cont = (await import('../bridge/index.js')).continuation;
       // /batches/<id>/next → 取下一段的任务 JSON
       if (rest.endsWith('/next')) {
         const id = safeId(rest.slice(0, -'/next'.length));
@@ -446,7 +279,7 @@ export async function handleApi(req, res) {
     /** 更新某段状态 */
     if (req.method === 'POST' && route === '/nanfeng/continuation/segment') {
       const body = await readJsonBody(req);
-      const cont = await import('../services/nanfeng/continuation.js');
+      const cont = (await import('../bridge/index.js')).continuation;
       const b = cont.loadBatch(cfg.dataDir, safeId(body.batchId));
       if (!b) return sendJson(res, 404, { error: 'BATCH_NOT_FOUND' });
       const seg = b.shots.find((s) => s.index === Number(body.index));
@@ -477,7 +310,7 @@ export async function handleApi(req, res) {
      */
     if (req.method === 'POST' && route === '/nanfeng/continuation/plan') {
       const body = await readJsonBody(req);
-      const cont = await import('../services/nanfeng/continuation.js');
+      const cont = (await import('../bridge/index.js')).continuation;
       try {
         const plan = cont.planSegments({
           targetSeconds: body.targetSeconds ?? 45,
@@ -498,7 +331,7 @@ export async function handleApi(req, res) {
      */
     if (req.method === 'POST' && route === '/nanfeng/continuation/batches/run') {
       const body = await readJsonBody(req);
-      const cont = await import('../services/nanfeng/continuation.js');
+      const cont = (await import('../bridge/index.js')).continuation;
       const batchId = safeId(body.batchId);
       const b0 = cont.loadBatch(cfg.dataDir, batchId);
       if (!b0) return sendJson(res, 404, { error: 'BATCH_NOT_FOUND' });
@@ -640,7 +473,7 @@ export async function handleApi(req, res) {
     /** 重置失败段（供重跑） */
     if (req.method === 'POST' && route === '/nanfeng/continuation/batches/reset') {
       const body = await readJsonBody(req);
-      const cont = await import('../services/nanfeng/continuation.js');
+      const cont = (await import('../bridge/index.js')).continuation;
       const b = cont.loadBatch(cfg.dataDir, safeId(body.batchId));
       if (!b) return sendJson(res, 404, { error: 'BATCH_NOT_FOUND' });
       const r = cont.resetFromFailure(b);
@@ -652,9 +485,9 @@ export async function handleApi(req, res) {
 
     /** 分镜能力状态 */
     if (req.method === 'GET' && route === '/nanfeng/storyboard/meta') {
-      const sb = await import('../services/nanfeng/storyboard.js');
-      const llm = await import('../services/nanfeng/dsh-llm.js');
-      const m = await import('../services/nanfeng/schema.js').catch(() => null);
+      const sb = (await import('../bridge/index.js')).storyboard;
+      const llm = (await import('../bridge/index.js')).llm;
+      const m = await import('../bridge/index.js').then((B) => B.nanfengSchema).catch(() => null);
       return sendJson(res, 200, {
         modes: sb.STORYBOARD_MODES,
         skills: Object.entries(sb.SKILLS).map(([id, s]) => ({ id, label: s.label, desc: s.desc })),
@@ -671,8 +504,8 @@ export async function handleApi(req, res) {
      */
     if (req.method === 'POST' && route === '/nanfeng/storyboard/generate') {
       const body = await readJsonBody(req);
-      const sb = await import('../services/nanfeng/storyboard.js');
-      const llm = await import('../services/nanfeng/dsh-llm.js');
+      const sb = (await import('../bridge/index.js')).storyboard;
+      const llm = (await import('../bridge/index.js')).llm;
 
       const count = Math.max(1, Math.min(12, Number(body.count) || 1));
       const mode = String(body.mode || 'ref2va');
@@ -982,11 +815,25 @@ export async function handleApi(req, res) {
       //    旧写法先 compilePrompt(shot) 后注入卡，导致卡的文字永远进不了 subject_definitions
       //    （编译时 subjects 为空，生成出空的 subject_definitions: 段）。
       const shotWithCards = await withVaultCards(shot, pid, ctx, cfg);
+      const compileWarnings = [];
+      const compiledPrompt = compilePrompt(shotWithCards, compileWarnings);
       const job = newJob({
         projectId: pid,
         shotId: shot.id,
         backendId,
-        prompt: compilePrompt(shotWithCards),
+        /**
+         * ⚠️ 历史 P2（本次修复）：提交时编译的 lint 警告被**整条丢弃**。
+         *
+         *    旧写法 `prompt: compilePrompt(shotWithCards)` 不接收第二个参数，
+         *    而 executeBackend 里的 `job.prompt || compilePrompt(..., promptWarnings)`
+         *    因为有 job.prompt 而**永远走不到右边** —— 于是
+         *    「提示词超长被截断」「字段缺失」「负面句误报」这些警告
+         *    在真实生成路径上从来不会进 job.warnings，用户看不到。
+         *
+         *    现在：提交时把 warnings 一并收集，写进 job.warnings。
+         */
+        prompt: compiledPrompt,
+        ...(compileWarnings.length ? { warnings: compileWarnings } : {}),
         params: {
           durationSec: shot.durationSec,
           ratio: shot.ratio,
@@ -1008,7 +855,60 @@ export async function handleApi(req, res) {
     }
     if (req.method === 'GET' && route === '/jobs') {
       const list = await jobsStore().list();
-      return sendJson(res, 200, list.slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
+      const sorted = list.slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+      /**
+       * 轻量模式 `?fields=list`。
+       *
+       * 为什么需要：不带 fields 时单次响应实测 **328,437 字节**（126 条任务全量，
+       * 含 prompt 全文 + 221 参数快照）。任务列表页 / 顶栏轮询只要 id+状态，
+       * 拉全量纯属浪费（前端 4 处轮询合计约 470 KB/s）。
+       *
+       * 不带 fields 时行为**完全不变**（向后兼容）。
+       */
+      if (url.searchParams.get('fields') === 'list') {
+        return sendJson(res, 200, sorted.map((j) => ({
+          id: j.id,
+          status: j.status,
+          kind: j.kind ?? null,
+          projectId: j.projectId ?? null,
+          shotId: j.shotId ?? null,
+          backendId: j.backendId ?? null,
+          mode: j.mode ?? null,
+          createdAt: j.createdAt ?? null,
+          updatedAt: j.updatedAt ?? null,
+          finishedAt: j.finishedAt ?? null,
+          error: j.error ?? null,
+          // 产物只留路径，去掉字节数之外的元信息
+          outputs: Array.isArray(j.outputs)
+            ? j.outputs.map((o) => ({ rel: o?.rel ?? null }))
+            : [],
+        })));
+      }
+      return sendJson(res, 200, sorted);
+    }
+
+    /**
+     * GET /jobs/:id —— 单任务查询。
+     *
+     * 为什么需要：画布 runner / 图像页 / 分镜页都要「盯着一个任务」，
+     * 旧实现只能拉全量再 `find`（单次 321 KB、2.5 秒一次）。
+     *
+     * 正则只匹配 `job_[A-Za-z0-9]+`，不会吃掉 `/jobs/:id/cancel` 那条参数化路由。
+     */
+    {
+      const mj = req.method === 'GET' ? route.match(/^\/jobs\/([^/]+)$/) : null;
+      /**
+       * ⚠️ 必须排除 `batch-progress`：它也是 GET /jobs/<something>，
+       *    会被上面的正则吃掉，然后 `safeId('batch-progress', /^job_.../)` 抛错
+       *    → 工具箱的「批量进度」永久 400。冒烟测不到（GET 列表里没有它）。
+       */
+      if (mj && mj[1] !== 'batch-progress') {
+        const jobId = safeId(decodeURIComponent(mj[1]), /^job_[A-Za-z0-9]+$/);
+        const job = await jobsStore().get(jobId);
+        if (!job) return sendJson(res, 404, { error: 'JOB_NOT_FOUND', id: jobId });
+        return sendJson(res, 200, job);
+      }
     }
     {
       const m = route.match(/^\/jobs\/([^/]+)\/(cancel|retry)$/);
@@ -1137,7 +1037,6 @@ export async function handleApi(req, res) {
       });
       return sendJson(res, 200, r);
     }
-
 
     /* ---------------- 角色卡仓库 ---------------- */
     if (req.method === 'GET' && route === '/vault/meta') {
@@ -1276,6 +1175,7 @@ export async function handleApi(req, res) {
         cards,
         manualImages: body.manualImages ?? [],
         previz: body.previz ?? null,
+      mode: body.mode ?? null,
         sceneImages: body.sceneImages ?? [],
         ...mediaRefs,
         refImageSize: body.refImageSize,
@@ -1301,6 +1201,7 @@ export async function handleApi(req, res) {
         cards,
         manualImages: body.manualImages ?? [],
         previz: body.previz ?? null,
+      mode: body.mode ?? null,
         sceneImages: body.sceneImages ?? [],
         ...mediaRefs,
         refImageSize: body.refImageSize,
@@ -1585,7 +1486,7 @@ export async function handleApi(req, res) {
         /**
          * 打光通道（光比预设）。
          *
-         * 南风 217 参数里**没有任何打光参数** —— H3 是纯提示词驱动的扩散模型，
+         * 南风 221 参数里**没有任何打光参数** —— H3 是纯提示词驱动的扩散模型，
          * 打光只能靠 detailed_description 的文字。这里把「4:1 / 8:1 打光」
          * 这种摄影术语翻译成模型能执行的视觉描述（光比、档数、阴影硬度）。
          * 与画风正交，可任意组合。
@@ -1943,7 +1844,7 @@ export async function handleApi(req, res) {
         const baseHeaders = { 'X-Content-Type-Options': 'nosniff', ...disposition };
         const range = parseRangeHeader(req.headers.range, stat.size);
         if (range && range.invalid) {
-          res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+          res.writeHead(416, { 'Content-Range': `bytes */${stat.size}`, ...baseHeaders });
           return res.end();
         }
         if (range) {
@@ -1985,9 +1886,14 @@ export async function handleApi(req, res) {
       if (!rel) return sendJson(res, 400, { error: 'PATH_REQUIRED' });
       let abs;
       try {
-        abs = safeJoin(cfg.dataDir, rel);      // 只允许 dataDir 内
-      } catch {
-        return sendJson(res, 403, { error: 'FORBIDDEN_PATH', path: rel });
+        // ⚠️ 必须走 resolveUserPath 而不是裸 safeJoin：后者只做字符串层面的
+        //    越界判断，**看不出 symlink / junction 指向 root 之外**
+        //    （dataDir 里放一个指向 C:\ 的 junction 就能读任意文件）。
+        //    resolveUserPath 会 realpath 之后再比对一次。
+        abs = resolveUserPath({ root: cfg.dataDir, input: rel, mustExist: true });
+      } catch (e) {
+        const code = e?.code || 'FORBIDDEN_PATH';
+        return sendJson(res, code === 'NOT_FOUND' ? 404 : 403, { error: code, path: rel });
       }
       if (!isServableDataPath(cfg.dataDir, abs)) {
         return sendJson(res, 403, {
@@ -2001,10 +1907,32 @@ export async function handleApi(req, res) {
       }
       const stat = fs.statSync(abs);
       const ext = path.extname(abs).toLowerCase();
+      /**
+       * ⚠️ 安全头必须与 `/assets/item` 一致（历史 P1：这条路径漏了）。
+       *
+       *   · 没有 X-Content-Type-Options: nosniff 时，浏览器可能忽略我们
+       *     声明的 Content-Type 去做内容嗅探；
+       *   · SVG 是**可执行文档**（内含 <script>），以 image/svg+xml 内联
+       *     返回 = **同源存储型 XSS**：用户把 .svg 传进素材库，任何人打开
+       *     /file?path=assets/x.svg 就在插件同源下执行脚本，而该源上挂着
+       *     全部写接口（X-JZ-Token 可通过 /token 拿到）。
+       *
+       *   实测修复前：GET /file?path=assets/asset_x.svg → 200 image/svg+xml
+       *   且 body 原样返回 —— 攻击链闭合。
+       *
+       *   现在与 /assets/item 完全对齐：SVG 强制 attachment、统一 nosniff。
+       */
+      const isSvgDoc = ext === '.svg';
+      // 固定文件名：用途是"让浏览器下载而不是渲染"，名字本身不重要，
+      // 也避免了把用户文件名拼进 header 带来的转义问题。
+      const svgDisposition = 'attachment; filename="download.svg"';
+      const secHeaders = isSvgDoc
+        ? { 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': svgDisposition }
+        : { 'X-Content-Type-Options': 'nosniff' };
       const mime = MIME_BY_EXT[ext] || 'application/octet-stream';
       const range = parseRangeHeader(req.headers.range, stat.size);
       if (range && range.invalid) {
-        res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+        res.writeHead(416, { 'Content-Range': `bytes */${stat.size}`, ...secHeaders });
         return res.end();
       }
       if (range) {
@@ -2013,12 +1941,14 @@ export async function handleApi(req, res) {
           'Content-Type': mime, 'Accept-Ranges': 'bytes',
           'Content-Range': `bytes ${range.start}-${range.end}/${stat.size}`,
           'Content-Length': len, 'Cache-Control': 'no-cache',
+          ...secHeaders,
         });
         return pipeStream(res, abs, range);
       }
       res.writeHead(200, {
         'Content-Type': mime, 'Content-Length': stat.size,
         'Accept-Ranges': 'bytes', 'Cache-Control': 'no-cache',
+        ...secHeaders,
       });
       if (req.method === 'HEAD') return res.end();
       return pipeStream(res, abs);
@@ -2147,15 +2077,15 @@ export async function handleApi(req, res) {
      */
     if (req.method === 'GET' && route === '/replace/meta') {
       const R = await import('../services/replace.js');
-      const presets = await import('../services/nanfeng/presets.js');
+      const presets = (await import('../bridge/index.js')).nanfengPresets;
       return sendJson(res, 200, {
         ok: true,
         defaults: R.REPLACE_DEFAULTS,
         promptFields: R.PROMPT_FIELDS,
         presets: presets.listBuiltinPresets(),
-        styles: (await import('../services/h3-prompt.js')).STYLE_PRESETS
+        styles: (await import('../bridge/index.js')).prompt.STYLE_PRESETS
           .map((s) => ({ id: s.id, name: s.name, category: s.category })),
-        lightings: (await import('../services/h3-prompt.js')).LIGHTING_PRESETS
+        lightings: (await import('../bridge/index.js')).prompt.LIGHTING_PRESETS
           .map((l) => ({ id: l.id, name: l.name, ratio: l.ratio, zh: l.zh })),
         accelPlans: accelPlanList(),
         contextLengths: [
@@ -2229,7 +2159,7 @@ export async function handleApi(req, res) {
      */
     if (req.method === 'POST' && route === '/replace/compile-prompt') {
       const body = await readJsonBody(req);
-      const N = await import('../services/prompt-normalizer.js');
+      const N = (await import('../bridge/index.js')).promptNormalizer;
       const raw = String(body.prompt ?? '');
       if (!raw.trim()) return sendJson(res, 400, { error: 'EMPTY_PROMPT: 提示词为空' });
 
@@ -2269,7 +2199,7 @@ export async function handleApi(req, res) {
       const body = await readJsonBody(req);
       const abs = R.resolveReplaceInput(body.sourceRel, cfg);
       const useCont = Boolean(body.continuation);
-      const plan = await R.planSegments(abs, cfg, {
+      const plan = await R.planSourceSegments(abs, cfg, {
         segmentSec: Number(body.segmentSec) || undefined,
         // 续写模式必须一起传下去 —— 漏了会让预览显示"独立重绘"的分段，
         // 与实际执行（续写）完全对不上，用户看到的段数和交付时长全是错的
@@ -2335,707 +2265,75 @@ export async function handleApi(req, res) {
 
     return sendJson(res, 404, { error: `UNKNOWN_ROUTE: ${req.method} ${route}` });
   } catch (err) {
-    // 参数校验类错误应当回 400，而不是把所有异常都算成 500。
-    // 这样前端能区分"请求写错了"和"服务端炸了"，也便于排查。
+    /**
+     * 错误 → HTTP 状态码映射。
+     *
+     * ⚠️ 历史缺陷（P1）：这里原来**只按 message 前缀正则匹配**，
+     *    于是所有带 code 但 message 不以那几个前缀开头的错误都落进 500。
+     *    实测受害者：
+     *      · resolveUserPath 的 NOT_FOUND（文件不存在）→ 本该 404，实际 500
+     *      · INLINE_DATA_URL（传了 base64 而不是路径）→ 本该 400，实际 500
+     *      · FILE_NOT_FOUND（剪辑/后处理）→ 本该 404，实际 500
+     *      · BODY_TOO_LARGE → 本该 413，实际 400
+     *    前端拿到 500 只能显示"服务端炸了"，用户完全不知道是自己路径写错了。
+     *
+     * 现在：**优先用 err.code**（安全层/存储层都带 code），message 正则只作兜底。
+     */
     const msg = String(err?.message || err);
-    const isCancel = err instanceof CancelledError;
-    const isValidation = /^(INVALID_ID|INVALID_\w+|BAD_JSON|BODY_TOO_LARGE|FORBIDDEN_PATH|PROJECT_REQUIRED|PATH_REQUIRED)/.test(msg)
+    if (err instanceof CancelledError) return sendJson(res, 409, { error: msg });
+
+    const code = String(err?.code || '');
+    /** code → 状态码（显式表，不靠正则猜） */
+    const CODE_STATUS = {
+      PATH_REQUIRED: 400,
+      PROJECT_REQUIRED: 400,
+      INVALID_ID: 400,
+      INVALID_INPUT: 400,
+      INLINE_DATA_URL: 400,
+      BAD_JSON: 400,
+      FORBIDDEN_PATH: 403,
+      FORBIDDEN_HOST: 403,
+      FORBIDDEN_ORIGIN: 403,
+      WRITE_TOKEN_REQUIRED: 403,
+      NOT_FOUND: 404,
+      FILE_NOT_FOUND: 404,
+      JOB_NOT_FOUND: 404,
+      SHOT_NOT_FOUND: 404,
+      PROJECT_NOT_FOUND: 404,
+      BATCH_NOT_FOUND: 404,
+      PRESET_NOT_FOUND: 404,
+      REPLACE_NOT_FOUND: 404,
+      EDIT_NOT_FOUND: 404,
+      BODY_TOO_LARGE: 413,
+      ALREADY_RUNNING: 409,
+    };
+    /**
+     * 查表时**同时**试 `err.code` 和 message 本身。
+     *
+     * 为什么：仓库里大量错误是 `throw new Error('EDIT_NOT_FOUND')` ——
+     * message 就是错误码，但没有 `err.code` 属性。逐个给 30+ 处补 code 既
+     * 容易漏、又会把简单代码改复杂。这里统一按「code 优先、message 回退」查表，
+     * 一次覆盖全部既有写法；新代码仍然推荐显式设 code。
+     */
+    const statusFor = (key) => CODE_STATUS[key]
+      || CODE_STATUS[String(key).replace(/^([A-Z_]+?)(?::.*)?$/s, '$1')]
+      || 0;
+    const byCode = statusFor(code);
+    if (byCode) return sendJson(res, byCode, { error: msg, code: code || msg });
+    // message 本身就是错误码（或「CODE: 详情」形态）时同样命中
+    const msgCode = /^([A-Z][A-Z0-9_]{2,})/.exec(msg)?.[1] ?? '';
+    const byMsg = msgCode ? statusFor(msgCode) : 0;
+    if (byMsg) return sendJson(res, byMsg, { error: msg, code: msgCode });
+
+    // 兜底：没有 code 的老式 XXX_REQUIRED / 非法参数文案
+    if (/^BODY_TOO_LARGE/.test(msg)) return sendJson(res, 413, { error: msg });
+    const isValidation = /^(INVALID_\w+|BAD_JSON|FORBIDDEN_PATH|PROJECT_REQUIRED|PATH_REQUIRED)/.test(msg)
       || /_REQUIRED$/.test(msg);
-    return sendJson(res, isCancel ? 409 : (isValidation ? 400 : 500), { error: msg });
+    return sendJson(res, isValidation ? 400 : 500, { error: msg });
   }
 }
-
-/* ------------------------------------------------------------ 辅助实现 */
-
-/**
- * 创建一个换人任务（只是建记录，不启动）。
- *
- * 校验放在这里而不是等执行时：换人是长流程（切段 + N×8 分钟生成），
- * 参数错了要尽量在**提交那一秒**报出来，而不是跑了半小时才发现
- * 「参考图路径不存在」。
- *
- * @returns {Promise<object>} 落盘后的任务记录
- */
-async function createReplaceTask(body, cfg) {
-  const R = await import('../services/replace.js');
-
-  const sourceRel = String(body.sourceRel ?? '').trim();
-  if (!sourceRel) throw new Error('PATH_REQUIRED: 必须指定源视频');
-  const sourceAbs = R.resolveReplaceInput(sourceRel, cfg, true);
-
-  /**
-   * 参考图：保持用户选择的顺序，**不做任何重排**。
-   *
-   * 这是换人线存在的核心理由 —— 常规渲染里角色卡会插队，
-   * 用户看到的 `<Picture 1>` 与实际提交的可能不是同一张。
-   * 这里 `refs.images` 的数组下标 +1 就是提示词里的 `<Picture N>`。
-   */
-  const refImages = (Array.isArray(body.refImages) ? body.refImages : [])
-    .map((r, i) => {
-      const rel = String(typeof r === 'string' ? r : (r?.rel ?? '')).trim();
-      if (!rel) return null;
-      return { rel, pictureIndex: i + 1, name: String(r?.name ?? rel.split('/').pop()) };
-    })
-    .filter(Boolean);
-  if (!refImages.length) throw new Error('REPLACE_REFS_REQUIRED: 至少需要一张目标角色参考图');
-  if (refImages.length > 9) throw new Error(`TOO_MANY_REFS: 最多 9 张参考图，收到 ${refImages.length}`);
-  // 逐张确认文件真的在（换人最贵，不能跑到一半才 FILE_NOT_FOUND）
-  for (const r of refImages) R.resolveReplaceInput(r.rel, cfg, true);
-
-  /**
-   * 提示词：**两种来源，整段优先**。
-   *
-   *  - `body.prompt` 非空 → 直接用它（用户在前端那一个可编辑框里改过的内容）
-   *  - 否则用结构化字段（roles / shotBeats / extraNote）现场拼一段
-   *
-   * 为什么要支持整段：占位符表单只能表达「一对一替换」。真实需求里
-   * 常有多角色、指定某个角色只出现在某几段、要求某个配角保持不动等等，
-   * 这些都没法用三个输入框表达。让用户直接改整段提示词是唯一不设上限的做法，
-   * 同时也保留了「不想改就别改」的默认体验（打开就是填好的模板）。
-   */
-  const prompt = String(body.prompt ?? '').trim()
-    || R.buildReplacePrompt({
-      roles: body.roles ?? [],
-      shotBeats: body.shotBeats ?? '',
-      extraNote: body.extraNote ?? '',
-    });
-
-  /**
-   * 分段模式。
-   *
-   * `continuation=true` 走续写链路：段间用真实 AV latent 衔接，
-   * 段与段在源视频上有 `contextLength` 帧的重叠，采完裁掉。
-   * 这是解决「独立重绘段间跳变」的正解 —— 但代价是严格串行、
-   * 必须关二采、且任何一段失败后面全废。
-   */
-  const useContinuation = Boolean(body.continuation);
-  const contextLength = useContinuation
-    ? String(body.contextLength ?? R.REPLACE_DEFAULTS.contextLength)
-    : null;
-
-  const plan = await R.planSegments(sourceAbs, cfg, {
-    segmentSec: Number(body.segmentSec) || undefined,
-    continuation: useContinuation,
-    contextLength: contextLength ?? undefined,
-    segmentCount: Number(body.segmentCount) || undefined,
-  });
-
-  const now = Date.now();
-  const task = {
-    id: R.newReplaceId(),
-    title: String(body.title ?? '').trim() || `换人 ${new Date(now).toLocaleString('zh-CN')}`,
-    status: 'draft',
-    sourceRel,
-    sourceHasAudio: plan.hasAudio,
-    sourceWidth: plan.width,
-    sourceHeight: plan.height,
-    durationSec: plan.durationSec,
-    segmentSec: Number(body.segmentSec) || R.REPLACE_DEFAULTS.segmentSec,
-    /** 分段模式：independent（默认）| continuation */
-    mode: plan.mode,
-    continuation: useContinuation,
-    contextLength,
-    segmentCount: Number(body.segmentCount) || null,
-    trimFrames: plan.trimFrames ?? null,
-    overlapSec: plan.overlapSec ?? null,
-    segments: plan.segments.map((s) => ({ ...s, status: 'pending', outputRel: null, jobId: null })),
-    refImages,
-    roles: body.roles ?? [],
-    shotBeats: body.shotBeats ?? '',
-    extraNote: body.extraNote ?? '',
-    prompt,
-    // 渲染参数：用户在页面上没改就是这一套
-    accelPlan: body.accelPlan ?? R.REPLACE_DEFAULTS.accelPlan,
-    preset: body.preset ?? R.REPLACE_DEFAULTS.preset,
-    sampler: body.sampler ?? R.REPLACE_DEFAULTS.sampler,
-    scheduler: body.scheduler ?? R.REPLACE_DEFAULTS.scheduler,
-    steps: Number.isFinite(Number(body.steps)) ? Number(body.steps) : R.REPLACE_DEFAULTS.steps,
-    megapixels: Number.isFinite(Number(body.megapixels)) ? Number(body.megapixels) : R.REPLACE_DEFAULTS.megapixels,
-    denoise: Number.isFinite(Number(body.denoise)) ? Number(body.denoise) : R.REPLACE_DEFAULTS.denoise,
-    secondPass: Boolean(body.secondPass ?? R.REPLACE_DEFAULTS.secondPass),
-    continuation: Boolean(body.continuation ?? R.REPLACE_DEFAULTS.continuation),
-    /**
-     * 续写链的抗身份漂移配方。
-     *
-     * `taperEnabled` 只有两种取值：true（用下面三个数）或 false（完全不接线，
-     * 退回"干净上下文"的老行为 —— 画面会抄上一段外观，但接缝更顺）。
-     * 后端读到 false 时会把 `启用续写上下文加噪` 传成 false。
-     */
-    taperEnabled: Boolean(body.taperEnabled ?? true),
-    taperAlpha: Number.isFinite(Number(body.taperAlpha))
-      ? Number(body.taperAlpha) : R.REPLACE_DEFAULTS.taperAlpha,
-    taperAlphaEnd: Number.isFinite(Number(body.taperAlphaEnd))
-      ? Number(body.taperAlphaEnd) : R.REPLACE_DEFAULTS.taperAlphaEnd,
-    taperRampSteps: Number.isFinite(Number(body.taperRampSteps))
-      ? Number(body.taperRampSteps) : R.REPLACE_DEFAULTS.taperRampSteps,
-    styleId: body.styleId ?? R.REPLACE_DEFAULTS.styleId,
-    lightingId: body.lightingId ?? R.REPLACE_DEFAULTS.lightingId,
-    seed: Number.isFinite(Number(body.seed)) ? Number(body.seed) : 1101,
-    loras: Array.isArray(body.loras) ? body.loras : [],
-    overrides: body.overrides && typeof body.overrides === 'object' ? body.overrides : {},
-    warnings: plan.warnings,
-    finalRel: null,
-    error: null,
-    createdAt: now,
-    updatedAt: now,
-  };
-
-  return R.replaceStore(cfg).upsert(task);
-}
-
-/**
- * 跑一个任务，成功后把产物**自动归档进素材库**。
- *
- * 为什么需要：生成产物落在 `data/outputs/`（临时区），画布产物写回节点后
- * 就没人管了；渲染页、素材库都看不到。"画布 ↔ 渲染页"打不通的根因就是这个。
- *
- * 统一在这里归档，所有生成入口（/generate、/image/generate、
- * /breakdown/generate、/mw/job/generate、comic/render-panels）自动受益，
- * 不用每个入口各写一遍。
- *
- * 归档失败**不影响任务结果**——产物已经生成，只是没进素材库，属于可接受的降级。
- */
-function runAndArchive(job, run, ctx) {
-  return runJob(job, async (running, hooks) => {
-    const result = await run(running, hooks);
-    try {
-      const outs = Array.isArray(result?.outputs) ? result.outputs : [];
-      const archived = [];
-      for (const o of outs) {
-        if (!o?.path) continue;
-        try {
-          const item = await ctx.assets.archiveFile(o.path, {
-            // ASSET_TYPES 白名单里没有 'video'，视频产物用 video_segment
-            // （写 'video' 会被 asset-service 静默降级成 general）
-            type: job.kind === 'image' ? 'general' : 'video_segment',
-            name: `${job.kind === 'image' ? '图' : '片'}_${running.id}`,
-            projectId: job.projectId ?? null,
-            tag: 'auto-archived',
-            note: String(running.prompt ?? '').slice(0, 200),
-          });
-          // ⚠️ 记下**源产物路径**，回填时按它对账。
-          //    旧实现回填时拿 o.path（outputs/job_x.mp4）去 endsWith 归档后的
-          //    新文件名（asset_y.mp4）—— 永远不匹配，于是前端 outputs[] 里
-          //    永远没有 assetId / archivedRel，"产物自动归档"等于只在磁盘上发生，
-          //    用户界面上看不出来。
-          archived.push({ id: item.id, rel: item.rel, assetId: item.id, sourcePath: o.path });
-        } catch { /* 单条失败不阻断 */ }
-      }
-      if (archived.length) {
-        // 把素材 id 附在产物上，前端可直接引用（按源路径精确对账）
-        const norm = (p) => String(p ?? '').replace(/\\/g, '/');
-        result.outputs = outs.map((o) => {
-          const hit = archived.find((a) => a.sourcePath && norm(a.sourcePath) === norm(o.path));
-          return hit ? { ...o, assetId: hit.assetId, archivedRel: hit.rel } : o;
-        });
-      }
-    } catch { /* 归档整体失败不影响产物 */ }
-    return result;
-  });
-}
-
-/**
- * 把项目绑定的角色卡解析进 shot。
- *
- * 实现已下沉到 services/shot-context.js（与 Agent 工具共用同一份），
- * 这里只做转发，避免再次出现"两份实现各自漂移"。
- */
-
-/**
- * 列出可用的中文字体文件（ffmpeg drawtext 需要真实字体路径）。
- *
- * 不再硬编码盘符：用系统字体目录 + 环境变量覆盖，
- * 这样换机器 / 换平台都不会失效。也可以用 DSH_POST_FONT 显式指定。
- */
-function listChineseFonts() {
-  const out = [];
-  const push = (p) => {
-    try { if (p && fs.existsSync(p) && !out.includes(p)) out.push(p); } catch { /* ignore */ }
-  };
-
-  if (process.env.DSH_POST_FONT) push(process.env.DSH_POST_FONT);
-
-  const names = [
-    'msyh.ttc', 'msyhbd.ttc', 'simhei.ttf', 'simsun.ttc',   // Windows
-    'PingFang.ttc', 'Hiragino Sans GB.ttc',                 // macOS
-    'NotoSansCJK-Regular.ttc', 'wqy-zenhei.ttc', 'DejaVuSans.ttf', // Linux
-  ];
-  const dirs = [];
-  if (process.env.SystemRoot) dirs.push(path.join(process.env.SystemRoot, 'Fonts'));
-  if (process.env.WINDIR) dirs.push(path.join(process.env.WINDIR, 'Fonts'));
-  dirs.push(
-    '/System/Library/Fonts',
-    '/Library/Fonts',
-    '/usr/share/fonts',
-    '/usr/share/fonts/truetype',
-    '/usr/local/share/fonts',
-  );
-  for (const d of dirs) {
-    for (const n of names) push(path.join(d, n));
-  }
-  return out;
-}
-
-// 允许通过 /file 读取的 dataDir 子目录（产物与素材）。
-// 白名单而非黑名单：新增运行时文件时默认不会被读到。
-const SERVABLE_DATA_DIRS = Object.freeze([
-  'outputs', 'assets', 'previz', 'previz-shots', 'post', 'comic', 'tmp-inline', 'inputs',
-  /**
-   * 剪辑产物与工程。
-   *
-   * 必须在这里：剪辑页要用 <video src="/file?path=edit/outputs/xxx.mp4"> 内联
-   * 预览成片，白名单里没有 'edit' 会拿到 403 FORBIDDEN_PATH，
-   * 表现为"出片成功但播放器一片空白"——是最容易被误判成前端 bug 的形态。
-   *
-   * 代价：data/edit/*.json 工程文件也变成可读的了。可以接受 ——
-   * 工程里只有片段相对路径与音轨设置，没有任何凭据。
-   */
-  'edit',
-]);
-
-/**
- * abs 是否落在 dataDir 的可读子目录内。
- * @param {string} dataDir
- * @param {string} abs 已由 safeJoin 解析过的绝对路径
- */
-function isServableDataPath(dataDir, abs) {
-  const rel = path.relative(path.resolve(dataDir), path.resolve(abs));
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return false;
-  const top = rel.split(path.sep)[0];
-  return SERVABLE_DATA_DIRS.includes(top);
-}
-
-function guardNoToken(req) {
-  // /token 只做 Origin 校验，不需要 token
-  return _isLoopbackHost(req) && _isSameOrigin(req);
-}
-
-/**
- * 删除项目时清理它名下的运行时数据。
- *
- * 只清理**确定由项目派生**的目录/文件，绝不碰 assets/（素材是用户的资产，
- * 可能被多个项目引用；要删素材请走 /assets/delete）。
- *
- * @returns {{removed:string[], failed:string[]}}
- */
-export function cleanupProjectArtifacts(cfg, projectId) {
-  const removed = [];
-  const failed = [];
-  const targets = [
-    { label: 'shots', abs: path.join(cfg.dataDir, 'shots', projectId) },
-    { label: 'cards', abs: path.join(cfg.dataDir, 'projects', projectId) },
-    { label: 'script', abs: path.join(cfg.dataDir, 'script', `${projectId}.json`) },
-    { label: 'comic', abs: path.join(cfg.dataDir, 'comic', `${projectId}.json`) },
-  ];
-  for (const t of targets) {
-    try {
-      if (!fs.existsSync(t.abs)) continue;
-      fs.rmSync(t.abs, { recursive: true, force: true });
-      removed.push(t.label);
-    } catch (e) {
-      failed.push(`${t.label}: ${String(e?.message ?? e)}`);
-    }
-  }
-  return { removed, failed };
-}
-
-function projectSummary(p) {  return {
-    id: p.id, name: p.name, category: p.category,
-    createdAt: p.createdAt, updatedAt: p.updatedAt,
-    nodeCount: p.nodeCount || 0,
-    rootPath: p.rootPath || '',
-    description: p.description || '',
-  };
-}
-
-function allowedProjectPatch(body) {
-  const out = {};
-  for (const k of ['name', 'category', 'rootPath', 'description', 'nodes', 'edges', 'viewport', 'nodeCount',
-    'scriptProjectName', 'scriptProjectDir', 'comicProjectName', 'comicProjectDir']) {
-    if (body && k in body) out[k] = body[k];
-  }
-  return out;
-}
-
-/** 写盘前：把图里的内联图片抽进 imagePool，节点里只留 __img_ref__:<n> */
-function packProject(project, existingPool) {
-  // 只对可能含图片的字段做打包，其余原样（避免无谓遍历）
-  const { graph: nodes, pool: p1 } = packGraph(project.nodes ?? [], existingPool);
-  const { graph: history, pool: p2 } = packGraph(project.history ?? {}, p1);
-  return { ...project, nodes, history, imagePool: p2 };
-}
-
-/** 读盘后：把 __img_ref__:<n> 还原成图片本体 */
-function unpackProject(project) {
-  if (!project) return project;
-  const pool = project.imagePool ?? [];
-  if (!pool.length && !JSON.stringify(project).includes(IMG_REF_PREFIX)) return project;
-  return {
-    ...project,
-    nodes: unpackGraph(project.nodes ?? [], pool),
-    history: unpackGraph(project.history ?? {}, pool),
-  };
-}
-
-/**
- * 镜头表文件路径。
- *
- * ⚠️ projectId 必须过 safeId —— 这里是 `path.join(..., projectId, ...)`，
- *    不校验的话 `../../..` 能跳出 dataDir。REST 路由有校验，但 Agent 工具
- *    （studio_shot / studio_director / studio_generate）是直接调 listShots/upsertShot，
- *    之前完全没校验，`studio_shot { projectId: '../../../../tmp' }` 可写出数据目录。
- */
-function shotsFile(projectId) {
-  return path.join(dirs().root, 'shots', safeId(projectId), 'shots.json');
-}
-
-export function listShots(projectId) {
-  let f;
-  try { f = shotsFile(projectId); } catch { return []; }   // 非法 id 当作没有镜头，不抛
-  if (!fs.existsSync(f)) return [];
-  /**
-   * ⚠️ 这里**不能** `catch { return [] }`。
-   *
-   * 历史缺陷（数据丢失级）：shots.json 一旦被截断/断电/手工改坏，这个函数
-   * 返回空数组，而 upsertShot 紧接着用这个空数组重建并**覆盖写** ——
-   * 用户的全部镜头卡就此消失，且没有 .corrupt 备份。
-   *
-   * 现在交给 json-store 的 readJson：解析失败会保留 .corrupt 副本并抛
-   * `CORRUPT_JSON`，调用方据此报错而不是把数据静默抹掉。
-   * `file` 不存在 / 空文件仍是正常情况（返回 []）。
-   */
-  const arr = readJson(f, []);
-  return Array.isArray(arr) ? arr : [];
-}
-
-/**
- * 整体写回镜头表（原子写 + 串行队列）。
- *
- * ⚠️ 以前这里是裸 `writeFileSync(tmp) + renameSync`，tmp 名是
- *    `${f}.${pid}.tmp` —— **同进程两次并发写用同一个 tmp 路径**，
- *    后写会覆盖先写的 tmp，再各自 rename，结果一方改动丢失。
- *    网页自动保存（800ms debounce）与 Agent 的 studio_shot save
- *    同时发生就能复现。
- *
- * 现在统一走 json-store 的 updateJson（每文件一条 Promise 队列 + 唯一 tmp 名）。
- */
-export function writeShots(projectId, list) {
-  const f = shotsFile(projectId);      // 非法 id 在这里抛，调用方必须处理
-  return updateJson(f, [], () => list).then(() => list);
-}
-
-/**
- * 插入或更新一个镜头卡（**串行 + 原子**）。
- *
- * 读-改-写整体在 updateJson 的队列里完成 —— 两个并发的部分保存
- * 不会各读一份旧数组然后互相覆盖。
- *
- * @returns {Promise<object>} 落盘后的完整记录
- */
-export async function upsertShot(projectId, shot) {
-  const f = shotsFile(projectId);      // 非法 id 在这里抛
-
-  /**
-   * mode 归一化统一放在**落盘口**：
-   *   REST 可以直接传 body.shot（绕过 newShot），工具也走这里，
-   *   只在 newShot 里归一化覆盖不到这些路径。
-   *
-   * ⚠️ 只归一化**传了的字段**。以前无条件对 actors/props/camera3d 做
-   *    normalize，部分保存（只改 nanfeng/description）会把这些字段
-   *    重置成空数组/null，把镜头卡写坏。
-   */
-  const next = {
-    ...shot,
-    ...(shot.mode !== undefined
-      ? { mode: normalizeMode(shot.mode, { hasRefImages: (shot.refs?.images?.length ?? 0) > 0 }) }
-      : {}),
-    // 3D 预演结构化数据同样在落盘口收敛 —— 这三个字段决定 Blender 渲什么，
-    // 形状错了整镜渲不出来（且错误信息会很难懂）。
-    ...(shot.actors !== undefined ? { actors: normalizeActors(shot.actors) } : {}),
-    ...(shot.props !== undefined ? { props: normalizeProps(shot.props) } : {}),
-    ...(shot.camera3d !== undefined ? { camera3d: normalizeCamera3d(shot.camera3d) } : {}),
-    updatedAt: Date.now(),
-  };
-  if (!next.id) next.id = newShot().id;
-
-  const merged = await updateJson(f, [], (cur) => {
-    const list = Array.isArray(cur) ? cur.slice() : [];
-    const idx = list.findIndex((s) => s && s.id === next.id);
-
-    /**
-     * 先合并出**完整记录**，再校验。
-     *
-     * ⚠️ 顺序很重要：
-     *    1) 部分保存时 next 只有几个字段，直接校验必然报"时长缺失"等假错
-     *    2) 校验和夹取要作用在合并后的完整记录上，写盘后才是合法的镜头卡
-     *
-     * 合并语义：显式传 null 表示"清空"，不传（undefined）表示"保持不变"。
-     * 直接 `{ ...old, ...next }` 会用 undefined 覆盖旧值 —— 只改 nanfeng
-     * 的部分保存会把 durationSec/ratio/refs 全清掉，把镜头卡写坏。
-     */
-    const mergedShot = idx >= 0 ? { ...list[idx] } : {};
-    for (const [k, v] of Object.entries(next)) {
-      if (v !== undefined) mergedShot[k] = v;
-    }
-
-    // 落到合法区间（避免下游跑炸），警告挂到记录上
-    const raw = Number(mergedShot.durationSec);
-    if (Number.isFinite(raw)) mergedShot.durationSec = Math.min(15, Math.max(1, raw));
-    if (Array.isArray(mergedShot.refs?.images) && mergedShot.refs.images.length > 9) {
-      mergedShot.refs = { ...mergedShot.refs, images: mergedShot.refs.images.slice(0, 9) };
-    }
-    mergedShot.validation = validateShot(mergedShot);
-
-    if (idx >= 0) list[idx] = mergedShot;
-    else list.push(mergedShot);
-    return list;
-  });
-
-  const saved = (Array.isArray(merged) ? merged : []).find((s) => s && s.id === next.id) ?? next;
-
-  // 广播给浏览器：DSH Agent 改了镜头卡 → 网页表单立即可见
-  emit({ type: 'shot-updated', projectId, shotId: saved.id });
-
-  // 返回落盘后的完整记录，而不是只含本次改动字段的 next
-  return saved;
-}
-
-/**
- * 共享的生成入参准备（已下沉到 services/shot-context.js）。
- * 这里重新导出，保持既有调用点与测试的 import 路径不变。
- */
-export { withVaultCards, resolveMediaRefs, writeBackProbe, resolvePictureIndices } from '../services/shot-context.js';
-
-/**
- * 编译提示词。
- *
- * 优先走 **H3 官方六段式/三段式编译器**（services/h3-prompt.js），
- * 它按用户提供的技能书规范生成结构化提示词。
- * 镜头卡没给够字段时（无 subjects / 无 shots）退回简单的段落拼接，
- * 保证旧数据仍能生成。
- */
-export function compilePrompt(shot, outWarnings = null) {
-  // ⚠️ 手工提示词优先级最高：直接整段使用，不再走编译。
-  //
-  // 为什么必须放在最前面：用户在渲染页的提示词编辑器里写好的完整六段式，
-  // 是**成品**，不是素材。早先的实现在编译后用
-  // `pkg.sceneLayout += shot.prompt` 把整段塞进 SCENE LAYOUT 字段，
-  // 结果模型收到的是「自动编译的骨架 + 后面挂一坨完整提示词」的畸形文本，
-  // 两套 subject_definitions 互相打架。
-  //
-  // 判据：长度超过 200 字符才认为是"用户手写的完整提示词"，
-  // 避免老数据里 `prompt: "一句话描述"` 这类简短备注被误当成成品。
-  if (typeof shot.prompt === 'string' && shot.prompt.trim().length > 200) {
-    // 手写成品同样要守官方硬上限 —— 但按句末截断，不在单词中间切断
-    return truncatePromptKeepFields(shot.prompt.trim(), H3_LIMITS.promptOfficialMaxChars);
-  }
-
-  // 走官方结构：需要有 mode 或 styleId，或显式给了 subjects。
-  // mode 统一归一化，短名（t2v/i2v/fl2v）也能正确进编译器分支。
-  const mode = normalizeMode(shot.mode, { hasRefImages: (shot.refs?.images?.length ?? 0) > 0 });
-  const useStructured = Boolean(mode || shot.styleId || shot.subjects?.length || shot.h3mode);
-  if (useStructured) {
-    try {
-      // ⚠️ subjects 优先级：显式 subjects > 角色卡 > 从 description 猜。
-      //    早先只看 shot.subjects，导致用角色卡生成的镜头 **summary 里没有角色名**
-      //    （deriveSummary 拿不到 subjects，拼出「的一段戏。」这种残句）。
-      //
-      // ⚠️ pictureIndex 必须来自**真实参考图顺序**（resolvePictureIndices），
-      //    不能是"第几张卡"。之前用 i+1：一旦有卡没图 / 有手工图 /
-      //    有视频音频占位，编号就整体错位，提示词里的 <Picture N> 指错人。
-      //    渲染页展示的编号（/render/plan）与这里必须一致。
-      const cardSubjects = Array.isArray(shot.characterCards)
-        ? resolvePictureIndices(shot)
-        : [];
-      const subjects = shot.subjects ?? (cardSubjects.length ? cardSubjects : deriveSubjectsFromShot(shot));
-
-      const pkg = toShotInputPackage(shot, {
-        styleId: shot.styleId ?? null,
-        subjects,
-        scenes: shot.scenes ?? undefined,
-        seed: shot.seed,
-        /**
-         * 续写上下文透传。
-         *
-         * `continuationTask` 存在 job.params 上（见 executeBackend 的 runH3Nanfeng 调用），
-         * 但 compilePrompt 只拿到 shot —— 所以调用方需要先把它挂到 shot 上。
-         * 见 executeBackend 里的 `shotForCompile`。
-         */
-        continuationTask: shot.continuationTask ?? null,
-        continuationIndex: shot.continuationIndex ?? null,
-        contextLength: shot.nanfeng?.overrides?.context_length ?? '22',
-      });
-      // 兼容旧字段：description/camera/style 已在 toShotInputPackage 里映射。
-      //
-      // 注意：这里**不再**把 `shot.prompt` 追加到 sceneLayout。
-      // 完整的用户提示词已在函数开头直接返回；能走到这里的 `prompt`
-      // 只可能是不足 200 字的简短备注，把它当场景补充说明更合理，
-      // 所以限制为短文本，避免长文本重复灌入导致提示词畸形。
-      //
-      // ⚠️ 但它**不能只写进 sceneLayout**（历史缺陷，已实测复现）：
-      //    compileRef2VA 的分支是
-      //        if (scenes.length) { …逐镜头… } else { layout = sceneLayout … }
-      //    （见 h3-prompt.js 的 detailed_description 段），而
-      //    toShotInputPackage **永远**会造一个默认 shots 数组（shots: opts.scenes ?? [{…}]）。
-      //    于是 scenes 恒非空 → sceneLayout 分支恒不执行 →
-      //    只写 sceneLayout 等于把这句话扔进死字段。
-      //
-      //    实测后果：`prompt: "Video depicts a sexual scene between …"`（146 字）
-      //    提交后提示词里**一个字都没有**，模型收到的是 description 编译出来的骨架。
-      //    LoRA 的触发词往往就是这么一句短中文/短英文，正好全落在 200 字以下 ——
-      //    用户以为挂上了 LoRA 就能出效果，实际触发词根本没进提示词。
-      //
-      //    修法：同时追加进 scenes 的第一个镜头 action（那才是真正被读取的字段），
-      //    并做一次去重，避免与 description 相同时重复两遍。
-      const shortPrompt = shot.prompt ? String(shot.prompt).trim() : '';
-      if (shortPrompt && shortPrompt.length <= 200) {
-        const desc = String(pkg.sceneLayout ?? '').trim();
-        const dup = desc.includes(shortPrompt)
-          || (Array.isArray(pkg.shots) && pkg.shots.some((s) => String(s?.action ?? '').includes(shortPrompt)));
-        if (!dup) {
-          pkg.sceneLayout = `${pkg.sceneLayout}\n${shortPrompt}`;
-          // 真正会被 compileRef2VA 读到的位置
-          if (Array.isArray(pkg.shots) && pkg.shots.length) {
-            const first = pkg.shots[0];
-            first.action = `${String(first.action ?? '').trim()} ${shortPrompt}`.trim();
-          }
-        }
-      }
-
-      // ⚠️ 环境声/配乐要显式带过去。
-      //    早先它们被 workbench 的默认值覆盖（"环境底噪" / "N/A"），
-      //    用户在镜头卡里填的真实值根本没进提示词。
-      if (shot.sound) pkg.overall_soundscape = shot.sound;
-      if (shot.music) pkg.non_diegetic_music = shot.music;
-
-      // ⚠️ 参考视频/音频的**用途说明**必须走 buildMediaNotes。
-      //
-      // 历史缺陷：buildMediaNotes 只挂在 /render/compile 上，而那是个
-      // 没人调用的死端点。真实生成路径（本函数）不产 mediaNotes，
-      // 于是 compileRef2VA 只能退化到内置默认句 —— 所有参考视频都被写成
-      // `transfer motion only`，"续篇 / 节奏 / 氛围"这三类用途永远表达不出来，
-      // 参考音频也拿不到"谁的音色"绑定。
-      try {
-        // ⚠️ buildRenderPlan 是**解构对象**入参，不是 (shot, cfg)。
-        //    历史实现写成 `buildRenderPlan(shot, cfg)` —— shot 被当成 opts 解构，
-        //    cfg 被整个忽略，于是 cards / manualImages 全部丢失：
-        //      · mediaNotes 里永远没有 <Video 1> / <Audio 2> 定义句
-        //      · compileRef2VA 的 hasProvidedMediaDefs 恒 false → 退到内置默认句
-        //      · 参考视频的「续篇/节奏/氛围」三种用途永远表达不出来
-        const plan = buildRenderPlan({
-          cards: shot.characterCards ?? [],
-          manualImages: shot.refs?.images ?? [],
-          previz: shot.previz ?? null,
-          sceneImages: [...(shot.sceneRefs ?? []), ...(shot.itemRefs ?? [])],
-          videos: shot.refs?.videos ?? [],
-          audios: shot.refs?.audios ?? [],
-          refImageSize: shot.refImageSize ?? 'match',
-        });
-        const notes = buildMediaNotes(plan);
-        if (Array.isArray(notes) && notes.length) pkg.mediaNotes = notes;
-      } catch { /* 构建计划失败不影响编译 */ }
-
-      const r = compileH3Prompt(pkg);
-      // ⚠️ 不能静默 slice(0,7000)。
-      //
-      //    compileH3Prompt 内部的 lintCompiledPrompt 只**警告**不截断，而这里
-      //    硬切会从中间砍断字段：六段格式被切成两段，detailed_description 与
-      //    non_diegetic_music 整段消失，模型收到的是结构残缺的提示词，
-      //    而且那两条「超过 7000 上游可能拒绝」的警告也随 r.warnings 一起被丢弃。
-      //
-      //    现在：超长时保留完整字段边界地截断，并把 lint 警告交给调用方
-      //    （`outWarnings` 数组，由 generate 写进 job.warnings 让用户看得见）。
-      if (Array.isArray(r.warnings) && r.warnings.length && Array.isArray(outWarnings)) {
-        outWarnings.push(...r.warnings);
-      }
-      if (r.prompt && r.prompt.length > 40) {
-        return r.prompt.length > H3_LIMITS.promptOfficialMaxChars
-          ? truncatePromptKeepFields(r.prompt, H3_LIMITS.promptOfficialMaxChars)
-          : r.prompt;
-      }
-    } catch {
-      // 结构化编译失败 → 退回简单拼接，不让生成中断
-    }
-  }
-  // ==========================================================================
-  // 兜底：结构化编译抛错时的极简组装
-  // ==========================================================================
-  //
-  // ⚠️ 历史缺陷：这里曾拼出「风格：X\n运镜：Y\n台词：Z」这种中文标签串。
-  //    那是**没有任何官方格式依据**的自由文本，模型拿到的是一堆冒号标签，
-  //    既不是基础格式也不是六段格式 —— 属于最差的一种输出。
-  //
-  //    现在兜底也遵守官方基础格式：至少产出三字段，让模型能解析。
-  //    宁可少写内容，也不能产出没有结构的东西。
-  const fallbackDesc = [
-    shot.description,
-    shot.camera ? `The camera ${shot.camera}.` : '',
-    shot.dialogue ? `The subject is visible on screen and says: <d>[Chinese] ${shot.dialogue}</d>` : '',
-  ].filter(Boolean).join(' ').trim();
-
-  const fb = [
-    `integrated_multimodal_description: [Shot 1] ${fallbackDesc || 'A short scene.'}`,
-    '',
-    `overall_soundscape: ${shot.sound || 'Quiet environmental room tone with soft air movement.'}`,
-    '',
-    `non_diegetic_music: ${shot.music || 'N/A'}`,
-  ].join('\n');
-
-  return fb.slice(0, 7000);
-}
-
-/**
- * 从镜头卡推断 subjects（参考图 → 角色）。
- * 没有显式 subjects 时用这个兜底，让结构化编译器也能工作。
- *
- * ⚠️ 已导出：`host/tools.js` 的 `studio_prompt(fromShot)` 必须用同一份逻辑，
- *    否则"Agent 编译的提示词"与"REST 预览 / 真实生成"会漂移。
- *    任何新的预览入口都应调用这里，不要自己再写一份。
- */
-export function deriveSubjectsFromShot(shot) {
-  // ⚠️ 必须与 resolveRefImages 的 9 张上限一致。
-  //    历史实现按 `refs.images` 全量编号，12 张就给到 <Picture 12>，
-  //    而生成时只提交 9 张 —— 提示词里 <Picture 10..12> 是悬空引用，
-  //    模型被指向不存在的素材，且不报错。
-  const imgs = (shot.refs?.images ?? []).slice(0, 9);
-  if (!imgs.length) return [];
-  return imgs.map((_, i) => ({
-    id: `S${i + 1}`,
-    name: `角色${i + 1}`,
-    pictureIndex: i + 1,
-    gender: 'FEMALE',
-    traits: '',
-  }));
-}
-
-async function monitorPayload(ctx) {
-  const stats = runtimeStats();
-  const allJobs = await jobsStore().list();
-  const running = allJobs.filter((j) => j.status === 'running').length;
-  const queued = allJobs.filter((j) => j.status === 'queued').length;
-  const failed = allJobs.filter((j) => j.status === 'failed').length;
-  const cfg = loadConfig();
-  const [h3] = await Promise.all([comfy.health(cfg)]);
-  return {
-    jobs: { total: allJobs.length, running, queued, failed, ...stats },
-    h3,
-    blender: blenderStatus(),
-    disk: diskFree(cfg.dataDir),
-    updatedAt: Date.now(),
-  };
-}
-
-function diskFree(dir) {
-  try {
-    const st = fs.statfsSync ? fs.statfsSync(dir) : null;
-    if (!st) return null;
-    return { freeBytes: Number(st.bfree) * Number(st.bsize), totalBytes: Number(st.blocks) * Number(st.bsize) };
-  } catch { return null; }
-}
-
 
 /* --------------------------------------------------- 后端执行分发 */
-
 
 async function executeBackend(job, shot, ctx, cfg, hooks) {
   /**
@@ -3073,7 +2371,7 @@ async function executeBackend(job, shot, ctx, cfg, hooks) {
    * 相对旧的 h3-local（模板替换）：
    *   · 支持潜空间放大二采（旧路径没有）
    *   · 支持跨镜头续写（旧路径没有）
-   *   · 参数体系 217 个，由 nanfeng/schema.js 统一定义
+   *   · 参数体系 221 个，由 bridge/vendors/nanfeng/schema.js 统一定义
    */
   if (job.backendId === 'h3-nanfeng') {
     return runH3Nanfeng({
@@ -3130,20 +2428,4 @@ async function executeBackend(job, shot, ctx, cfg, hooks) {
 function loadImageWorkflow(cfg = loadConfig()) {
   return readWorkflowCached('image', cfg);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

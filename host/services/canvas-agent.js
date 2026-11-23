@@ -90,15 +90,28 @@ const SERVER_PERMISSIONS = { ...DEFAULT_CANVAS_PERMISSIONS };
 /**
  * 权限持久化文件。
  * 权限是"用户对我的信任级别"，属于配置性状态，应当跨重启保留。
+ *
+ * ⚠️ 历史缺陷（P2）：旧实现用 `_permFile` **模块级一次性缓存**，
+ *    第一次调用时把路径钉死。改 `dataDir` 之后权限仍在读写旧目录，
+ *    而且不会报错 —— 用户看到的是"权限设置保存了但重启就丢"。
+ *    现在按 `dataDir` 做 Map 缓存，配置一改自然指向新目录。
  */
-let _permFile = null;
+const _permFiles = new Map();
 function permissionsFile(cfg) {
-  if (_permFile) return _permFile;
-  try {
-    const dir = cfg?.dataDir;
-    if (dir) _permFile = path.join(dir, 'canvas-permissions.json');
-  } catch { /* ignore */ }
-  return _permFile;
+  const dir = cfg?.dataDir;
+  if (!dir) return null;
+  const key = String(dir);
+  let f = _permFiles.get(key);
+  if (!f) {
+    f = path.join(key, 'canvas-permissions.json');
+    _permFiles.set(key, f);
+  }
+  return f;
+}
+
+/** 配置变更时清掉缓存（由 host/index.js 的 wireConfigInvalidation 调用） */
+export function resetCanvasPermissionsCache() {
+  _permFiles.clear();
 }
 
 /** 从磁盘载入权限（启动/首次读取时调一次；失败回落默认值） */
@@ -178,7 +191,7 @@ function text(v) {
  * 注意：不做持久化 —— 画布状态的真相源在前端，
  * 这里只负责「读 + 计算出变更」，把 diff 交回前端应用。
  */
-export function createCanvasAgent({ cfg, getProject, listAssets, runGenerate, runSkill } = {}) {
+export function createCanvasAgent({ getProject, listAssets, runGenerate, runSkill } = {}) {
   /** 权限检查 */
   function need(perm, granted) {
     if (!perm) return;

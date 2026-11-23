@@ -442,6 +442,17 @@ function CanvasInner() {
   const loadedProjectRef = useRef<string | null>(null);
   /** 远端加载期间禁止 autosave 触发（否则会把空画布存回去） */
   const hydratingRef = useRef(false);
+  /**
+   * 加载重试计数。
+   *
+   * ⚠️ 历史 P0（本次修复）：加载失败后的「重新载入项目 / 重试」两个按钮
+   *    **完全无效**。原因：加载 effect 的依赖是 [projectId, rf, bumpHistory]，
+   *    点按钮只做了 loadedProjectRef.current = null，没有让依赖变化 →
+   *    effect 根本不会重跑。用户点了几次没反应，只能刷新整页（画布内容丢失）。
+   *
+   *    现在按钮 setReloadTick(n => n + 1)，reloadTick 是 effect 的依赖。
+   */
+  const [reloadTick, setReloadTick] = useState(0);
 
   viewportRef.current = viewport;
   projectIdRef.current = projectId;
@@ -497,9 +508,11 @@ function CanvasInner() {
       loadedProjectRef.current = null;
       return;
     }
-    if (loadedProjectRef.current === projectId) return;
+    // reloadTick 变化 = 用户主动要求重载：无视已加载标记，重新走一遍
+    if (loadedProjectRef.current === projectId && reloadTick === 0) return;
 
     let cancelled = false;
+    let releaseTimer: ReturnType<typeof window.setTimeout> | null = null;
     hydratingRef.current = true;
     setLoading(true);
     setLoadError(null);
@@ -542,8 +555,11 @@ function CanvasInner() {
       } finally {
         if (!cancelled) {
           setLoading(false);
-          // 延后解除 hydration 保护，避免加载完立刻触发保存
-          window.setTimeout(() => {
+          // 延后解除 hydration 保护，避免加载完立刻触发保存。
+          // ⚠️ 句柄必须保存并在 cleanup 里清掉：旧实现没清，切项目时
+          //    上一个项目的定时器会提前把新项目的 hydration 保护解除，
+          //    于是**只加载了一半的画布**被 autosave 写回后端。
+          releaseTimer = window.setTimeout(() => {
             hydratingRef.current = false;
           }, 120);
         }
@@ -552,9 +568,10 @@ function CanvasInner() {
 
     return () => {
       cancelled = true;
+      if (releaseTimer !== null) window.clearTimeout(releaseTimer);
       hydratingRef.current = false;
     };
-  }, [projectId, rf, bumpHistory]);
+  }, [projectId, rf, bumpHistory, reloadTick]);
 
   /* ---------------------------- 历史记录辅助 ----------------------------- */
   const pushHistory = useCallback(
@@ -948,6 +965,21 @@ function CanvasInner() {
     commitGraph(result.nodes, result.edges, { label: 'remove-node' });
   }, [commitGraph]);
 
+  /**
+   * 批量删除当前选中的节点（Delete / Backspace）。
+   *
+   * ⚠️ 历史缺陷（本次修复）：SettingsPage 的快捷键表写着「Delete 删除节点」，
+   *    但画布 `deleteKeyCode={null}` 且 keydown 处理器里**没有 Delete 分支** ——
+   *    文档撒谎，用户按 Delete 毫无反应。
+   */
+  const removeSelected = useCallback(() => {
+    const ids = nodesRef.current.filter((n) => n.selected).map((n) => n.id);
+    if (!ids.length) return;
+    const result = removeNodes(nodesRef.current, edgesRef.current, ids);
+    commitGraph(result.nodes, result.edges, { label: 'remove-selected' });
+    toast.ok(`已删除 ${ids.length} 个节点`);
+  }, [commitGraph, toast]);
+
   const runNode = useCallback(
     (nodeId: string) => {
       const node = nodesRef.current.find((n) => n.id === nodeId);
@@ -1230,6 +1262,13 @@ function CanvasInner() {
     toast.ok(`已粘贴 ${created.length} 个节点`);
   }, [commitGraph, clipboard, toast]);
 
+  const zoomIn = useCallback(() => void rf.zoomIn({ duration: 160 }), [rf]);
+  const zoomOut = useCallback(() => void rf.zoomOut({ duration: 160 }), [rf]);
+  const fitView = useCallback(() => void rf.fitView({ padding: 0.22, duration: 220 }), [rf]);
+  const resetView = useCallback(() => {
+    void rf.setViewport({ x: 0, y: 0, zoom: 1 }, { duration: 200 });
+  }, [rf]);
+
   /* ------------------------------ 键盘快捷键 ----------------------------- */
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -1276,10 +1315,27 @@ function CanvasInner() {
         void saverRef.current?.flush();
         return;
       }
+
+      /**
+       * 以下是 SettingsPage 快捷键表里**早就写好但从未实现**的两条：
+       *   · Delete / Backspace → 删除选中节点
+       *   · F                  → 适配视图
+       * 都在非编辑态下才生效，避免在输入框里按 Backspace 就删节点。
+       */
+      if (!isEditing && !mod && (e.key === 'Delete' || e.key === 'Backspace')) {
+        e.preventDefault();
+        removeSelected();
+        return;
+      }
+      if (!isEditing && !mod && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        fitView();
+        return;
+      }
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [doCopy, doGroup, doPaste, doRedo, doUndo, doUngroup, selectAll]);
+  }, [doCopy, doGroup, doPaste, doRedo, doUndo, doUngroup, selectAll, removeSelected, fitView]);
 
   /* -------------------------------- 视图 --------------------------------- */
   const onMoveEnd = useCallback(
@@ -1290,13 +1346,6 @@ function CanvasInner() {
     },
     [scheduleSave],
   );
-
-  const zoomIn = useCallback(() => void rf.zoomIn({ duration: 160 }), [rf]);
-  const zoomOut = useCallback(() => void rf.zoomOut({ duration: 160 }), [rf]);
-  const fitView = useCallback(() => void rf.fitView({ padding: 0.22, duration: 220 }), [rf]);
-  const resetView = useCallback(() => {
-    void rf.setViewport({ x: 0, y: 0, zoom: 1 }, { duration: 200 });
-  }, [rf]);
 
   /* ----------------------------- 右键菜单动作 ---------------------------- */
   const handleNodeMenuAction = useCallback(
@@ -1552,7 +1601,16 @@ function CanvasInner() {
               <div className="jz-canvas__empty-title">画布加载失败</div>
               <div className="jz-canvas__empty-hint">{loadError}</div>
               <div className="jz-canvas__empty-actions">
-                <Button size="sm" onClick={() => void loadProjects(true)}>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    // 必须让加载 effect 真的重跑：只清 loadedProjectRef 不会改变依赖
+                    loadedProjectRef.current = null;
+                    setLoadError(null);
+                    setReloadTick((n) => n + 1);
+                    void loadProjects(true);
+                  }}
+                >
                   重新载入项目
                 </Button>
                 <Button
@@ -1561,7 +1619,7 @@ function CanvasInner() {
                   onClick={() => {
                     loadedProjectRef.current = null;
                     setLoadError(null);
-                    void loadProjects(true);
+                    setReloadTick((n) => n + 1);
                   }}
                 >
                   重试
@@ -1571,7 +1629,7 @@ function CanvasInner() {
           ) : projectsError && !projectId ? (
             <div className="jz-canvas__empty">
               <div className="jz-canvas__empty-title">项目列表不可用</div>
-              <div className="jz-canvas__empty-hint">{projectsError}</div>
+              <div className="jz-canvas__empty-hint">{describeError(projectsError)}</div>
             </div>
           ) : (
             <>
@@ -1831,9 +1889,3 @@ export default function CanvasArea() {
 
 /** 供测试/调试：注册表 type 列表与端口矩阵的快速导出 */
 export { NODE_TYPE_KEYS, CATEGORY_ORDER };
-
-
-
-
-
-

@@ -22,8 +22,8 @@
  * ============================================================================
  *
  *  · 只认 ai-runtime 目录下的 start-h3.ps1 —— **不自己拼命令行**。
- *    端口选择（避开 Hyper-V 保留段）、`--lowvram --use-ck-attention`
- *    这些参数、端口文件落盘，全在脚本里，重复一份必然走样。
+ *    端口选择（避开 Hyper-V 保留段）、`--lowvram --disable-pinned-memory
+ *    --use-ck-attention` 这些参数、端口文件落盘，全在脚本里，重复一份必然走样。
  *
  *  · 停止用 `/interrupt` + 进程终止的组合：
  *    先请 ComfyUI 中断当前任务（尽力而为），再杀进程。
@@ -37,7 +37,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
-import { loadConfig } from '../config.js';
 import { discoverComfyUrl, resetComfyProbe } from './comfy-client.js';
 
 /** 停止后等待端口释放的上限 */
@@ -202,14 +201,37 @@ function pidOnPort(port) {
 }
 
 /**
+ * 找出 ComfyUI **实际可达**的端口。
+ *
+ * ⚠️ 不能只用 `.comfy-port`：端口文件可能缺失/写坏/目录被搬走（readPort 返回 0），
+ *    而 ComfyUI 完全可能仍在运行（用户的 DSH_COMFY_URL、或脚本挑了个别的端口）。
+ *    只认端口文件会让「停止」误报 "本来就没在运行"，把 10–14GB 显存留在卡上。
+ *
+ * 顺序：端口文件 → 探测得到的可达地址 → 0
+ */
+async function resolveLivePort() {
+  const declared = readPort();
+  if (declared && (await portListening(declared))) return declared;
+
+  const url = discoverComfyUrl();
+  if (url) {
+    try {
+      const p = Number(new URL(url).port);
+      if (p && (await portListening(p))) return p;
+    } catch { /* 非法 URL，忽略 */ }
+  }
+  return 0;
+}
+
+/**
  * 停止 ComfyUI。
  *
  * 顺序很重要：先 `/interrupt` 让当前采样收尾，再终止进程。
  * 直接杀进程可能让正在写的 mp4 / safetensors 变成半截文件。
  */
 export async function stopComfy() {
-  const port = readPort();
-  if (!(await portListening(port))) {
+  const port = await resolveLivePort();
+  if (!port) {
     resetComfyProbe();
     return { ok: true, alreadyStopped: true, detail: '本来就没在运行' };
   }
@@ -360,6 +382,3 @@ export async function withLock(fn) {
   busy = true;
   try { return await fn(); } finally { busy = false; }
 }
-
-// loadConfig 在签名里保留，方便上层统一注入；此处不直接使用
-void loadConfig;

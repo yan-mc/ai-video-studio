@@ -58,7 +58,7 @@
 
 ### 方案 C：复用 DSH 内置 LLM（零下载）
 
-项目已有 `callText(ctx, cfg, {system, user})`（`host/services/nanfeng/dsh-llm.js:182`），
+项目已有 `callText(ctx, cfg, {system, user})`（`host/bridge/llm/dsh-llm.js`（本文写作时还在 `host/services/nanfeng/`，现已迁入 bridge）），
 走用户已登录的 DSH 模型，**不需要任何 API Key**。
 
 **优点**：零下载、质量最高

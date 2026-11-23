@@ -183,10 +183,18 @@ class NanFengH3ImageCanvasSize32V15:
         return min(1920, width), min(1920, height)
 
 
+# H3 训练分布下限 / 上限，与宿主 host/store/models.js 的 h3Length() 同值。
+# 宿主按下限 124 帧规划镜头，vendor 若仍从 5 帧起算，2 秒镜头会被生成成 56 帧，
+# 参考视频比成片长一倍多，动作演一半就断（V-07）。这里必须夹到与宿主相同的区间。
+MIN_FRAMES = 124
+MAX_FRAMES = 362
+
+
 def duration_to_frames(seconds: float) -> int:
-    """H3 要求帧数满足 17n+5；与原工作流公式完全一致。"""
+    """H3 要求帧数满足 17n+5；再夹到 [124, 362] 与宿主 h3Length() 一致。"""
     frames = max(5, round(float(seconds) * FPS))
-    return frames + (5 - frames % 17) % 17
+    frames = frames + (5 - frames % 17) % 17
+    return min(MAX_FRAMES, max(MIN_FRAMES, frames))
 
 
 def _result(value):
@@ -858,9 +866,12 @@ class NanFengH3ReleaseLatentUpscalerBeforeSecondPassV15:
         easy_use_cleared = _clear_optional_easy_use_cache()
         cleared = 0
         moved = 0
-        # 上游3D放大器把CUDA模型保存在模块级MODEL_CACHE；torch.empty_cache不能释放这些引用。
+        # 上游放大器把CUDA模型保存在模块级MODEL_CACHE；torch.empty_cache不能释放这些引用。
+        # 必须覆盖全部三个模块：h3_upscaler_common、minimax_h3_latent_upscaler_2d/3d。
+        # 早先只匹配 "h3_upscaler_common"，2D/3D 两个节点的缓存永远清不掉 ——
+        # 换模型/换精度后旧模型一直常驻 RAM（force_unload 只 .to("cpu") 不删引用）。
         for module_name, module in list(sys.modules.items()):
-            if "h3_upscaler_common" not in module_name.lower():
+            if "h3_upscaler" not in module_name.lower() and "latent_upscaler" not in module_name.lower():
                 continue
             cache = getattr(module, "MODEL_CACHE", None)
             if not isinstance(cache, dict):
@@ -914,7 +925,9 @@ class NanFengH3ClearUpscalerCacheResidentV15:
         cleared = 0
         moved = 0
         for module_name, module in list(sys.modules.items()):
-            if "h3_upscaler_common" not in module_name.lower():
+            # 覆盖 h3_upscaler_common 与 minimax_h3_latent_upscaler_2d/3d 三个模块。
+            # 早先只匹配 "h3_upscaler_common"，2D/3D 节点的缓存永远清不掉。
+            if "h3_upscaler" not in module_name.lower() and "latent_upscaler" not in module_name.lower():
                 continue
             cache = getattr(module, "MODEL_CACHE", None)
             if not isinstance(cache, dict):
@@ -1354,10 +1367,10 @@ class NanFengH3MultiReferenceGenerator:
             # 智能音频驱动负责分镜拆分；真正采样必须显式勾选锁音频，避免只按画面分镜生成却重绘音轨。
             raise ValueError("智能音频驱动生成必须同时勾选“开启锁音频”，才能把当前音频分段锁入NativeAudioLock。")
         audio_drive_filename = _clean_filename(kwargs.get("音频驱动文件")) if audio_drive_enabled and not timeline_only else ""
-        if True:  # 该分支对 V15 恒成立
-            trigger = str(kwargs.get("恒定触发词", "")).strip()
-            body = str(提示词 or "").lstrip("\r\n")
-            提示词 = f"{trigger}\n{body}" if trigger and body else (trigger or body)
+        # 恒定触发词拼接（原包用 `if True:` 包裹，已展开）。
+        trigger = str(kwargs.get("恒定触发词", "")).strip()
+        body = str(提示词 or "").lstrip("\r\n")
+        提示词 = f"{trigger}\n{body}" if trigger and body else (trigger or body)
         if audio_drive_enabled and not timeline_only and not audio_drive_filename:
             raise ValueError("智能音频驱动已开启，但没有可用于锁定的音频驱动文件。")
         selected_modes = [name for name, enabled in (("文生视频", 文生视频), ("图生视频", 图生视频), ("首尾帧", 首尾帧)) if enabled]
@@ -1398,11 +1411,10 @@ class NanFengH3MultiReferenceGenerator:
         width, height = (
             (32, 32)
             if original_ratio
-            else v81_resolution_from_megapixels(
-                画面比例, 百万像素, int(kwargs.get("H3潜空间对齐", 2)),
-            )
-            if True
-            else resolution_from_megapixels(画面比例, 百万像素, int(尺寸倍数))
+            # V-04：一采画布固定 latent_align=2。`H3潜空间对齐` 是**二采**放大器的参数，
+            # 原实现却把它读进一采画布（默认 2→864×480；设 32→1024×512，token 多 26.7%），
+            # 等于让二采设置偷偷改一采尺寸。一采只认 2，二采仍读原始 kwargs（见下方放大器）。
+            else v81_resolution_from_megapixels(画面比例, 百万像素, 2)
         )
         length = duration_to_frames(时长秒)
         reference_long_edge = int(kwargs.get("参考图最长边", 1920))
@@ -1413,15 +1425,8 @@ class NanFengH3MultiReferenceGenerator:
         # 不再在一个Python函数中手工持有整套模型对象。
         g = GraphBuilder()
         selected_model = 模型
-        # V6起，模式切换只改变条件节点，不得替用户改动“模型”下拉选择。
-        # V1-V5保留既有自动Ref/FL家族切换，避免破坏旧工作流行为。
-        if False:  # V6+ 模式切换不再自动改家族
-            try:
-                import folder_paths
-                installed = folder_paths.get_filename_list("diffusion_models")
-            except Exception:
-                installed = []
-            selected_model = _select_fl2va_model(模型, installed)
+        # 已废弃分支：V15 恒不启用（原 V1-V5 自动 Ref/FL 家族切换，V6 起由用户下拉决定，见上）。
+        # 删除前确认过 _select_fl2va_model 只在此处被调用，删除后该 helper 成为未引用的死函数。
         # 起始释放节点同时作为四个Loader名称的依赖屏障，保证它必定先于任何大模型加载执行。
         start = g.node(
             "NanFengH3ReleaseAtStartV15", unet_name=selected_model, clip_name=文本编码器,
@@ -1466,15 +1471,15 @@ class NanFengH3MultiReferenceGenerator:
             SageAttention = "disabled"
             sol_enabled = False
             t8_enabled = False
-        if True:  # 该分支对 V15 恒成立
-            # V7统一下拉：关闭、40系可用的通用Sage各后端、H3专用Sage；旧Sol/T8字段不再执行。
-            SageAttention = (
-                "auto" if selected_h3_attention == H3_DEDICATED_ATTENTION_AUTO
-                else selected_h3_attention if selected_h3_attention in V7_GENERAL_SAGE_MODES
-                else "disabled"
-            )
-            sol_enabled = False
-            t8_enabled = False
+        # V7统一下拉：关闭、40系可用的通用Sage各后端、H3专用Sage；旧Sol/T8字段不再执行。
+        # 该分支对 V15 恒成立（原包用 `if True:` 包裹，已展开）。
+        SageAttention = (
+            "auto" if selected_h3_attention == H3_DEDICATED_ATTENTION_AUTO
+            else selected_h3_attention if selected_h3_attention in V7_GENERAL_SAGE_MODES
+            else "disabled"
+        )
+        sol_enabled = False
+        t8_enabled = False
         if h3_dedicated_attention and (sol_enabled or t8_enabled):
             raise ValueError("H3专用注意力与 Sol-Attn、T8 Block Cache 互斥；请只开启一种加速机制。")
         # Sage and Sol both replace the attention backend. T8 uses exception-based
@@ -1505,11 +1510,9 @@ class NanFengH3MultiReferenceGenerator:
         # V8二采只记录LoRA模式；二采模型必须等CUDA放大器清理屏障完成后再重新加载。
         # 禁止在这里从一采UNETLoader预建第二ModelPatcher，否则GraphBuilder可能提前物化它，
         # 并让一采模型、放大器与二采模型在显存中重叠。
-        second_lora_mode = "继承一采LoRA"
-        if False:  # 原 V8 早期路径（V8.1 已改用低峰值放大器）
-            second_lora_mode = str(kwargs.get("H3二采LoRA模式", "继承一采LoRA"))
-            if second_lora_mode not in {"独立4步LoRA", "继承一采LoRA", "不使用LoRA"}:
-                raise ValueError(f"未知H3二采LoRA模式：{second_lora_mode}")
+        # 已废弃分支：V15 恒不启用。原 second_lora_mode（H3二采LoRA模式）变量及其唯一消费点
+        # （`if not is_v81 and second_lora_mode == ...` 的两条 LoRA 换装分支）已随 V-06 一并删除，
+        # 该变量现在没有任何读取点，故不再赋值；旧字段仅保留序列化兼容。
         # V7不再执行KJ低显存注意力；旧字段仅保留序列化兼容。
         if sol_enabled and t8_enabled:
             raise ValueError("Sol-Attn 与 T8 Block Cache 不能同时开启；请只勾选其中一个，或将两者都关闭。")
@@ -1556,14 +1559,12 @@ class NanFengH3MultiReferenceGenerator:
             uniblockswap_blocks = None
         # V3专用条件相位屏障只依赖起始释放节点，不依赖DiT/LoRA/加速patch链。
         # 这样条件编码阶段沿用官方工作流的“CLIP+双VAE先执行”节奏，不会提前prepare MiniMaxH3。
-        if True:  # 该分支对 V15 恒成立
-            conditioning_phase = g.node(
-                "NanFengH3ReleaseBeforeConditionLoadersV15",
-                clip_name=start.out(1), video_vae_name=start.out(2), audio_vae_name=start.out(3),
-            )
-            clip_name, video_vae_name, audio_vae_name = conditioning_phase.out(0), conditioning_phase.out(1), conditioning_phase.out(2)
-        else:
-            clip_name, video_vae_name, audio_vae_name = start.out(1), start.out(2), start.out(3)
+        # 该屏障对 V15 恒成立（原包用 `if True: ... else: ...` 包裹，死 else 已删除并展开）。
+        conditioning_phase = g.node(
+            "NanFengH3ReleaseBeforeConditionLoadersV15",
+            clip_name=start.out(1), video_vae_name=start.out(2), audio_vae_name=start.out(3),
+        )
+        clip_name, video_vae_name, audio_vae_name = conditioning_phase.out(0), conditioning_phase.out(1), conditioning_phase.out(2)
         clip = g.node("CLIPLoader", clip_name=clip_name, type=文本编码器类型, device=文本编码器设备)
         if kwargs.get("启用TRT视频VAE", False) is True:
             video_vae = g.node("MiniMaxH3TRTVAELoader", decoder=kwargs.get("TRT视频解码引擎", "None"), encoder=kwargs.get("TRT视频编码引擎", "None"))
@@ -1724,12 +1725,9 @@ class NanFengH3MultiReferenceGenerator:
         # 也就是说「原生轨迹（不加步）」现在的含义是"不加步，但仍可指定 shift"，
         # 这正是蒸馏学生需要的形态。
         sigma_requested = bool(kwargs.get("启用西格玛调节", False))
-        # 原 V5 高清二采：V7+ 已移除该实验分支，V15 恒不启用
-        hd_second_pass = False
-        global_refine = False
-        # 旧双区全局重绘实现与序列化字段继续保留，但V7不再执行该实验分支。
-        if hd_second_pass and sigma_requested:
-            raise ValueError("V5高清二采与西格玛调节不能同时开启；请关闭其中一个。")
+        # 已废弃分支：V15 恒不启用。原 V5「高清二采」整套实现（含 NanFengH3RebuildAVLatent
+        # 等节点）已在 V7 移除，与之互斥的 sigma 校验也随之删除；hd_second_pass 不再存在。
+        # global_refine 同理：旧双区全局重绘实现与序列化字段仅为兼容保留，不再参与任何判断。
         # V1-V6保留原自动分流；V7完全服从用户显式Sigma策略，不读取模式、LoRA或全局修复状态。
         lora_active = bool(_enabled_lora_stack(
             kwargs,
@@ -1737,16 +1735,14 @@ class NanFengH3MultiReferenceGenerator:
             require_explicit=True,
         ))
         is_v7 = True
-        sigma_strategy = str(kwargs.get("Sigma策略", "原生轨迹（不加步）")) if is_v7 else ""
+        sigma_strategy = str(kwargs.get("Sigma策略", "原生轨迹（不加步）"))
         # 九章改动：拆成两件事 ——
         #   need_sigma_shift : 要不要插 MiniMaxH3SigmaShift（决定 video/audio shift）
         #   sigma_enabled    : 要不要在 shift 之上再做"加密 / 手动序列"（决定步网格）
         # 原实现把两者合成一个开关，于是"只想改 shift、不想改步网格"这件事做不到。
         need_sigma_shift = bool(sigma_requested)
-        sigma_enabled = (
-            sigma_requested and sigma_strategy != "原生轨迹（不加步）"
-            if is_v7 else sigma_requested and not lora_active
-        )
+        # 已废弃分支：V15 恒不启用（is_v7 恒 True，else 分支的旧自动分流永不执行）。
+        sigma_enabled = sigma_requested and sigma_strategy != "原生轨迹（不加步）"
         if need_sigma_shift:
             # Sigma Shift belongs after every model/attention/cache patch and immediately before
             # both sampling consumers. This keeps BasicGuider and BasicScheduler on one coherent
@@ -1756,6 +1752,7 @@ class NanFengH3MultiReferenceGenerator:
                 shift_video=float(kwargs.get("视频西格玛偏移", 12.0)),
                 shift_audio=float(kwargs.get("音频西格玛偏移", 3.0)),
             ).out(0)
+        # 已废弃分支：V15 恒不启用（is_v81/is_v9 恒 True，两处旧写法保留为常量以便阅读）。
         is_v81 = True
         is_v9 = True
         if is_v9 and bool(kwargs.get("启用实时预览", True)):
@@ -1769,14 +1766,14 @@ class NanFengH3MultiReferenceGenerator:
             ).out(0)
         guider = g.node("BasicGuider", model=sampling_model, conditioning=sampling_ready.out(1))
         sampler = sampler_node(g, 采样器, kwargs)
-        is_v81 = True
-        latent_upscale_enabled = True and bool(kwargs.get("启用H3潜空间放大二采", False))
+        # 已废弃分支：V15 恒不启用（is_v81 恒 True；原 V8.1 之前的写法在这里重复赋值一次）。
+        latent_upscale_enabled = bool(kwargs.get("启用H3潜空间放大二采", False))
         v81_first_steps = int(kwargs.get("H3一采步数", 6))
         v81_second_steps = int(kwargs.get("H3二采步数", 4))
         scheduler_steps = (
             v81_first_steps + v81_second_steps
             if is_v81 and latent_upscale_enabled
-            else int(kwargs.get("一采步数", 20)) if hd_second_pass else int(采样步数)
+            else int(采样步数)
         )
         base_sigmas = g.node("BasicScheduler", model=sampling_model, scheduler=调度器, steps=scheduler_steps, denoise=float(降噪强度))
         sigmas = base_sigmas.out(0)
@@ -1804,10 +1801,8 @@ class NanFengH3MultiReferenceGenerator:
         # 旧V4/V7 Sigma面板不再覆盖V8.1，避免6+4被9值旧序列切成6+2。
         if is_v81 and latent_upscale_enabled:
             pass
+        # 已废弃分支：V15 恒不启用（is_v7 恒 True，`not is_v7` 的 V1-V6 兼容分支永不执行）。
         elif sigma_enabled and is_v7 and sigma_strategy == "最终区间增加1步":
-            sigmas = g.node("NanFengH3AddFinalSigmaStepV15", sigmas=sigmas).out(0)
-        elif sigma_enabled and (not is_v7) and fl_mode:
-            # V1-V6兼容：FL2VA仅在最后的非零→0区间增加1步。
             sigmas = g.node("NanFengH3AddFinalSigmaStepV15", sigmas=sigmas).out(0)
         elif sigma_enabled:
             sigma_mode = str(kwargs.get("西格玛模式", "低西格玛加密"))
@@ -1837,117 +1832,25 @@ class NanFengH3MultiReferenceGenerator:
                 "SamplerCustomAdvanced", noise=noise.out(0), guider=guider.out(0), sampler=sampler.out(0),
                 sigmas=v81_sigma_split.out(0), latent_image=sampling_ready.out(2),
             )
-        elif False:  # 原 V4 双采样（V5+ 已废弃）
-            split = g.node("SplitSigmasDenoise", sigmas=sigmas, denoise=float(kwargs.get("双采后段比例", 0.5)))
-            first = g.node(
-                "SamplerCustomAdvanced", noise=noise.out(0), guider=guider.out(0), sampler=sampler.out(0),
-                sigmas=split.out(0), latent_image=sampling_ready.out(2),
-            )
-            second_sampler = g.node("KSamplerSelect", sampler_name=str(kwargs.get("双采后段采样器", "res_multistep")))
-            no_noise = g.node("DisableNoise")
-            sampled = g.node(
-                "SamplerCustomAdvanced", noise=no_noise.out(0), guider=guider.out(0), sampler=second_sampler.out(0),
-                sigmas=split.out(1), latent_image=first.out(0),
-            )
         else:
             # 使用和用户原始工作流完全相同的原生采样节点，排除自定义采样语义/显存差异。
+            # 已废弃分支：V15 恒不启用（原 V4 双采样 SplitSigmasDenoise + DisableNoise 路径）。
             sampled = g.node("SamplerCustomAdvanced", noise=noise.out(0), guider=guider.out(0), sampler=sampler.out(0), sigmas=sigmas, latent_image=sampling_ready.out(2))
-        if hd_second_pass:
-            # 真正的高清二采：一采AV latent先解码视频、按目标MP放大、重新编码视频，
-            # 再把一采音频latent原样重组回NestedTensor，以独立低强度Sigma轨迹重绘。
-            first_released = g.node("NanFengH3ReleaseBeforeDecodeV15", samples=sampled.out(0))
-            first_images = g.node("VAEDecode", samples=first_released.out(0), vae=video_vae.out(0))
-            upscaled = g.node(
-                "NanFengH3UpscaleForSecondPassV15", image=first_images.out(0),
-                megapixels=float(kwargs.get("二采百万像素", 1.0)),
-                method=str(kwargs.get("二采放大方法", "lanczos")),
-            )
-            encoded_video = g.node("VAEEncode", pixels=upscaled.out(0), vae=video_vae.out(0))
-            rebuilt = g.node(
-                "NanFengH3RebuildAVLatent", video_latent=encoded_video.out(0),
-                source_av_latent=first_released.out(0),
-            )
-            try:
-                import folder_paths
-                installed_models = folder_paths.get_filename_list("diffusion_models")
-            except Exception:
-                installed_models = []
-            second_model_name = _select_second_pass_model(
-                kwargs.get("二采模型", SECOND_MODEL_SAME), installed_models, bool(fl_mode), selected_model,
-            )
-            # 条件张量直接复用一采结果，所以文本编码器不会重复加载/编码。独立屏障只在
-            # 放大重编码完成后才卸载一采和VAE，然后加载用户选择的二采DiT，避免双模型并驻。
-            second_ready = g.node(
-                "NanFengH3ReleaseBeforeSecondModelV15", unet_name=second_model_name,
-                conditioning=sampling_ready.out(1), latent=rebuilt.out(0),
-            )
-            second_model = g.node(
-                "UNETLoader", unet_name=second_ready.out(0), weight_dtype=模型权重精度,
-            ).out(0)
-            if sla_enabled:
-                second_model = g.node(
-                    "H3SLAAttention", model=second_model, enabled=True,
-                    sparsity_ratio=float(kwargs.get("SLA稀疏率", 0.90)),
-                    block_size=str(kwargs.get("SLA块大小", "64")),
-                    min_seq_len=int(kwargs.get("SLA最短序列", 4096)),
-                    dense_last_steps=int(kwargs.get("SLA末尾稠密步数", 1)),
-                    protect_audio=bool(kwargs.get("SLA保护音频", True)),
-                    dense_steps=str(kwargs.get("SLA指定稠密步", "0")),
-                    dense_backend=str(kwargs.get("SLA稠密后端", "comfy_kitchen")),
-                    disable_fp16_accum=bool(kwargs.get("SLA关闭FP16累加", True)),
-                    stabilize_motion=bool(kwargs.get("SLA稳定运动", True)),
-                ).out(0)
-            elif h3_dedicated_attention:
-                second_model = g.node(
-                    "MiniMaxH3MemoryEfficientSageAttentionPatch", model=second_model,
-                ).out(0)
-            elif SageAttention != "disabled" and not (sol_enabled or t8_enabled):
-                second_model = g.node(
-                    "PathchSageAttentionKJ", model=second_model,
-                    sage_attention=SageAttention, allow_compile=bool(允许编译),
-                ).out(0)
-            if sigma_enabled:
-                second_model = g.node(
-                    "MiniMaxH3SigmaShift", model=second_model,
-                    shift_video=float(kwargs.get("视频西格玛偏移", 12.0)),
-                    shift_audio=float(kwargs.get("音频西格玛偏移", 3.0)),
-                ).out(0)
-            second_guider = g.node("BasicGuider", model=second_model, conditioning=second_ready.out(1))
-            second_sampler = g.node(
-                "KSamplerSelect", sampler_name=str(kwargs.get("二采采样器", "res_multistep")),
-            )
-            second_sigmas = g.node(
-                "BasicScheduler", model=second_model,
-                scheduler=str(kwargs.get("二采调度器", "simple")),
-                steps=int(kwargs.get("二采步数", 6)),
-                denoise=1.0,
-            )
-            second_sigmas = g.node(
-                "NanFengH3TrimSigmasAtStartV15", sigmas=second_sigmas.out(0),
-                start_sigma=float(kwargs.get("二采起始Sigma", kwargs.get("二采降噪", 0.2))),
-            )
-            sampled = g.node(
-                "SamplerCustomAdvanced", noise=noise.out(0), guider=second_guider.out(0),
-                sampler=second_sampler.out(0), sigmas=second_sigmas.out(0),
-                latent_image=second_ready.out(2),
-            )
         # V8 H3潜空间放大：取一采denoised latent直接神经放大，跳过中间VAE解码/重编码，
         # 同步Conditioning到目标尺寸后，以用户给定的短Sigma轨迹继续高清精修。
         if bool(kwargs.get("启用H3潜空间放大二采", False)):
             # V8.1对齐F:/Unsaved Workflow.json：保持同一H3 ModelPatcher，放大后只清
             # upscaler/EasyUse缓存再连续二采；V8旧路径仍采用放大器独占显存策略。
             upscale_input = sampled.out(1)
-            if not is_v81:
-                upscale_input = g.node("NanFengH3ReleaseBeforeLatentUpscaleV15", latent=upscale_input).out(0)
             latent_upscaled = g.node(
-                "NanFengH3LowPeakLatentUpscalerV15" if is_v81 else "H3LatentUpscalerNodeMegapixels", latent=upscale_input,
+                "NanFengH3LowPeakLatentUpscalerV15", latent=upscale_input,
                 model_name=str(kwargs.get("H3潜空间放大模型") or ""),
                 target_megapixels=float(kwargs.get("H3潜空间目标百万像素", 1.0)),
                 align=int(kwargs.get("H3潜空间对齐", 2)), device="cuda",
                 precision=str(kwargs.get("H3潜空间精度", "fp16")),
-                **({"aspect_ratio": 画面比例} if is_v81 else {}),
+                aspect_ratio=画面比例,
             )
-            if is_v81 and not fl_mode:
+            if not fl_mode:
                 # Ref2VA的参考条件由提示词与原始参考素材编码而成；当前固定ref_image_size=max，
                 # 不依赖生成画布尺寸。V8.1直接复用一采条件，避免放大后再次加载25GB文本模型和双VAE。
                 second_ready = g.node(
@@ -1961,91 +1864,24 @@ class NanFengH3MultiReferenceGenerator:
                     positive=sampling_ready.out(1),
                 )
                 second_ready = g.node(
-                    "NanFengH3ClearUpscalerCacheResidentV15" if is_v81 else "NanFengH3ReleaseLatentUpscalerBeforeSecondPassV15",
+                    "NanFengH3ClearUpscalerCacheResidentV15",
                     latent=synced.out(0), conditioning=synced.out(1),
                 )
-            else:
-                rebuild_inputs = {
-                    "clip_name": start.out(1), "video_vae_name": start.out(2), "audio_vae_name": start.out(3),
-                    "latent": latent_upscaled.out(0), "prompt": 提示词, "length": length, "reference_size": "max",
-                }
-                for i, filename in enumerate(image_names, 1):
-                    rebuild_inputs[f"image_{i}"] = filename or ""
-                for i, filename in enumerate(video_names, 1):
-                    rebuild_inputs[f"video_{i}"] = filename or ""
-                for i, filename in enumerate(audio_names, 1):
-                    rebuild_inputs[f"audio_{i}"] = filename or ""
-                second_ready = g.node("NanFengH3RebuildRefConditioningForUpscaledLatentV15", **rebuild_inputs)
-            if is_v81:
-                # 保留一采ModelPatcher及其LoRA/注意力补丁描述，中间只卸载GPU权重。
-                latent_second_model = sampling_model
-            else:
-                second_model_loader = g.node(
-                    "NanFengH3LoadSecondModelAfterCleanupV15",
-                    unet_name=selected_model, weight_dtype=模型权重精度,
-                    dependency=second_ready.out(0),
-                )
-                latent_second_model = second_model_loader.out(0)
-            if not is_v81 and second_lora_mode == "独立4步LoRA":
-                requested = _clean_filename(kwargs.get("H3二采LoRA"))
-                if not requested or requested == "自动选择4步LoRA":
-                    try:
-                        import folder_paths
-                        requested = _select_face_refine_turbo_lora(folder_paths.get_filename_list("loras"))
-                    except Exception as exc:
-                        raise ValueError(f"无法选择H3二采4步LoRA：{exc}") from exc
-                latent_second_model = g.node(
-                    "NanFengH3NativePrefixLoraLoaderV15", model=latent_second_model,
-                    lora_name=requested,
-                    strength_model=float(kwargs.get("H3二采LoRA强度", 0.6)),
-                ).out(0)
-            elif not is_v81 and second_lora_mode == "继承一采LoRA":
-                for lora_name, strength in _enabled_lora_stack(kwargs, individual=False):
-                    latent_second_model = g.node(
-                        "LoraLoaderModelOnly", model=latent_second_model,
-                        lora_name=lora_name, strength_model=strength,
-                    ).out(0)
-            if not is_v81 and sla_enabled:
-                latent_second_model = g.node(
-                    "H3SLAAttention", model=latent_second_model, enabled=True,
-                    sparsity_ratio=float(kwargs.get("SLA稀疏率", 0.90)),
-                    block_size=str(kwargs.get("SLA块大小", "64")),
-                    min_seq_len=int(kwargs.get("SLA最短序列", 4096)),
-                    dense_last_steps=int(kwargs.get("SLA末尾稠密步数", 1)),
-                    protect_audio=bool(kwargs.get("SLA保护音频", True)),
-                    dense_steps=str(kwargs.get("SLA指定稠密步", "0")),
-                    dense_backend=str(kwargs.get("SLA稠密后端", "comfy_kitchen")),
-                    disable_fp16_accum=bool(kwargs.get("SLA关闭FP16累加", True)),
-                    stabilize_motion=bool(kwargs.get("SLA稳定运动", True)),
-                ).out(0)
-            elif not is_v81 and h3_dedicated_attention:
-                latent_second_model = g.node(
-                    "MiniMaxH3MemoryEfficientSageAttentionPatch", model=latent_second_model,
-                ).out(0)
-            elif not is_v81 and SageAttention != "disabled" and not skip_sage_for_specialized:
-                latent_second_model = g.node(
-                    "PathchSageAttentionKJ", model=latent_second_model,
-                    sage_attention=SageAttention, allow_compile=bool(允许编译),
-                ).out(0)
-            if not is_v81 and sigma_enabled:
-                latent_second_model = g.node(
-                    "MiniMaxH3SigmaShift", model=latent_second_model,
-                    shift_video=float(kwargs.get("视频西格玛偏移", 12.0)),
-                    shift_audio=float(kwargs.get("音频西格玛偏移", 3.0)),
-                ).out(0)
+            # 已废弃分支：V15 恒不启用。原 else 分支（重建 Ref 条件
+            # NanFengH3RebuildRefConditioningForUpscaledLatentV15）只在 not is_v81 且非 FL 时可达，
+            # 现已不可能执行，整段删除。
+            # V8.1恒保留一采ModelPatcher（含其一采LoRA与注意力补丁），中间只卸载GPU权重。
+            # 已废弃分支：V15 恒不启用。原 V8 旧路径在此重新加载二采DiT
+            # （NanFengH3LoadSecondModelAfterCleanupV15），已删除。
+            latent_second_model = sampling_model
+            # 已废弃分支：V15 恒不启用。原 V8 的「独立4步LoRA / 继承一采LoRA / SLA / H3专用Sage /
+            # 通用Sage / SigmaShift」六段 latent_second_model 换装链已删除 —— 其中
+            # 「独立4步LoRA」调用的 _select_face_refine_turbo_lora() 在整包里从未定义（悬空引用，V-06）。
             second_guider = g.node("BasicGuider", model=latent_second_model, conditioning=second_ready.out(1))
-            if is_v81:
-                # V8.1后4步必须使用完整10步轨迹切分出的后段，保证与一采在同一Sigma切点连续承接。
-                second_sigmas = v81_sigma_split
-                second_sigma_output = 1
-            else:
-                second_sigma_values = _build_h3_four_step_refine_sigmas(
-                    kwargs.get("H3二采Sigma", "0.35, 0.22, 0.12, 0.05, 0"),
-                )
-                second_sigmas = g.node(
-                    "ManualSigmas", sigmas=", ".join(f"{value:g}" for value in second_sigma_values),
-                )
-                second_sigma_output = 0
+            # V8.1后4步必须使用完整10步轨迹切分出的后段，保证与一采在同一Sigma切点连续承接。
+            # 已废弃分支：V15 恒不启用（原 else 分支走 _build_h3_four_step_refine_sigmas 手动4步序列）。
+            second_sigmas = v81_sigma_split
+            second_sigma_output = 1
             sampled = g.node(
                 "SamplerCustomAdvanced", noise=noise.out(0), guider=second_guider.out(0),
                 sampler=sampler.out(0), sigmas=second_sigmas.out(second_sigma_output), latent_image=second_ready.out(0),
@@ -2057,14 +1893,10 @@ class NanFengH3MultiReferenceGenerator:
                 trim_frames=motion_context.out(1), seed=int(随机种子),
                 **audio_refine_settings,
             )
-        if is_v81:
-            decode_samples = sampled.out(0)
-            released = None
-        else:
-            released = g.node("NanFengH3ReleaseBeforeDecodeV15", samples=sampled.out(0))
-            decode_samples = released.out(0)
-        video_decoder = "NanFengH3TimedVideoVAEDecodeV15" if is_v81 else "VAEDecode"
-        audio_decoder = "NanFengH3TimedAudioVAEDecodeV15" if is_v81 else "VAEDecodeAudio"
+        # 已废弃分支：V15 恒不启用（原 else 分支先插 NanFengH3ReleaseBeforeDecodeV15 再解码）。
+        decode_samples = sampled.out(0)
+        video_decoder = "NanFengH3TimedVideoVAEDecodeV15"
+        audio_decoder = "NanFengH3TimedAudioVAEDecodeV15"
         decode_vae = video_vae.out(0)
         image_decode = g.node(video_decoder, samples=decode_samples, vae=decode_vae)
         audio_decode = None

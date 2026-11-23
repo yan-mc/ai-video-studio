@@ -58,26 +58,26 @@ async function checkAsync(name, fn) {
 
 async function moduleChecks() {
   await checkAsync('schema: 221 个参数', async () => {
-    const m = await import('../host/services/nanfeng/schema.js');
+    const m = await import('../host/bridge/vendors/nanfeng/schema.js');
     assert.equal(m.PARAM_COUNT, 221);
   });
 
   await checkAsync('schema: enrichSchema 全覆盖中文释义', async () => {
-    const m = await import('../host/services/nanfeng/schema.js');
+    const m = await import('../host/bridge/vendors/nanfeng/schema.js');
     const e = m.enrichSchema();
     const miss = Object.entries(e.params).filter(([, p]) => !p.zh).map(([k]) => k);
     assert.deepEqual(miss, [], `缺释义：${miss.join(', ')}`);
   });
 
   await checkAsync('schema: param-docs 没有多余键', async () => {
-    const m = await import('../host/services/nanfeng/schema.js');
-    const d = await import('../host/services/nanfeng/param-docs.js');
+    const m = await import('../host/bridge/vendors/nanfeng/schema.js');
+    const d = await import('../host/bridge/vendors/nanfeng/param-docs.js');
     const extra = Object.keys(d.PARAM_DOCS).filter((k) => !(k in m.PARAMS));
     assert.deepEqual(extra, [], `多余键：${extra.join(', ')}`);
   });
 
   await checkAsync('schema: 分组计数与实际一致', async () => {
-    const m = await import('../host/services/nanfeng/schema.js');
+    const m = await import('../host/bridge/vendors/nanfeng/schema.js');
     for (const [id, g] of Object.entries(m.GROUPS)) {
       const actual = Object.values(m.PARAMS).filter((p) => p.group === id).length;
       assert.equal(actual, g.count, `组 ${id} 声明 ${g.count}，实际 ${actual}`);
@@ -85,7 +85,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('schema: 数值型 COMBO 的 default 是数字', async () => {
-    const m = await import('../host/services/nanfeng/schema.js');
+    const m = await import('../host/bridge/vendors/nanfeng/schema.js');
     for (const [k, d] of Object.entries(m.PARAMS)) {
       if (d.type !== 'COMBO' || !Array.isArray(d.options)) continue;
       const sample = d.options.find((o) => o != null);
@@ -95,7 +95,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('graph: coerceTypes 把字符串数字转回数字', async () => {
-    const g = await import('../host/services/nanfeng/graph.js');
+    const g = await import('../host/bridge/vendors/nanfeng/graph.js');
     const out = g.coerceTypes({ 尺寸倍数: '32', H3潜空间对齐: '2', 采样步数: '20', 固定随机种子: 'true' });
     assert.equal(out.尺寸倍数, 32);
     assert.equal(out.H3潜空间对齐, 2);
@@ -104,8 +104,8 @@ async function moduleChecks() {
   });
 
   await checkAsync('presets: 每个预设的参数键都存在于 schema', async () => {
-    const s = await import('../host/services/nanfeng/schema.js');
-    const p = await import('../host/services/nanfeng/presets.js');
+    const s = await import('../host/bridge/vendors/nanfeng/schema.js');
+    const p = await import('../host/bridge/vendors/nanfeng/presets.js');
     const bad = [];
     for (const [id, preset] of Object.entries(p.BUILTIN_PRESETS)) {
       for (const k of Object.keys(preset.params)) {
@@ -116,8 +116,8 @@ async function moduleChecks() {
   });
 
   await checkAsync('presets: 预设值的类型与 schema 一致', async () => {
-    const s = await import('../host/services/nanfeng/schema.js');
-    const p = await import('../host/services/nanfeng/presets.js');
+    const s = await import('../host/bridge/vendors/nanfeng/schema.js');
+    const p = await import('../host/bridge/vendors/nanfeng/presets.js');
     const bad = [];
     for (const [id, preset] of Object.entries(p.BUILTIN_PRESETS)) {
       for (const [k, v] of Object.entries(preset.params)) {
@@ -136,7 +136,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('presets: 三层合并优先级正确', async () => {
-    const p = await import('../host/services/nanfeng/presets.js');
+    const p = await import('../host/bridge/vendors/nanfeng/presets.js');
     const r = p.resolvePresetLayers({
       shotSpec: { inherit: 'standard', overrides: { 采样步数: 99 } },
       projectPreset: { 采样步数: 55, 百万像素: 0.9 },
@@ -148,7 +148,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('inert 参数清单包含已知死参数', async () => {
-    const s = await import('../host/services/nanfeng/schema.js');
+    const s = await import('../host/bridge/vendors/nanfeng/schema.js');
     const names = s.inertParams().map((x) => x.name);
     for (const n of ['启用高清二采', '启用双采样', '二采步数', '启用H3 SLA', '启用RTX视频超分', '启用TRT视频VAE']) {
       assert.ok(names.includes(n), `${n} 应被标为无效参数`);
@@ -158,7 +158,7 @@ async function moduleChecks() {
   /* ---------------- 约束校验器（组装前拦下必炸组合） ---------------- */
 
   await checkAsync('约束：续写 ✕ 潜空间二采 被拦截', async () => {
-    const nf = await import('../host/services/nanfeng/index.js');
+    const nf = await import('../host/bridge/vendors/nanfeng/index.js');
     const task = JSON.stringify({ workflow: 'b', node: '1', group: 'b', run: 'r', index: 1 });
     assert.throws(
       () => nf.buildShotWorkflow({
@@ -171,7 +171,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('约束：文生/图生/首尾帧 三选一', async () => {
-    const nf = await import('../host/services/nanfeng/index.js');
+    const nf = await import('../host/bridge/vendors/nanfeng/index.js');
     assert.throws(
       () => nf.buildShotWorkflow({
         shot: { id: 'x' }, preset: 'draft',
@@ -182,7 +182,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('约束：图生视频必须恰好 1 张图', async () => {
-    const nf = await import('../host/services/nanfeng/index.js');
+    const nf = await import('../host/bridge/vendors/nanfeng/index.js');
     // 0 张
     assert.throws(() => nf.buildShotWorkflow({
       shot: { id: 'x' }, preset: 'draft', extraParams: { 图生视频: true },
@@ -201,7 +201,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('约束：文生视频不接受参考图', async () => {
-    const nf = await import('../host/services/nanfeng/index.js');
+    const nf = await import('../host/bridge/vendors/nanfeng/index.js');
     assert.throws(() => nf.buildShotWorkflow({
       shot: { id: 'x' }, preset: 'draft',
       extraParams: { 文生视频: true, 图片1: 'a.png' },
@@ -209,7 +209,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('约束：首尾帧不接受视频/音频', async () => {
-    const nf = await import('../host/services/nanfeng/index.js');
+    const nf = await import('../host/bridge/vendors/nanfeng/index.js');
     assert.throws(() => nf.buildShotWorkflow({
       shot: { id: 'x' }, preset: 'draft',
       extraParams: { 首尾帧: true, 图片1: 'a.png', 图片2: 'b.png', 视频1: 'v.mp4' },
@@ -217,7 +217,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('约束：continuation-quality 预设可以通过', async () => {
-    const nf = await import('../host/services/nanfeng/index.js');
+    const nf = await import('../host/bridge/vendors/nanfeng/index.js');
     // 续写预设必须配 continuationTask（批次注入），单独手测会被明确拒绝
     const task = JSON.stringify({ workflow: 'b', node: '1', group: 'b', run: 'r', index: 1 });
     const r = nf.buildShotWorkflow({
@@ -230,7 +230,7 @@ async function moduleChecks() {
   /* ---------------- 能力探测：缺节点的加速项要自动关闭 ---------------- */
 
   await checkAsync('能力探测：缺 SLA/T8/DLSS/TRT 节点时自动关闭', async () => {
-    const g = await import('../host/services/nanfeng/graph.js');
+    const g = await import('../host/bridge/vendors/nanfeng/graph.js');
     const fakeNodes = new Set(['VHS_VideoCombine']);   // 什么都没有
     const { snapshot, applied } = g.applyFixes(
       { '启用H3 SLA': true, '启用T8缓存': true, DLSS超分模式: '视频超分', 启用TRT视频VAE: true },
@@ -244,7 +244,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('能力探测：节点齐全时不误关', async () => {
-    const g = await import('../host/services/nanfeng/graph.js');
+    const g = await import('../host/bridge/vendors/nanfeng/graph.js');
     const allNodes = new Set([
       'H3SLAAttention', 'MiniMaxH3BlockCacheT8',
       'MiniMaxH3MemoryEfficientSageAttentionPatch',
@@ -392,7 +392,7 @@ async function moduleChecks() {
    * 绑定的描述句，改一个字效果就废。所以规则引擎要认出它并逐字保留。
    */
   await checkAsync('提示词规范化：触发词逐字保留、四段式正确归位', async () => {
-    const N = await import('../host/services/prompt-normalizer.js');
+    const N = await import('../host/bridge/prompt/prompt-normalizer.js');
     const trigger = 'Video depicts a sexual scene between a female central character and a massive, giant partner.';
     const raw = [
       trigger,
@@ -419,7 +419,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('提示词规范化：stray 保持原文顺序', async () => {
-    const N = await import('../host/services/prompt-normalizer.js');
+    const N = await import('../host/bridge/prompt/prompt-normalizer.js');
     const raw = [
       '将 A 替换成 B。',
       '',
@@ -432,6 +432,151 @@ async function moduleChecks() {
     const i2 = r.parts.stray.findIndex((s) => s.includes('第二句'));
     const i3 = r.parts.stray.findIndex((s) => s.includes('第三句'));
     assert.ok(i1 >= 0 && i2 > i1 && i3 > i2, '散句必须保持书写顺序，不能按关键词重排');
+  });
+
+  /**
+   * 分镜切分：每段只能拿到自己那个 [Shot]，不能把整份分镜都发下去。
+   *
+   * ==========================================================================
+   * 这条守护的是一个「看起来正常、实际每段都在演整场戏」的缺陷
+   * ==========================================================================
+   *
+   * 长视频切 N 段重建时，提示词里的 [Shot 1..M] 是整条片子的分镜设计。
+   * 早先实现把整份提示词原样发给每一段 —— 7 段视频的每一段都收到 7 个 Shot，
+   * 每段都想演完整场戏，动作挤成一团。而它**不报错**，只是出片不对。
+   */
+  await checkAsync('分镜切分：N 段 N 镜时每段只取自己那个', async () => {
+    const S = await import('../host/services/shot-splitter.js');
+    const p = [
+      'm15510n4ry',
+      '',
+      '<Subject 1> is the girl in <Picture 1>.',
+      '',
+      '[Shot 1] first action.',
+      '[Shot 2] second action.',
+      '[Shot 3] third action.',
+      '',
+      'Fully replicate <Video 1> action without adding new characters.',
+    ].join('\n');
+
+    const parsed = S.parseShots(p);
+    assert.equal(parsed.shots.length, 3, '应解析出 3 个 Shot');
+
+    for (let i = 1; i <= 3; i += 1) {
+      const r = S.splitPromptForSegment(p, i, 3);
+      assert.equal(r.mode, 'one-to-one');
+      assert.deepEqual(r.shots, [i], `段 ${i} 只应得到 [Shot ${i}]`);
+      assert.ok(r.prompt.includes(`[Shot ${i}]`), `段 ${i} 必须包含自己的 Shot`);
+      // 不能包含其它段的 Shot（按行首匹配，避免误判正文里提到的 [Shot N]）
+      const shotLinesIn = (r.prompt.match(/^\s*\[Shot\s*\d+\]/gm) || []).length;
+      assert.equal(shotLinesIn, 1, `段 ${i} 应只有 1 行 Shot，实际 ${shotLinesIn}`);
+      for (let j = 1; j <= 3; j += 1) {
+        if (j === i) continue;
+        assert.ok(
+          !new RegExp(`^\\s*\\[Shot\\s*${j}\\]`, 'm').test(r.prompt),
+          `段 ${i} 不应包含 [Shot ${j}] 行`,
+        );
+      }
+      // 非 Shot 行每段都要有
+      assert.ok(r.prompt.includes('m15510n4ry'), '触发词每段都要保留');
+      assert.ok(r.prompt.includes('<Picture 1>'), '身份绑定每段都要保留');
+      assert.ok(r.prompt.includes('Fully replicate'), '防漂移句每段都要保留');
+    }
+  });
+
+  /**
+   * 通用要求必须**每一段**都带 —— 这是用户实测发现的问题。
+   *
+   * ==========================================================================
+   * 这条守护的是「段 1~6 各丢 5 条约束」
+   * ==========================================================================
+   *
+   * 用户把 7 个 [Shot] 写成连续 7 行，后面跟着 6 行「所有幕都要遵守」的要求。
+   * 早先按「块」切分时，这些行被算进 [Shot 7] 的内容里，
+   * 于是段 1~6 全丢，只有段 7 有 —— 而它们是画质/表情/服装的约束。
+   */
+  await checkAsync('分镜切分：非 Shot 行的通用要求每段都要带上', async () => {
+    const S = await import('../host/services/shot-splitter.js');
+    const p = [
+      'm15510n4ry',
+      '',
+      'Replace the man in <Video 1> with the girl in <Picture 1>.',
+      '<Subject 1> is the girl in <Picture 1>.',
+      '',
+      '[Shot 1] first action.',
+      '[Shot 2] second action.',
+      '[Shot 3] third action.',
+      '',
+      'Fine detail of woman.',
+      'Emphasize the trembling.',
+      'Only modifications will be made to the man.',
+      'Pay close attention to expressions.',
+      'Maintain <Subject 1> identity exactly as in <Picture 1>.',
+    ].join('\n');
+
+    const universal = [
+      'm15510n4ry',
+      '<Picture 1>',
+      'Fine detail of woman.',
+      'Emphasize the trembling.',
+      'Only modifications will be made to the man.',
+      'Pay close attention to expressions.',
+      'Maintain <Subject 1> identity',
+    ];
+
+    for (let i = 1; i <= 3; i += 1) {
+      const r = S.splitPromptForSegment(p, i, 3);
+      for (const u of universal) {
+        assert.ok(r.prompt.includes(u), `段 ${i} 丢了通用要求「${u}」`);
+      }
+    }
+  });
+
+  await checkAsync('分镜切分：重号时不串段（按行定位而非按编号）', async () => {
+    const S = await import('../host/services/shot-splitter.js');
+    // 用户手误写成两个 [Shot 2]
+    const p = ['h', '', '[Shot 1] a', '[Shot 2] b', '[Shot 2] c'].join('\n');
+    const r2 = S.splitPromptForSegment(p, 2, 3);
+    const r3 = S.splitPromptForSegment(p, 3, 3);
+    assert.equal(r2.prompt.match(/^\s*\[Shot\s*\d+\]/gm).length, 1, '段 2 只能有一个 Shot 行');
+    assert.equal(r3.prompt.match(/^\s*\[Shot\s*\d+\]/gm).length, 1, '段 3 只能有一个 Shot 行');
+    assert.notEqual(r2.prompt, r3.prompt, '段 2 与段 3 不能拿到同一行');
+    assert.ok(r2.prompt.includes('[Shot 2] b'), '段 2 应拿第一个 [Shot 2]');
+    assert.ok(r3.prompt.includes('[Shot 2] c'), '段 3 应拿第二个 [Shot 2]');
+  });
+
+  await checkAsync('分镜切分：数量配不上时不瞎猜，整份发并警告', async () => {
+    const S = await import('../host/services/shot-splitter.js');
+    const p = [
+      'head', '', '[Shot 1] a.', '[Shot 2] b.', '[Shot 3] c.', '',
+      'Fully replicate <Video 1> action.',
+    ].join('\n');
+
+    // 3 个 Shot 切 2 段 → 不整除，应整份发 + 警告
+    const r = S.splitPromptForSegment(p, 1, 2);
+    assert.equal(r.mode, 'whole', '配不上时不应切分');
+    assert.match(r.warning, /数量对不上/);
+    assert.ok(r.prompt.includes('[Shot 1]') && r.prompt.includes('[Shot 3]'));
+
+    // 4 个 Shot 切 2 段 → 整除，每段 2 个
+    const p4 = ['head', '', '[Shot 1] a.', '[Shot 2] b.', '[Shot 3] c.', '[Shot 4] d.'].join('\n');
+    const g = S.splitPromptForSegment(p4, 1, 2);
+    assert.equal(g.mode, 'grouped');
+    assert.deepEqual(g.shots, [1, 2]);
+  });
+
+  await checkAsync('分镜切分：重号与缺号都要能检出', async () => {
+    const S = await import('../host/services/shot-splitter.js');
+    const dup = '[Shot 1] a.\n[Shot 2] b.\n[Shot 2] c.';
+    assert.equal(S.checkShotNumbering(dup).ok, false);
+    assert.match(S.checkShotNumbering(dup).warning, /重复/);
+
+    const gap = '[Shot 1] a.\n[Shot 3] c.';
+    assert.equal(S.checkShotNumbering(gap).ok, false);
+    assert.match(S.checkShotNumbering(gap).warning, /不连续/);
+
+    const good = '[Shot 1] a.\n[Shot 2] b.';
+    assert.equal(S.checkShotNumbering(good).ok, true);
   });
 
   await checkAsync('换人：用户设的步数必须透传到 job.params（否则填 25 跑 50）', async () => {
@@ -464,7 +609,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('加速方案：覆盖预设里的采样器/步数（extraParams 最高优先级）', async () => {
-    const nf = await import('../host/services/nanfeng/index.js');
+    const nf = await import('../host/bridge/vendors/nanfeng/index.js');
     const { planForShot } = await import('../host/services/accel-plan.js');
     const a = planForShot('dmad8');
     // 预设 draft 里写着 采样器:'lcm' 采样步数:4 —— 必须被加速方案覆盖成 8
@@ -803,7 +948,7 @@ async function moduleChecks() {
    * 段与段在源视频上要**重叠** trimFrames 帧，采完裁掉。
    */
   await checkAsync('续写：context_length 四档对应正确帧数与秒数', async () => {
-    const C = await import('../host/services/nanfeng/continuation.js');
+    const C = await import('../host/bridge/vendors/nanfeng/continuation.js');
     assert.deepEqual([...C.CONTEXT_LENGTHS], ['5', '22', '39', '56']);
     for (const [ctx, sec] of [['5', 0.21], ['22', 0.92], ['39', 1.63], ['56', 2.33]]) {
       const got = Number(ctx) / 24;
@@ -812,7 +957,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('续写：规划器从目标时长反推，且段 1 不比后续段短太多', async () => {
-    const C = await import('../host/services/nanfeng/continuation.js');
+    const C = await import('../host/bridge/vendors/nanfeng/continuation.js');
     const r = C.planSegments({ targetSeconds: 15, segments: 3, contextLength: '56' });
     assert.equal(r.segments.length, 3);
     assert.equal(r.trimFrames, 56);
@@ -827,7 +972,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('续写：段 1 不裁、后续段裁掉 trimFrames', async () => {
-    const C = await import('../host/services/nanfeng/continuation.js');
+    const C = await import('../host/bridge/vendors/nanfeng/continuation.js');
     const r = C.planSegments({ targetSeconds: 20, segments: 4, contextLength: '22' });
     assert.equal(r.segments[0].deliverFrames, r.segments[0].sampleFrames, '段 1 不裁');
     for (const s of r.segments.slice(1)) {
@@ -836,7 +981,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('续写：换人模式允许段 1 短于叙事模式的 124 帧下限', async () => {
-    const C = await import('../host/services/nanfeng/continuation.js');
+    const C = await import('../host/bridge/vendors/nanfeng/continuation.js');
     // 叙事模式：段 1 必须 ≥124
     const story = C.planSegments({ targetSeconds: 20, segments: 3, contextLength: '56' });
     assert.ok(story.segments[0].sampleFrames >= 124, '叙事模式段 1 应 ≥124 帧');
@@ -848,7 +993,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('续写：任务 JSON 五字段完整且 node 恒为 1', async () => {
-    const C = await import('../host/services/nanfeng/continuation.js');
+    const C = await import('../host/bridge/vendors/nanfeng/continuation.js');
     const batch = C.createBatch({
       projectId: 'p', shotIds: ['a', 'b'], preset: 'draft', contextLength: '56',
     });
@@ -906,22 +1051,28 @@ async function moduleChecks() {
     assert.equal(ov['启用H3潜空间放大二采'], false, '续写强制关二采');
   });
 
-  await checkAsync('续写：audio_context_length 按 40Hz/24fps 换算，而不是 ctx*4', async () => {
+  await checkAsync('续写：audio_context_length 与视频窗口解耦（恒为最小值）', async () => {
     /**
-     * 这条守护另一个**没有报错的浪费**。
+     * 这条守护一个**没有报错的浪费**，但结论与当初相反：
+     * 不是"换算得准"，而是"根本不该按视频窗口换算"。
      *
-     * H3 音频 latent 跑 40 Hz、画面 24 fps → 1 像素帧 = 5/3 个音频步。
-     * `context_length=56` 只需要 round(56*5/3)=93 步。
+     * 历史：最早写 `Number(ctx) * 4`（56→224 步），比实际需要多 2.4 倍；
+     * 后来改成 round(ctx*40/24)（56→93）。但实测（同机、同 8 步 lcm）：
+     *     ctx=5  → audio=8     2326 秒
+     *     ctx=22 → audio=37    >3500 秒
+     * 因为换人线在切段阶段就 `-an` 剥掉了音轨，这些音频 conditioning 行
+     * **价值为零**，只是被钉进序列、走完整 DiT 纯烧算力。
      *
-     * 早先写的是 `Number(ctx) * 4`（56→224 步），比实际需要多 **2.4 倍**。
-     * 多出来的每一步都作为 conditioning row 钉进序列、走完整 DiT，
-     * 而换人线在切段阶段就 `-an` 剥掉了音轨，这些行连价值都没有。
+     * 现在 replace-runner.js 用 AUDIO_CTX_MIN=8 固定最小值，与视频窗口
+     * 完全解耦：视频窗口该多大就多大（22/39/56），音频恒定 8（0.33s）。
      */
     const { buildOverrides } = await import('../host/services/replace-runner.js');
-    for (const [ctx, want] of [['5', 8], ['22', 37], ['39', 65], ['56', 93]]) {
+    for (const ctx of ['5', '22', '39', '56']) {
       const ov = buildOverrides({ contextLength: ctx }, { continuation: true });
-      assert.equal(ov.audio_context_length, want,
-        `context_length=${ctx} 应换算成 ${want} 个音频步（= round(ctx*40/24)）`);
+      assert.equal(ov.audio_context_length, 8,
+        `context_length=${ctx}：音频窗口应恒为 AUDIO_CTX_MIN=8，不随视频窗口放大`);
+      assert.equal(String(ov.context_length), ctx,
+        `context_length=${ctx}：视频窗口本身不应被改动`);
     }
   });
 
@@ -1129,7 +1280,7 @@ async function moduleChecks() {
   /* -------------------- 打光通道（本轮新增） -------------------- */
 
   await checkAsync('打光：6 个预设且 4:1 / 8:1 都在', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     const ids = h.LIGHTING_PRESETS.map((l) => l.id);
     for (const id of ['none', 'dramatic-4-1', 'noir-8-1', 'rim-backlit']) {
       assert.ok(ids.includes(id), `缺打光预设 ${id}`);
@@ -1143,7 +1294,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('打光：会真的写进提示词', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     const out = h.compileH3Prompt({
       mode: 't2va',
       subjects: [],
@@ -1159,7 +1310,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('打光：未知 id 回落 none（不写打光文字）', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     const out = h.compileH3Prompt({
       mode: 't2va',
       subjects: [],
@@ -1175,7 +1326,7 @@ async function moduleChecks() {
 
   await checkAsync('打光：镜头卡的 lightingId 能流到编译结果', async () => {
     const { newShot } = await import('../host/store/models.js');
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     const shot = newShot({ lightingId: 'dramatic-4-1', styleId: 'ufotable' });
     assert.equal(shot.lightingId, 'dramatic-4-1');
     const pkg = h.toShotInputPackage({ ...shot, description: 'a man walks', durationSec: 5 });
@@ -1196,7 +1347,7 @@ async function moduleChecks() {
    *   3. The lighting direction and time of day continue unchanged...
    */
   await checkAsync('续写：开关三组件全在且置于最顶部', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     const task = JSON.stringify({ workflow: 'b', node: '1', group: 'b', run: 'r', index: 2 });
     const out = h.compileH3Prompt({
       mode: 't2va',
@@ -1216,7 +1367,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('续写：段 1 不加开关（开场段例外）', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     const out = h.compileH3Prompt({
       mode: 't2va',
       subjects: [],
@@ -1230,7 +1381,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('续写：裁切区时序纪律（1 秒安全边界）', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     const out = h.compileH3Prompt({
       mode: 't2va',
       subjects: [],
@@ -1244,7 +1395,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('续写：resolveContinuation 三种输入形态', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     assert.equal(h.resolveContinuation({ continuationTask: JSON.stringify({ index: 5 }) }).index, 5);
     assert.equal(h.resolveContinuation({ continuationIndex: 7 }).index, 7);
     assert.equal(h.resolveContinuation({ isContinuation: true }).isContinuation, true);
@@ -1256,7 +1407,7 @@ async function moduleChecks() {
   /* -------------------- 分段规划（45s 的正确配方） -------------------- */
 
   await checkAsync('规划：45s/9 段落在网格上且误差 < 1s', async () => {
-    const c = await import('../host/services/nanfeng/continuation.js');
+    const c = await import('../host/bridge/vendors/nanfeng/continuation.js');
     const p = c.planSegments({ targetSeconds: 45, segments: 9, contextLength: '22' });
     assert.equal(p.segments.length, 9);
     // 每段采样帧数必须在 17k+5 网格上
@@ -1270,7 +1421,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('规划：snapToGrid 与 vendor 的 duration_to_frames 一致', async () => {
-    const c = await import('../host/services/nanfeng/continuation.js');
+    const c = await import('../host/bridge/vendors/nanfeng/continuation.js');
     /**
      * vendor 公式（Python）：
      *   frames = max(5, round(sec*24))
@@ -1294,7 +1445,7 @@ async function moduleChecks() {
   /* -------------------- 批次服务端编排 -------------------- */
 
   await checkAsync('编排：串行跑完 + 断点续跑只补未完成段', async () => {
-    const c = await import('../host/services/nanfeng/continuation.js');
+    const c = await import('../host/bridge/vendors/nanfeng/continuation.js');
     const fs = await import('node:fs');
     const TMP2 = fs.mkdtempSync(path.join(TMP, 'batch-'));
     const b = c.createBatch({ projectId: 'p', shotIds: ['s1', 's2', 's3'], contextLength: '22' });
@@ -1324,7 +1475,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('编排：失败即停（后续段依赖其 latent）', async () => {
-    const c = await import('../host/services/nanfeng/continuation.js');
+    const c = await import('../host/bridge/vendors/nanfeng/continuation.js');
     const fs = await import('node:fs');
     const TMP3 = fs.mkdtempSync(path.join(TMP, 'batch2-'));
     const b = c.createBatch({ projectId: 'p', shotIds: ['s1', 's2', 's3'] });
@@ -1401,7 +1552,7 @@ async function moduleChecks() {
    *   正确做法（ComfyUI-H3-Motion-Context README）：首段 Load 0 / Save 1，别停用。
    */
   await checkAsync('续写：段 1 必须带 index=1 的任务（否则 latent 不落盘）', async () => {
-    const nf = await import('../host/services/nanfeng/index.js');
+    const nf = await import('../host/bridge/vendors/nanfeng/index.js');
     const task = JSON.stringify({ workflow: 'b', node: '1', group: 'b', run: 'r', index: 1 });
     const r = nf.buildShotWorkflow({
       shot: { id: 's1' }, preset: 'continuation', continuationTask: task, jobId: 't',
@@ -1424,7 +1575,7 @@ async function moduleChecks() {
    * 批次传参丢失由 continuation.js 的 taskFor 保证（它一定产出合法 JSON）。
    */
   await checkAsync('续写：单镜头渲染续写段 → 降级关闭 + 明确警告', async () => {
-    const nf = await import('../host/services/nanfeng/index.js');
+    const nf = await import('../host/bridge/vendors/nanfeng/index.js');
     const r = nf.buildShotWorkflow({ shot: { id: 's9' }, preset: 'continuation', jobId: 't' });
     assert.equal(r.params['启用潜空间续写'], false, '单镜头渲染必须关掉续写，否则上游硬报错');
     assert.equal(r.params['潜空间续写任务'], '');
@@ -1435,8 +1586,8 @@ async function moduleChecks() {
   });
 
   await checkAsync('续写：给了 continuationTask → 续写开启且任务原样写入', async () => {
-    const nf = await import('../host/services/nanfeng/index.js');
-    const c = await import('../host/services/nanfeng/continuation.js');
+    const nf = await import('../host/bridge/vendors/nanfeng/index.js');
+    const c = await import('../host/bridge/vendors/nanfeng/continuation.js');
     const b = c.createBatch({ projectId: 'p', shotIds: ['s1', 's2'] });
     const t = c.taskFor(b, 2);
     const r = nf.buildShotWorkflow({
@@ -1448,7 +1599,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('续写：taskFor 对 index=1 与 index=n 都产出合法 JSON', async () => {
-    const c = await import('../host/services/nanfeng/continuation.js');
+    const c = await import('../host/bridge/vendors/nanfeng/continuation.js');
     const b = c.createBatch({ projectId: 'p', shotIds: ['s1', 's2'] });
     for (const i of [1, 2]) {
       const t = JSON.parse(c.taskFor(b, i));
@@ -1518,7 +1669,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('skill: skillId 真的生效（海螺版可达）', async () => {
-    const sb = await import('../host/services/nanfeng/storyboard.js');
+    const sb = await import('../host/bridge/llm/storyboard.js');
     const regular = sb.loadSkill('ref2va', 'regular_storyboard');
     const ns = sb.loadSkill('ref2va', 'ns_storyboard');
     assert.ok(regular.length > 1000, '常规版应有内容');
@@ -1578,7 +1729,7 @@ async function moduleChecks() {
 /* -------------------- 画风 / 光比 / 冲突 -------------------- */
 
   await checkAsync('画风：补齐到 11 种（含 Ligne Claire 与 Vivziepop）', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     const ids = h.STYLE_PRESETS.map((s) => s.id);
     for (const id of ['ligne-claire', 'vivziepop']) {
       assert.ok(ids.includes(id), `缺画风 ${id}`);
@@ -1595,7 +1746,7 @@ async function moduleChecks() {
    * 截断 = 砍掉全部反模式约束 → 模型照样渲成 3D、照样出字幕。
    */
   await checkAsync('画风：官方约束句必须在（不截断、不改写）', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     // 官方串里带这些约束的画风，成片前的提示词必须原样含它们
     const EXPECT = {
       ova90s: ['NOT 3D', 'NO subtitles'],
@@ -1634,7 +1785,7 @@ async function moduleChecks() {
    * 6000 是「六字段齐全 + 动作细节写清」的实际上限。
    */
   await checkAsync('长度：6000 收紧 + 7000 官方硬上限分两道提示', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     assert.equal(h.H3_LIMITS.promptMaxChars, 6000, '插件上限应为 6000');
     assert.equal(h.H3_LIMITS.promptOfficialMaxChars, 7000, '官方硬上限应为 7000');
 
@@ -1664,7 +1815,7 @@ async function moduleChecks() {
    * （"a latent cannot be resized"）。所以插件层提前拦截是对的。
    */
   await checkAsync('约束：续写 × 潜空间二采 被拦截且提示替代方案', async () => {
-    const nf = await import('../host/services/nanfeng/index.js');
+    const nf = await import('../host/bridge/vendors/nanfeng/index.js');
     assert.throws(
       () => nf.buildShotWorkflow({
         shot: { mode: 'ref2va', prompt: 'x', durationSec: 5, refs: { images: ['a.png'] } },
@@ -1677,7 +1828,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('压制：两道防线由编译器自动注入', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     assert.ok(h.SUPPRESSION_GUARDS.textSuppression.includes('NO subtitles'));
     assert.ok(h.SUPPRESSION_GUARDS.frameIntegrity.includes('Nothing floats over the image'));
     const out = h.compileH3Prompt({
@@ -1699,7 +1850,7 @@ async function moduleChecks() {
    * 这条守的是 lint 从"46 条 SCAFFOLD 白名单"改成"按位置判断"的重构。
    */
   await checkAsync('压制：三处合法位置放行，其余字段的负面句报警', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     const ok = [
       'Text suppression: NO subtitles, NO on-screen text, NO captions.',
       'a wooden signpost whose board carries no legible lettering and no text of any kind',
@@ -1720,7 +1871,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('打光：7 种含 6:1 特写档', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     const l = h.LIGHTING_PRESETS.find((x) => x.id === 'closeup-6-1');
     assert.ok(l, '缺 6:1 光比');
     assert.equal(l.ratio, '6:1');
@@ -1736,7 +1887,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('冲突：画风×打光不兼容时会 warning', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     // 直接调检测函数
     assert.ok(h.styleLightingConflicts('ligne-claire', 'noir-8-1').length > 0);
     assert.ok(h.styleLightingConflicts('ghibli', 'noir-8-1').length > 0);
@@ -1772,7 +1923,7 @@ async function moduleChecks() {
    * 所以这里要测两件事：英文能进、中文不能进。
    */
   await checkAsync('角色卡：英文 description 会写进 subject_definitions', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     const out = h.compileH3Prompt({
       mode: 'ref2va',
       subjects: [
@@ -1788,7 +1939,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('角色卡：中文 description 不进正文（避免中英混排）', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     const out = h.compileH3Prompt({
       mode: 'ref2va',
       subjects: [
@@ -1809,7 +1960,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('角色卡：无图角色走 text_only 分支', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     /**
      * ⚠️ 必须混一个**有图**角色，才会走 Ref2VA 六段格式。
      *    只有无图角色时 routeFormat 判成 t2va（没有参考素材），
@@ -1831,7 +1982,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('角色卡：纯无图角色走基础格式（没有参考素材，正确）', async () => {
-    const h = await import('../host/services/h3-prompt.js');
+    const h = await import('../host/bridge/prompt/h3-prompt.js');
     const out = h.compileH3Prompt({
       mode: 'ref2va',
       subjects: [{ id: 'c2', name: '旅人', pictureIndex: null, hasImage: false, description: '神秘旅人' }],
@@ -1846,7 +1997,7 @@ async function moduleChecks() {
   /* -------------------- V8.1 完整 Sigma 序列 -------------------- */
 
   await checkAsync('sigma: 尾部加密预设是 11 个值（配 6+4 步）', async () => {
-    const p = await import('../host/services/nanfeng/presets.js');
+    const p = await import('../host/bridge/vendors/nanfeng/presets.js');
     const v = p.validateSigmaSequence(p.SIGMA_PRESETS['tail-dense-10'].value, {
       latentUpscale: true, firstSteps: 6, secondSteps: 4,
     });
@@ -1855,7 +2006,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('sigma: 前 8 值必须等于 simple/shift12 的 8 步网格', async () => {
-    const p = await import('../host/services/nanfeng/presets.js');
+    const p = await import('../host/bridge/vendors/nanfeng/presets.js');
     const vals = p.validateSigmaSequence(p.SIGMA_PRESETS['tail-dense-10'].value).values;
     const expected = [1, 0.988235, 0.972973, 0.952381, 0.923077, 0.878049, 0.8, 0.631579];
     for (let i = 0; i < 8; i += 1) {
@@ -1864,7 +2015,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('sigma: 非法序列被逐条拦下', async () => {
-    const p = await import('../host/services/nanfeng/presets.js');
+    const p = await import('../host/bridge/vendors/nanfeng/presets.js');
     const bad = [
       ['1, 0.8', /最后一个值必须是 0/],
       ['1, 0.8, 0.9, 0', /严格从高到低/],
@@ -1883,7 +2034,7 @@ async function moduleChecks() {
   });
 
   await checkAsync('sigma: 个数不符时给出可操作的错误', async () => {
-    const p = await import('../host/services/nanfeng/presets.js');
+    const p = await import('../host/bridge/vendors/nanfeng/presets.js');
     const v = p.validateSigmaSequence(p.SIGMA_PRESETS['tail-heavier-12'].value, {
       latentUpscale: true, firstSteps: 6, secondSteps: 4,
     });
@@ -2513,9 +2664,18 @@ async function routeChecks() {
       const { buildOverrides } = await import('../host/services/replace-runner.js');
 
       // ① 四档 ctx 都应能得出合法的音频步数
-      for (const [ctx, want] of [['5', 8], ['22', 37], ['39', 65], ['56', 93]]) {
+      //
+      // ⚠️ 音频窗口与视频窗口**已解耦**（replace-runner.js 的 AUDIO_CTX_MIN）。
+      //    早先按 40Hz/24fps 换算（ctx=22 → 37 步），实测同机同 8 步 lcm：
+      //      ctx=5  → audio=8     2326 秒
+      //      ctx=22 → audio=37    >3500 秒
+      //    而换人线在切段阶段就 `-an` 剥掉了音轨，这些音频 conditioning
+      //    对结果价值为零，只是被钉进序列走完整 DiT 纯烧算力。
+      //    所以现在恒定给最小值 8，不随 ctx 膨胀 —— 断言随之改为「恒为 8」。
+      for (const ctx of ['5', '22', '39', '56']) {
         const ov = buildOverrides({ contextLength: ctx }, { continuation: true });
-        assert.equal(ov.audio_context_length, want);
+        assert.equal(ov.audio_context_length, 8,
+          `ctx=${ctx}：音频窗口应固定为 AUDIO_CTX_MIN=8，不随视频窗口放大`);
         assert.equal(ov['续写加噪末档强度'] <= ov['续写加噪强度'], true,
           `ctx=${ctx}：末档强度必须 <= 强度，否则不是锥形`);
       }
@@ -2537,8 +2697,8 @@ async function routeChecks() {
        * `workflow['1'].inputs`（也就是真正提交给 ComfyUI 的那份 JSON）。
        * 历史上 `context_length` 就是被预设悄悄盖掉的（零报错）。
        */
-      const { buildShotWorkflow } = await import('../host/services/nanfeng/index.js');
-      const C = await import('../host/services/nanfeng/continuation.js');
+      const { buildShotWorkflow } = await import('../host/bridge/vendors/nanfeng/index.js');
+      const C = await import('../host/bridge/vendors/nanfeng/continuation.js');
       const { buildOverrides } = await import('../host/services/replace-runner.js');
 
       const b = C.createBatch({ projectId: 't', shotIds: ['a', 'b'], contextLength: '39' });
@@ -2559,7 +2719,8 @@ async function routeChecks() {
           assert.equal(p['续写加噪强度'], 0.45);
           assert.equal(p['续写加噪末档强度'], 0.1);
           assert.equal(p['续写加噪斜坡步数'], 2);
-          assert.equal(p.audio_context_length, 65, '39 帧应换算成 65 个音频步');
+          assert.equal(p.audio_context_length, 8,
+            '续写时音频窗口固定 AUDIO_CTX_MIN=8，与视频 context_length 解耦');
         } else {
           assert.equal(p['启用续写上下文加噪'], false, '独立模式加噪必须关着');
         }
@@ -2567,7 +2728,7 @@ async function routeChecks() {
     });
 
     await checkAsync('schema.js 与 ComfyUI object_info 逐项一致', async () => {
-      const s = await import('../host/services/nanfeng/schema.js');
+      const s = await import('../host/bridge/vendors/nanfeng/schema.js');
       const r = await fetch('http://127.0.0.1:8488/object_info/NanFengH3MultiReferenceGeneratorV15', { signal: AbortSignal.timeout(20000) });
       const node = (await r.json()).NanFengH3MultiReferenceGeneratorV15;
       const live = Object.keys(node.input.required);
@@ -2602,7 +2763,7 @@ async function routeChecks() {
     });
 
     await checkAsync('动态素材槽位在 3d 之外不会写死文件列表', async () => {
-      const s = await import('../host/services/nanfeng/schema.js');
+      const s = await import('../host/bridge/vendors/nanfeng/schema.js');
       for (const k of ['图片1', '视频1', '音频1']) {
         assert.deepEqual(s.PARAMS[k].options, ['未选择', '3d'],
           `${k} 不应把 ComfyUI 的实时文件列表抄进 schema`);
@@ -2614,12 +2775,354 @@ async function routeChecks() {
 /** 占位，避免上面误用 */
 function fakeReqReqHelper() { return null; }
 
+/* ---------------------------------------------------------- 架构守卫 */
+/**
+ * 架构守卫 —— 本次重构建立的**结构性约束**，防止退回旧形态。
+ *
+ * 这些不是功能测试，而是「边界测试」：它们守的是"以后不出现某类 bug 的土壤"。
+ */
+async function architectureChecks() {
+  const path = await import('node:path');
+  const fsx = await import('node:fs');
+  const ROOT = path.resolve(import.meta.dirname, '..');
+
+  /* 1) 桥接层门面必须完整 */
+  await checkAsync('桥接层：门面导出全部子层', async () => {
+    const B = await import('../host/bridge/index.js');
+    assert.equal(B.PARAM_COUNT, 221, 'PARAM_COUNT 必须是 221');
+    for (const k of ['buildShotWorkflow', 'compileH3Prompt', 'PARAM_COUNT', 'CONSTRAINT_RULES']) {
+      assert.ok(B[k] !== undefined, `门面缺直出符号 ${k}`);
+    }
+    for (const ns of ['nanfeng', 'nanfengSchema', 'nanfengGraph', 'nanfengPresets', 'continuation', 'prompt', 'promptNormalizer', 'llm', 'storyboard']) {
+      assert.ok(B[ns] && typeof B[ns] === 'object', `门面缺命名空间 ${ns}`);
+    }
+    assert.equal(Object.keys(B.BRIDGE_LAYOUT).length, 3, 'BRIDGE_LAYOUT 必须声明三个子层');
+  });
+
+  /* 2) services/nanfeng 目录必须已消失（迁到 host/bridge） */
+  await checkAsync('桥接层：services/nanfeng 目录已迁走', async () => {
+    const old = path.join(ROOT, 'host', 'services', 'nanfeng');
+    assert.equal(fsx.existsSync(old), false, 'host/services/nanfeng 不应再存在（已迁到 host/bridge）');
+    const br = path.join(ROOT, 'host', 'bridge', 'vendors', 'nanfeng');
+    assert.ok(fsx.existsSync(br), 'host/bridge/vendors/nanfeng 必须存在');
+  });
+
+  /* 3) 业务层不得直接 import 桥接层的深层路径 */
+  await checkAsync('桥接层：业务层只走门面', async () => {
+    const bad = [];
+    const dirs = [path.join(ROOT, 'host', 'services'), path.join(ROOT, 'host', 'api')];
+    for (const dir of dirs) {
+      if (!fsx.existsSync(dir)) continue;
+      for (const f of fsx.readdirSync(dir).filter((n) => n.endsWith('.js'))) {
+        const src = fsx.readFileSync(path.join(dir, f), 'utf8');
+        // 允许的两种形态：bridge/index.js（门面）或 ref-images 这类自有模块
+        const m = src.match(/['"](\.\.?\/)*bridge\/(vendors|prompt|llm)\//g);
+        if (m) bad.push(`${f}: ${m[0]}`);
+      }
+    }
+    assert.deepEqual(bad, [], `业务层不应直接 import bridge 子目录（应走 host/bridge/index.js）：${bad.join(', ')}`);
+  });
+
+  /* 4) 参考图编号只有一份实现 */
+  await checkAsync('参考图编号：全仓只有一份实现', async () => {
+    const owners = [];
+    const walk = (dir) => {
+      for (const e of fsx.readdirSync(dir, { withFileTypes: true })) {
+        if (e.name === 'node_modules' || e.name === 'bridge' && false) continue;
+        const abs = path.join(dir, e.name);
+        if (e.isDirectory()) { walk(abs); continue; }
+        if (!e.name.endsWith('.js')) continue;
+        const src = fsx.readFileSync(abs, 'utf8');
+        if (/^export function planImageSlots\(/m.test(src)) {
+          owners.push(path.relative(ROOT, abs).replace(/\\/g, '/'));
+        }
+      }
+    };
+    walk(path.join(ROOT, 'host'));
+    assert.deepEqual(owners, ['host/services/ref-images.js'],
+      `planImageSlots 只允许在 host/services/ref-images.js 定义，实际：${owners.join(', ')}`);
+  });
+
+  /* 5) 配置分裂脑：services 层无闭包捕获的 cfg 快照读 */
+  await checkAsync('配置：services 层无 cfg 快照读', async () => {
+    const { findConfigSnapshotReads } = await import('../host/config-reader.js');
+    const dir = path.join(ROOT, 'host', 'services');
+    const bad = [];
+    for (const f of fsx.readdirSync(dir).filter((n) => n.endsWith('.js'))) {
+      bad.push(...findConfigSnapshotReads(fsx.readFileSync(path.join(dir, f), 'utf8'), f));
+    }
+    assert.deepEqual(bad, [], `存在 cfg 快照读（改 dataDir 后会写旧目录）：\n${bad.slice(0, 5).join('\n')}`);
+  });
+
+  /* 5b) 所有相对 import 必须能解析 —— 迁移/搬文件最容易断这里 */
+  await checkAsync('结构：全仓相对 import 可解析', async () => {
+    const bad = [];
+    const walk = (d) => {
+      for (const e of fsx.readdirSync(d, { withFileTypes: true })) {
+        if (['node_modules', '.git', 'app-dist', 'data'].includes(e.name)) continue;
+        const abs = path.join(d, e.name);
+        if (e.isDirectory()) { walk(abs); continue; }
+        if (!/\.(js|mjs)$/.test(e.name)) continue;
+        const src = fsx.readFileSync(abs, 'utf8');
+        const re = /(?:from\s*|import\s*\(\s*)['"](\.\.?\/[^'"]+)['"]/g;
+        let m;
+        while ((m = re.exec(src))) {
+          const target = path.resolve(path.dirname(abs), m[1]);
+          if (!fsx.existsSync(target)) {
+            bad.push(`${path.relative(ROOT, abs).replace(/\\/g, '/')} → ${m[1]}`);
+          }
+        }
+      }
+    };
+    walk(path.join(ROOT, 'host'));
+    walk(path.join(ROOT, 'tools'));
+    assert.deepEqual(bad, [], `相对 import 指向不存在的文件（搬动文件后最容易断）：\n${bad.slice(0, 8).join('\n')}`);
+  });
+  /* 5c) 路由遮蔽：精确路由不能被更早的「参数化 / 前缀」路由吃掉 */
+  await checkAsync('路由：无遮蔽（精确路由不被参数化吃掉）', async () => {
+    const src = fsx.readFileSync(path.join(ROOT, 'host', 'api', 'index.js'), 'utf8');
+    const lines = src.split(/\r?\n/);
+    const routes = [];
+    lines.forEach((l, i) => {
+      let m = l.match(/req\.method === '(\w+)' && route === '([^']+)'/);
+      if (m) routes.push({ line: i + 1, method: m[1], path: m[2], kind: 'exact' });
+      m = l.match(/req\.method === '(\w+)' && route\.startsWith\('([^']+)'\)/);
+      if (m) routes.push({ line: i + 1, method: m[1], path: `${m[2]}*`, kind: 'prefix' });
+    });
+    // 只看 GET/POST 两种主方法；参数化路由手工登记（正则解析容易出错）
+    const paramRoutes = [
+      { line: 900, method: 'GET', re: /^\/jobs\/[^/]+$/, path: '/jobs/:id' },
+      { line: 783, method: 'GET', re: /^\/projects\/[^/]+\/shots$/, path: '/projects/:id/shots' },
+      { line: 750, method: 'GET', re: /^\/projects\/[^/]+$/, path: '/projects/:id' },
+      { line: 2023, method: 'GET', re: /^\/edit\/projects\/[^/]+$/, path: '/edit/projects/:id' },
+    ];
+    const shadows = [];
+    for (const exact of routes.filter((r) => r.kind === 'exact')) {
+      for (const pr of paramRoutes) {
+        if (pr.method !== exact.method) continue;
+        if (pr.line >= exact.line) continue;              // 参数化在后面，不会遮蔽
+        if (pr.re.test(exact.path)) {
+          shadows.push(`${exact.path} 被 ${pr.path}（L${pr.line}）遮蔽`);
+        }
+      }
+      for (const pf of routes.filter((r) => r.kind === 'prefix' && r.method === exact.method && r.line < exact.line)) {
+        const pre = pf.path.slice(0, -1);
+        if (exact.path.startsWith(pre)) shadows.push(`${exact.path} 被前缀 ${pre}（L${pf.line}）遮蔽`);
+      }
+    }
+    /**
+     * `batch-progress` 是已知的、用显式排除兜住的特例。
+     * 如果哪天有人加新的特例，这条断言会提醒「该把 /jobs/:id 移到最后了」。
+     */
+    const known = shadows.filter((s) => s.startsWith('/jobs/batch-progress'));
+    const unexpected = shadows.filter((s) => !s.startsWith('/jobs/batch-progress'));
+    assert.deepEqual(unexpected, [], `存在未处理的路由遮蔽：\n${unexpected.join('\n')}`);
+  });
+  /* 5d) 预览编号必须等于真实提交编号（P0：fl2va 串脸） */
+  await checkAsync('参考图编号：预览 === 提交（四种模式）', async () => {
+    const fss = await import('node:fs');
+    const oss = await import('node:os');
+    const ps = await import('node:path');
+    const tmp = fss.mkdtempSync(ps.join(oss.tmpdir(), 'jz-num-'));
+    const assets = ps.join(tmp, 'data', 'assets');
+    fss.mkdirSync(assets, { recursive: true });
+    for (const n of ['card.png', 'manual.png', 'first.png', 'last.png']) {
+      fss.writeFileSync(ps.join(assets, n), Buffer.from('x'));
+    }
+    const cfg = { dataDir: ps.join(tmp, 'data') };
+    const RI = await import('../host/services/ref-images.js');
+    const RP = await import('../host/services/render-plan.js');
+    const diffs = [];
+    try {
+      for (const mode of ['ref2va', 'fl2va', 'i2va', 't2va']) {
+        const shot = {
+          mode,
+          characterCards: [{ id: 'c1', name: 'A', resolvedImages: [{ rel: 'assets/card.png', slot: 'covers' }] }],
+          refs: { images: ['assets/manual.png'] },
+          previz: { firstFramePath: 'assets/first.png', lastFramePath: 'assets/last.png' },
+        };
+        const refs = RI.resolveRefImages(shot, cfg);
+        const first = mode === 'fl2va' || mode === 'i2va' ? 'first.png' : '';
+        const last = mode === 'fl2va' ? 'last.png' : '';
+        const slots = RI.planImageSlots(mode, refs.map((r) => ps.basename(r.abs)), first, last);
+        const plan = RP.buildRenderPlan({
+          cards: shot.characterCards, manualImages: shot.refs.images, previz: shot.previz,
+          sceneImages: [], refImageSize: 'match', mode,
+        });
+        const real = refs.map((r, i) => `${ps.basename(r.abs)}@${slots.pictureIndexMap.get(i)}`);
+        const prev = plan.images.map((x) => `${ps.basename(x.rel)}@${x.index}`);
+        if (JSON.stringify(real) !== JSON.stringify(prev)) {
+          diffs.push(`${mode}: 提交=${real.join(',')} 预览=${prev.join(',')}`);
+        }
+        /**
+         * 角色卡的 <Picture N>（subjects[].pictureIndex）也必须一致 ——
+         * 它决定提示词里 `<Subject identity: 名字> … carried by <Picture N>` 指向谁。
+         * 这一条曾经也是错的（subjects 在编号重算**之前**构造，拿到的是旧值）。
+         */
+        const realCardIdx = slots.pictureIndexMap.get(0);
+        const subjCardIdx = plan.subjects?.[0]?.pictureIndex;
+        if (realCardIdx !== subjCardIdx) {
+          diffs.push(`${mode}: 角色卡 提交=<Picture ${realCardIdx}> 预览=<Picture ${subjCardIdx}>`);
+        }
+      }
+    } finally {
+      try { fss.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+    assert.deepEqual(diffs, [],
+      `预览的 <Picture N> 与真实提交不一致（会导致串脸且不报错）：\n${diffs.join('\n')}`);
+  });
+  /* 5e) 文件服务的安全头（/file 与 /assets/item 必须一致） */
+  await checkAsync('安全：文件服务带 nosniff + SVG 强制下载', async () => {
+    const src = fsx.readFileSync(path.join(ROOT, 'host', 'api', 'index.js'), 'utf8');
+    // /file 与 /assets/item 两个分支都必须出现 nosniff
+    const nosniffCount = (src.match(/X-Content-Type-Options/g) || []).length;
+    assert.ok(nosniffCount >= 2, `nosniff 至少要在两个文件服务分支出现（实际 ${nosniffCount} 处）`);
+    // SVG 必须强制 attachment（两处）
+    const svgCount = (src.match(/attachment/g) || []).length;
+    assert.ok(svgCount >= 2, `SVG 强制下载至少两处（实际 ${svgCount} 处）`);
+  });
+
+  /* 5f) 错误映射必须用 err.code，不是 message 正则 */
+  await checkAsync('错误映射：按 err.code 映射状态码', async () => {
+    const src = fsx.readFileSync(path.join(ROOT, 'host', 'api', 'index.js'), 'utf8');
+    assert.ok(/CODE_STATUS/.test(src), '应有 code → 状态码的显式映射表');
+    for (const c of ['NOT_FOUND', 'BODY_TOO_LARGE', 'INLINE_DATA_URL', 'FORBIDDEN_PATH']) {
+      assert.ok(new RegExp(`${c}:\\s*\\d{3}`).test(src), `映射表应包含 ${c}`);
+    }
+    assert.ok(/err\?\.code/.test(src), '应从 err.code 取值');
+    /**
+     * 还必须支持「message 就是错误码」的回退 —— 仓库里有 30+ 处
+     * `throw new Error('EDIT_NOT_FOUND')` 这种写法，它们没有 err.code。
+     * 只查 code 会让这些全部落 500。
+     */
+    assert.ok(/msgCode/.test(src), '应有 message 型错误码的回退解析');
+    assert.ok(/statusFor/.test(src), '应有统一的查表函数（code + message 两路）');
+  });
+
+  /* 5g) 对象字面量不能有重复键（曾经导致"分段按 A 算、存盘按 B"） */
+  await checkAsync('结构：无对象字面量重复键', async () => {
+    const bad = [];
+    const walkFile = (file) => {
+      const src2 = fsx.readFileSync(file, 'utf8');
+      const lines = src2.split(/\r?\n/);
+      // 找形如 `const x = {` 或 `return {` 开始的块，检查块内同层重复键
+      for (let i = 0; i < lines.length; i += 1) {
+        if (!/(=|return)\s*\{$/.test(lines[i].trim())) continue;
+        const indent = lines[i].match(/^\s*/)[0].length;
+        const keys = new Map();
+        for (let j = i + 1; j < lines.length; j += 1) {
+          const l = lines[j];
+          const ind = l.match(/^\s*/)[0].length;
+          if (l.trim() === '};' || l.trim() === '}') { if (ind <= indent) break; }
+          const m = l.match(/^\s{2,}([A-Za-z_$][\w$]*):/);
+          if (m && ind === indent + 2) {
+            if (keys.has(m[1])) {
+              bad.push(`${path.relative(ROOT, file).replace(/\\/g, '/')}:${j + 1} 重复键 ${m[1]}（首次在 ${keys.get(m[1])}）`);
+            } else keys.set(m[1], j + 1);
+          }
+        }
+      }
+    };
+    walkFile(path.join(ROOT, 'host', 'api', 'replace-tasks.js'));
+    assert.deepEqual(bad, [], `对象字面量有重复键：\n${bad.join('\n')}`);
+  });
+  /* 5h) 槽位编码：planImageSlots 必须返回按槽位号定位的稀疏数组 */
+  await checkAsync('槽位：planImageSlots 按槽位号定位（不压缩）', async () => {
+    const RI = await import('../host/services/ref-images.js');
+    // fl2va：首尾帧占 1/2，三张参考图必须落在 3/4/5
+    const s = RI.planImageSlots('fl2va', ['c1.png', 'c2.png', 'c3.png'], 'first.png', 'last.png');
+    assert.equal(s.images.length, 9, 'images 必须是定长 9 的槽位数组');
+    assert.equal(s.images[0], '', '槽位1 留给首帧');
+    assert.equal(s.images[1], '', '槽位2 留给尾帧');
+    assert.equal(s.images[2], 'c1.png', '槽位3 = 第 1 张参考图');
+    assert.equal(s.images[3], 'c2.png', '槽位4 = 第 2 张参考图');
+    assert.equal(s.images[4], 'c3.png', '槽位5 = 第 3 张参考图');
+    assert.deepEqual(s.present, ['c1.png', 'c2.png', 'c3.png'], 'present 是有效图片列表');
+    // i2va：首帧占 1
+    const s2 = RI.planImageSlots('i2va', ['a.png'], 'f.png', '');
+    assert.equal(s2.images[0], '', 'i2va 槽位1 留给首帧');
+    assert.equal(s2.images[1], 'a.png', 'i2va 参考图从槽位2 起');
+    // ref2va：不占槽
+    const s3 = RI.planImageSlots('ref2va', ['a.png', 'b.png'], '', '');
+    assert.equal(s3.images[0], 'a.png', 'ref2va 从槽位1 起');
+  });
+
+  /* 5i) LoRA 分类：加速学生不能被画风/动作名误判 */
+  await checkAsync('LoRA：加速学生分类不误判', async () => {
+    const LC = await import('../host/services/lora-catalog.js');
+    const cases = [
+      ['00_turbo/dmad_minimax_h3_8step_full_critic_comfyui.safetensors', 'turbo'],
+      ['dmad_minimax_h3_4step_full_critic_comfyui.safetensors', 'turbo'],
+      ['lightx2v_h3.safetensors', 'turbo'],
+      // 下面这些曾经被裸 `step` / `acc` 正则误判成 turbo，进而顶掉真 DMAD
+      ['30_style/art_steps_style.safetensors', 'style'],
+      ['step_by_step_anime.safetensors', 'style'],
+      ['accelerate_motion_pack.safetensors', 'motion'],
+    ];
+    const wrong = [];
+    for (const [name, want] of cases) {
+      const got = LC.classifyLora(name).category.id;
+      if (got !== want) wrong.push(`${name} → ${got}（期望 ${want}）`);
+    }
+    assert.deepEqual(wrong, [], `LoRA 分类误判：\n${wrong.join('\n')}`);
+  });
+
+  /* 5j) 加速方案命中子目录时不能清空 warnings */
+  await checkAsync('加速方案：子目录命中不清空警告', async () => {
+    const AP = await import('../host/services/accel-plan.js');
+    const r = AP.resolveAccelForFiles('dmad8', ['00_turbo/dmad_minimax_h3_8step_full_critic_comfyui.safetensors']);
+    assert.ok(r.lora.includes('00_turbo/'), '应提交带目录的完整名');
+    assert.ok(Array.isArray(r.warnings) && r.warnings.length > 0,
+      'warnings 不应被清空（历史缺陷：exactFile.dir ? [] : warnings 逻辑写反）');
+  });
+  /* 6) 安全：isLoopbackHost 不能被 127.0.0.1.evil.com 骗过 */
+  await checkAsync('安全：Host 校验用严格 IP 判定', async () => {
+    const { isLoopbackHost } = await import('../host/security.js');
+    const mk = (h) => ({ headers: { host: h } });
+    assert.equal(isLoopbackHost(mk('127.0.0.1:7120')), true, '127.0.0.1 应通过');
+    assert.equal(isLoopbackHost(mk('localhost:7120')), true, 'localhost 应通过');
+    assert.equal(isLoopbackHost(mk('127.0.0.1.evil.com')), false, '127.0.0.1.evil.com 必须被拒');
+    assert.equal(isLoopbackHost(mk('127.0.0.1.evil.com:80')), false, '127.0.0.1.evil.com:80 必须被拒');
+  });
+
+  /* 7) 数据安全：json-store 写失败不能删目标文件 */
+  await checkAsync('数据安全：原子写不删目标文件', async () => {
+    const src = fsx.readFileSync(path.join(ROOT, 'host', 'store', 'json-store.js'), 'utf8');
+    /**
+     * 只检查**代码行**：注释里会写「旧实现 `fs.rmSync(file)`」作为历史记录，
+     * 那是文档不是代码。判据是「该行不以 * 或 // 开头」。
+     */
+    const codeLines = src.split(/\r?\n/).filter((l) => {
+      const s = l.trim();
+      return s && !s.startsWith('*') && !s.startsWith('//') && !s.startsWith('/*');
+    }).join('\n');
+    assert.ok(!/rmSync\(file/.test(codeLines), '写路径里不能出现 rmSync(file) —— 那会在重试失败时删掉旧数据');
+    assert.ok(/backupSync/.test(src), '写前应有备份（.bak）');
+    assert.ok(/flushJsonStore/.test(src), '应导出 flushJsonStore 供测试/退出使用');
+  });
+
+  /* 8) 前端 fetch 必须有超时 */
+  await checkAsync('前端：request() 带默认超时', async () => {
+    const src = fsx.readFileSync(path.join(ROOT, 'app-src', 'src', 'api', 'client.ts'), 'utf8');
+    assert.ok(/DEFAULT_TIMEOUT_MS/.test(src), '应有默认超时常量');
+    assert.ok(/AbortSignal\.timeout|combineSignals/.test(src), '应使用 AbortSignal 超时');
+    assert.ok(/WRITE_TOKEN_REQUIRED/.test(src), '应在 403 WRITE_TOKEN_REQUIRED 时重取 token');
+  });
+
+  /* 9) 前端 SSE 连接状态必须响应式 */
+  await checkAsync('前端：SSE 连接状态可订阅', async () => {
+    const src = fsx.readFileSync(path.join(ROOT, 'app-src', 'src', 'api', 'events.ts'), 'utf8');
+    assert.ok(/useSyncExternalStore/.test(src), '应导出响应式 hook');
+    assert.ok(/useStudioEventsConnected/.test(src), '应有 useStudioEventsConnected');
+  });
+}
 /* -------------------------------------------------------------- 主流程 */
 
 const t0 = Date.now();
 await moduleChecks();
 await applyChecks();
 await routeChecks();
+await architectureChecks();
 
 const dt = Date.now() - t0;
 const pad = Math.max(...results.map((r) => r.name.length), 10);

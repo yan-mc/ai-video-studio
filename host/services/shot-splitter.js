@@ -1,93 +1,72 @@
 /**
- * 按段切分分镜提示词 —— 让「7 段视频 ↔ 7 个 [Shot N]」真正对上。
+ * 按段切分分镜提示词 —— 让「N 段视频 ↔ N 个 [Shot N]」真正对上。
  *
  * ============================================================================
- * 为什么需要这个模块
+ * 设计前提（用户明确约定）
  * ============================================================================
  *
- * 换人流程把长视频切成 N 段分别重建，但提示词里的 `[Shot 1]…[Shot M]`
- * 是**整条片子**的分镜设计。早先的实现把整份提示词原样发给每一段：
+ * **`[Shot N]` 一定独占一行，且该段的所有内容都在这一行内，不跨行。**
  *
- *   段 1 收到 [Shot 1][Shot 2][Shot 3][Shot 4][Shot 5][Shot 6][Shot 7]
- *   段 2 收到 [Shot 1][Shot 2][Shot 3][Shot 4][Shot 5][Shot 6][Shot 7]
- *   …
+ * 这条约定让切分变得极简：
+ *   · 以 `[Shot N]` 开头的行  = 某个镜头的动作描述（只属于那一段）
+ *   · 其余所有行              = 全局要求（**每一段都要带**）
  *
- * 结果是每段都想把整场戏演完 —— 动作挤在一起、节奏全乱，而且模型根本
- * 不知道"这一段只该演第 3 个镜头"。
- *
- * 正确做法是**每段只保留它自己那个 [Shot]**，其余全部剥掉。
+ * 所以切分 = **删掉不属于本段的 `[Shot N]` 行，其他一个字节都不动**。
  *
  * ============================================================================
- * 对应关系的判定
+ * 为什么不是「按块切分」
  * ============================================================================
  *
- * 三种情况：
+ * 早先的实现按 `[Shot N]` 位置把文本切成若干块，每块包含「该 Shot 行 +
+ * 到下一个 Shot 之间的所有文字」。这在用户这种排版下是**错的**：
  *
- *   ① M == N（分镜数 == 段数）→ 一对一，段 i 取 [Shot i]
- *   ② M != N 且能整除        → 段 i 取第 i 组（每组 M/N 个 Shot）
- *   ③ 其余                   → **不切**，整份发给每段，并给出明确警告
+ *   [Shot 7] 动作描述
+ *                       ← 空行
+ *   Fine detail of woman vagina.          ┐
+ *   Emphasize the trembling...            │ 这些是「所有幕都要遵守」
+ *   Only modifications will be made...    │ 的通用要求，却被算进了 Shot 7
+ *   Pay close attention...                │
+ *   Pay attention to the details...       ┘
+ *   Maintain <Subject 1> identity...      ← 这条碰巧被识别成 tail
  *
- * 情况 ① 是用户这次的场景（7 段 7 Shot），也是设计上最自然的用法。
- * 情况 ③ 不切是因为瞎猜配对关系比不切更糟 —— 与其让模型收到错的分镜，
- * 不如保留全文并让用户看到警告。
+ * 实测后果：段 1–6 各丢失 5 条通用要求，只有段 7 完整。
+ * 而这些恰恰是画质、表情、服装细节的约束 —— 丢了就等于没写。
+ *
+ * 现在的行过滤法不会有这个问题：非 Shot 行一律保留。
  *
  * @module shot-splitter
  */
 
-/** 匹配 [Shot N] 及其后面的内容，直到下一个 [Shot] 或结尾 */
-const SHOT_RE = /\[Shot\s*(\d+)\]/gi;
+/** 匹配「以 [Shot N] 开头的整行」 */
+const SHOT_LINE_RE = /^\s*\[Shot\s*(\d+)\]/i;
 
 /**
- * 把提示词拆成「外壳 + 所有 Shot 块」。
+ * 扫描提示词，找出所有 `[Shot N]` 行。
  *
  * @param {string} prompt
- * @returns {{ head: string, shots: Array<{ n: number, text: string }>, tail: string }}
- *   `head` 是第一个 [Shot] 之前的内容（触发词、身份绑定等），
- *   `tail` 是最后一个 Shot 之后的内容（防漂移声明）。
+ * @returns {{ lines: string[], shotLines: Array<{ lineIdx: number, n: number }> }}
+ */
+function scan(prompt) {
+  const lines = String(prompt ?? '').split('\n');
+  const shotLines = [];
+  lines.forEach((l, i) => {
+    const m = l.match(SHOT_LINE_RE);
+    if (m) shotLines.push({ lineIdx: i, n: Number(m[1]) });
+  });
+  return { lines, shotLines };
+}
+
+/**
+ * 拆出分镜信息（供编号校验与数量统计用）。
+ *
+ * @param {string} prompt
+ * @returns {{ shots: Array<{ n: number, text: string }> }}
  */
 export function parseShots(prompt) {
-  const text = String(prompt ?? '');
-  const marks = [...text.matchAll(SHOT_RE)];
-  if (!marks.length) {
-    return { head: text, shots: [], tail: '' };
-  }
-
-  const head = text.slice(0, marks[0].index).trimEnd();
-  const shots = [];
-  for (let i = 0; i < marks.length; i += 1) {
-    const start = marks[i].index;
-    const end = i + 1 < marks.length ? marks[i + 1].index : text.length;
-    shots.push({ n: Number(marks[i][1]), text: text.slice(start, end).trim() });
-  }
-
-  /**
-   * `tail` 的判定：最后一个 Shot 块里如果混了防漂移句，应该剥出来。
-   *
-   * 用户通常把「全程保持…一致」写在最后一行，它会被算进最后一个 Shot 块。
-   * 如果直接把它切给某一段，其它段就丢掉了这条约束 —— 而防漂移是每段都要的。
-   *
-   * 识别特征（中英两种写法都要覆盖）：
-   *   · 中文：全程保持 / 完全复刻…不添加
-   *   · 英文：Maintain… / Keep…consistent / Fully replicate…without…
-   *
-   * ⚠️ 早先只覆盖了前三种，`Fully replicate <Video 1>'s action without adding
-   *    new characters.` 这种最常见的中译英结果**没被识别**，
-   *    于是它被归进最后一个 Shot，只发给最后一段 —— 其余段全丢防漂移约束。
-   */
-  const isGuardLine = (l) => /^(全程保持|完全复刻.*不添加|Maintain\b|Keep\b.*consistent|Fully replicate.*without)/i.test(l.trim());
-
-  const last = shots[shots.length - 1];
-  let tail = '';
-  if (last) {
-    const lines = last.text.split('\n');
-    const guardIdx = lines.findIndex((l, i) => i > 0 && isGuardLine(l));
-    if (guardIdx > 0) {
-      tail = lines.slice(guardIdx).join('\n').trim();
-      shots[shots.length - 1] = { ...last, text: lines.slice(0, guardIdx).join('\n').trim() };
-    }
-  }
-
-  return { head, shots, tail };
+  const { lines, shotLines } = scan(prompt);
+  return {
+    shots: shotLines.map((s) => ({ n: s.n, text: lines[s.lineIdx].trim() })),
+  };
 }
 
 /**
@@ -97,61 +76,88 @@ export function parseShots(prompt) {
  * @param {number} segIndex 段序号（**从 1 开始**）
  * @param {number} segTotal 总段数
  * @returns {{ prompt: string, mode: 'one-to-one'|'grouped'|'whole', shots: number[], warning: string }}
- *   `mode` 说明采用了哪种切分策略，`shots` 是这一段实际包含的 Shot 编号。
  */
 export function splitPromptForSegment(prompt, segIndex, segTotal) {
-  const { head, shots, tail } = parseShots(prompt);
-
-  const assemble = (picked) => {
-    const body = picked.map((s) => s.text).join('\n\n');
-    return [head, body, tail].filter(Boolean).join('\n\n');
-  };
+  const text = String(prompt ?? '');
+  const { lines, shotLines } = scan(text);
 
   // 没有分镜 → 整份发
-  if (!shots.length) {
-    return {
-      prompt: String(prompt ?? ''),
-      mode: 'whole',
-      shots: [],
-      warning: '',
-    };
+  if (!shotLines.length) {
+    return { prompt: text, mode: 'whole', shots: [], warning: '' };
   }
 
-  const M = shots.length;
+  const M = shotLines.length;
   const N = Math.max(1, Number(segTotal) || 1);
   const idx = Math.max(1, Math.min(N, Number(segIndex) || 1));
 
-  // ① 一对一
-  if (M === N) {
-    const picked = [shots[idx - 1]];
-    return { prompt: assemble(picked), mode: 'one-to-one', shots: picked.map((s) => s.n), warning: '' };
-  }
+  /**
+   * 决定这一段保留哪些**行**（用行下标，不用 Shot 编号）。
+   *
+   * ⚠️ 必须用行下标：用户可能写出两个 `[Shot 6]`（手误），
+   *    按编号匹配会把两条都留下，等于那段演了两个镜头。
+   */
+  let keepLineIdx;
+  let mode;
 
-  // ② 分组（每组 M/N 个）
-  if (M > N && M % N === 0) {
+  if (M === N) {
+    // ① 一对一：最自然的用法
+    keepLineIdx = new Set([shotLines[idx - 1].lineIdx]);
+    mode = 'one-to-one';
+  } else if (M > N && M % N === 0) {
+    // ② 分组：每段分 M/N 个
     const per = M / N;
     const from = (idx - 1) * per;
-    const picked = shots.slice(from, from + per);
-    return { prompt: assemble(picked), mode: 'grouped', shots: picked.map((s) => s.n), warning: '' };
+    keepLineIdx = new Set(shotLines.slice(from, from + per).map((s) => s.lineIdx));
+    mode = 'grouped';
+  } else {
+    // ③ 配不上 → 不切（瞎猜比不切更糟），并明确告知
+    return {
+      prompt: text,
+      mode: 'whole',
+      shots: shotLines.map((s) => s.n),
+      warning:
+        `提示词里有 ${M} 个 [Shot N]，但视频切成 ${N} 段 —— 数量对不上，`
+        + '无法把分镜映射到段。已把完整提示词发给每一段（每段都会试图演完整场戏）。'
+        + `要让每段只演自己那部分，请让分镜数等于段数（当前需 ${N} 个），`
+        + '或写成能被段数整除的分组。',
+    };
   }
 
-  // ③ 配不上 → 不切，明确告知
+  /**
+   * 核心：**只删不属于本段的 Shot 行，其余原样保留**。
+   *
+   * 非 Shot 行（触发词、身份绑定、通用要求、防漂移声明）每一段都要带 ——
+   * 它们不是"某个镜头的描述"，而是"整条片子的规则"。
+   */
+  const kept = [];
+  lines.forEach((l, i) => {
+    const isShotLine = shotLines.some((s) => s.lineIdx === i);
+    if (!isShotLine) { kept.push(l); return; }
+    if (keepLineIdx.has(i)) kept.push(l);
+  });
+
+  // 删行后可能留下连续空行，压成一个空行即可（不要压得更多，避免把分段结构弄乱）
+  const out = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+
   return {
-    prompt: String(prompt ?? ''),
-    mode: 'whole',
-    shots: shots.map((s) => s.n),
-    warning:
-      `提示词里有 ${M} 个 [Shot N]，但视频切成 ${N} 段 —— 数量对不上，`
-      + '无法把分镜映射到段。已把完整提示词发给每一段（每段都会试图演完整场戏）。'
-      + `要让每段只演自己那部分，请让分镜数等于段数（当前需 ${N} 个），`
-      + '或写成能被段数整除的分组。',
+    prompt: out,
+    mode,
+    shots: shotLines
+      .filter((s) => keepLineIdx.has(s.lineIdx))
+      .map((s) => s.n),
+    warning: '',
   };
 }
 
-/** 检查分镜编号是否连续（缺号/重号会导致模型困惑） */
+/**
+ * 检查分镜编号是否连续（缺号/重号会导致模型困惑）。
+ *
+ * 注意：这两个问题都**不阻断执行**，只是提醒 —— 用户可能有意为之。
+ */
 export function checkShotNumbering(prompt) {
   const { shots } = parseShots(prompt);
   if (!shots.length) return { ok: true, warning: '' };
+
   const ns = shots.map((s) => s.n);
   const dup = ns.filter((n, i) => ns.indexOf(n) !== i);
   if (dup.length) {
@@ -161,6 +167,7 @@ export function checkShotNumbering(prompt) {
         + '模型会按出现顺序理解，重复编号会打乱它对齐时间轴的依据。',
     };
   }
+
   const sorted = [...ns].sort((a, b) => a - b);
   const expected = sorted.map((_, i) => i + 1);
   if (sorted.join(',') !== expected.join(',')) {

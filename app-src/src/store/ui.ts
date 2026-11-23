@@ -15,7 +15,7 @@ interface UiStore {
   /* 监测器 */
   monitor: MonitorPayload | null;
   health: HealthPayload | null;
-  monitorError: string | null;
+  monitorError: unknown;
   monitorLoading: boolean;
   /** 轮询是否启用（页面隐藏时暂停） */
   monitorEnabled: boolean;
@@ -64,7 +64,7 @@ export const useUiStore = create<UiStore>((set, get) => ({
       set({ monitor: payload, monitorError: null, monitorLoading: false });
     } catch (err) {
       set({
-        monitorError: err instanceof Error ? err.message : String(err),
+        monitorError: err,
         monitorLoading: false,
       });
     }

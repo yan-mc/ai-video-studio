@@ -17,7 +17,7 @@
  * 释义从哪来
  * ============================================================================
  *
- *   host/services/nanfeng/param-docs.js → enrichSchema() → GET /nanfeng/schema
+ *   host/bridge/vendors/nanfeng/param-docs.js → enrichSchema() → GET /nanfeng/schema
  *
  * 每个参数带三个可选字段：
  *   zh    一句话说明它做什么
