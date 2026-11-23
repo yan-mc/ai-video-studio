@@ -1127,7 +1127,7 @@ export const VIDEO_PARAM_GROUPS: ReadonlyArray<{ title: string; keys: string[] }
   { title: '五段流', keys: ['segments'] },
   // ⚠️ 「开关」这一组已删除。
   //    generateAudio / returnLastFrame / freeVramBeforeRun / watermark 四个开关
-  //    在南风 217 参数里**没有任何对应项**，host 侧零读取 ——
+  //    在南风 221 参数里**没有任何对应项**，host 侧零读取 ——
   //    它们只是让用户以为能控音频/尾帧/显存，实际提交出去的 body 完全不变。
   //    留着假开关比删掉更糟：用户会照着它调参，然后怀疑是模型不行。
   { title: '采样 · LoRA', keys: ['steps', 'firstPassSteps', 'motionLoraStrength', 'loras'] },

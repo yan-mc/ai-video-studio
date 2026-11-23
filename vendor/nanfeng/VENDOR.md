@@ -170,7 +170,7 @@ NANFENG_VISION_API_KEY=
 
 ## 5. 必须修复的环境适配（host 侧 graph.js）
 
-改造后仍在 `host/services/nanfeng/graph.js` 里做三件事：
+改造后仍在 `host/bridge/vendors/nanfeng/graph.js` 里做三件事：
 
 ### ① 类型强制 `coerceTypes()`
 
@@ -246,7 +246,7 @@ workflow['2'] = {
 
 ```
 host/services/nanfeng/
-├─ schema.js       217 参数定义（A-L 分组）
+├─ schema.js       221 参数定义（A-L 分组）
 ├─ graph.js        图组装 + 类型强制 + 环境修正
 ├─ presets.js      7 个内置预设 + 三层合并
 ├─ continuation.js 续写批次编排（含 folder 算法复刻）

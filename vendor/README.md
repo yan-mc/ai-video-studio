@@ -10,7 +10,7 @@
 
 ```
 DSH Agent / 浏览器
-      │  HTTP POST /prompt  （217 个参数 + 素材文件名）
+      │  HTTP POST /prompt  （221 个参数 + 素材文件名）
       ▼
 DSH 插件 host/  （Node ESM）
       │  组装 ComfyUI 的图 JSON：{ "1": { class_type: "NanFengH3MultiReferenceGeneratorV15", inputs: {...} } }
@@ -50,7 +50,7 @@ GPU 出片 → output/ → 插件下载归档
 | 文件 | 行数 | 职责 |
 |---|---|---|
 | `__init__.py` | 44 | 包入口。只 import `h3_generator`，**不加载** `_removed/` |
-| `h3_generator.py` | 2590 | 主节点 `NanFengH3MultiReferenceGeneratorV15`：217 参数 → GraphBuilder 展开 ~40 节点 |
+| `h3_generator.py` | 2590 | 主节点 `NanFengH3MultiReferenceGeneratorV15`：221 参数 → GraphBuilder 展开 ~40 节点 |
 | `nodes.py` | 287 | 提示词节点（中文提示词 + `@` 素材引用） |
 | `latent_continuation.py` | 74 | 续写 latent 落盘：`clip_1`、`clip_2`… 按 `(workflow,node,group,run)` 哈希分目录 |
 | `continuation_audio_refine.py` | 126 | 续写接缝的音频精修（保护已对齐的音频关键帧） |

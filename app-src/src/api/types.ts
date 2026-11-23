@@ -200,7 +200,7 @@ export interface Shot {
 export interface ShotNanfeng {
   /** 预设 id，或 { inherit, overrides } / { chain: [...] } */
   presets?: string | { inherit?: string; chain?: string[]; overrides?: Record<string, unknown> };
-  /** 单镜参数覆盖（217 个南风参数里的任意子集，最高优先级） */
+  /** 单镜参数覆盖（221 个南风参数里的任意子集，最高优先级） */
   overrides?: Record<string, unknown>;
   /**
    * 这个镜头要挂的语义 LoRA（加速学生由 `accelPlan` 决定，不在这里）。
