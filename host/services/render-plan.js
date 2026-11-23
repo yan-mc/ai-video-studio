@@ -206,7 +206,6 @@ export function buildRenderPlan({
   for (const rel of manualImages) pushImage(rel, REF_SOURCES.MANUAL);
 
   // ---- 4) 场景/道具（优先级最低，超限时先砍）----
-  const sceneStart = images.length;
   for (const rel of sceneImages) pushImage(rel, REF_SOURCES.SCENE);
 
   // ---- 5) 预算裁剪 ----
@@ -233,7 +232,6 @@ export function buildRenderPlan({
     // 重新编号（裁剪后编号必须连续，提示词才有意义）
     images.forEach((x, i) => { x.index = i + 1; });
   }
-  void sceneStart;
 
   // ---- 5.5) 参考视频 + 音频 ----
   //

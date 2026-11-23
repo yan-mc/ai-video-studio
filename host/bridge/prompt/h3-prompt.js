@@ -1023,7 +1023,7 @@ function alignmentInstruction(refs, effectiveSec, declaredMode) {
 function compileRef2VA(ctx) {
   // ⚠️ `warnings` 必须解构出来 —— 打光/画风冲突、续写裁切等提示都往这里写。
   //    以前只有基础格式能出这些 warning，Ref2VA（主力路径）静默丢掉。
-  const { style, subjects, refs, scenes, soundscape, music, input, effectiveSec, warnings } = ctx;
+  const { style, subjects, refs, scenes, soundscape, music, input, warnings } = ctx;
 
   const out = [];
 
@@ -1382,7 +1382,6 @@ function compileRef2VA(ctx) {
   out.push('');
   out.push(`non_diegetic_music: ${music}`);
 
-  void effectiveSec;
   return out.join('\n');
 }
 

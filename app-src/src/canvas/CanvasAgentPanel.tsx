@@ -114,7 +114,9 @@ export function CanvasAgentPanel({ getContext, applyDiff, projectId }: Props) {
 
     setBusy(true);
     try {
-      const m = await ensureMeta();
+      // ensureMeta() 只为确认后端可用（不可用会抛错 → 走 catch 提示）；
+      // 返回值本身不用，所以不接收。
+      await ensureMeta();
       const ctx = getContext();
       const r = await api.canvasAgentExec({
         name: intent.tool,
@@ -130,7 +132,6 @@ export function CanvasAgentPanel({ getContext, applyDiff, projectId }: Props) {
         applyDiff(r.diff);
         setLogs((l) => [...l, { role: 'ai', text: '已把改动应用到画布。' }]);
       }
-      void m;
     } catch (e) {
       const msg = String((e as Error)?.message ?? e);
       setLogs((l) => [...l, { role: 'ai', text: `执行失败：${msg}` }]);

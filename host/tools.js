@@ -287,8 +287,7 @@ export function registerTools(ctx) {
         return { styles: STYLE_PRESETS, modes: H3_MODES, limits: H3_LIMITS };
       }
       if (a.action === 'compile') {
-        const { action, projectId, shotId, ...rest } = a;
-        void action; void projectId; void shotId;
+        const { action: _a, projectId: _p, shotId: _s, ...rest } = a;
         return compileH3Prompt(rest);
       }
       // fromShot + 无 action 的兼容路径

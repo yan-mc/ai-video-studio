@@ -420,7 +420,12 @@ function CanvasInner() {
   const [quickConnect, setQuickConnect] = useState<PendingConnect | null>(null);
 
   const [clipboard, setClipboard] = useState<CanvasFlowNode[]>([]);
-  const [historyTick, setHistoryTick] = useState(0);
+  /**
+   * 只当"重渲染触发器"用的计数器：撤销/重做后 `historyRef` 变了，
+   * 但它是个 ref，改它本身不触发渲染 → 用这个 state 逼组件重跑一次。
+   * 值永远不需要读，所以解构成 `[, setHistoryTick]`。
+   */
+  const [, setHistoryTick] = useState(0);
 
   /* ------------------------------- 引用 ---------------------------------- */
   const historyRef = useRef(new HistoryStack<CanvasFlowNode>());
@@ -1421,8 +1426,7 @@ function CanvasInner() {
   /* -------------------------------- 渲染 --------------------------------- */
   const undoDepth = historyRef.current.undoDepth();
   const redoDepth = historyRef.current.redoDepth();
-  // historyTick 只是为了触发重渲染，让深度数字刷新（引用本身不触发渲染）
-  void historyTick;
+  // 深度值在这里读一次，state 更新（bumpHistory）会让本函数重跑 → 数字刷新。
 
   const scrollMenu = useCallback((e: ReactMouseEvent | MouseEvent) => {
     const x = Math.min((e as MouseEvent).clientX, window.innerWidth - 340);
