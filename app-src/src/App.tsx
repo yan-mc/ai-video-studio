@@ -29,7 +29,7 @@ import { Icon, ThemeProvider, Toaster, useT, useToast, ErrorBoundary } from './u
 import { useTheme } from './ui/theme';
 import type { IconName } from './ui/Icon';
 import { api, describeError } from './api/client';
-import type { ComfyStatus } from './api/types';
+import type { ComfyStatus, QwenStatus } from './api/types';
 
 /* ------------------------------------------------------------- 导航定义 */
 
@@ -218,6 +218,174 @@ function ComfyPowerButton() {
   );
 }
 
+/* ---------------------------------------------------- Qwen3-VL 本地推理开关 */
+
+/**
+ * 顶栏的 Qwen3-VL 启停按钮 + 状态。
+ *
+ * 为什么它和 ComfyUI 电源并排放在顶栏：
+ *   12GB 单卡上「ComfyUI/H3 出片」与「Qwen3-VL 看图/写词」**不能同时跑**。
+ *   用户必须在一个地方看到两者状态并一键切换，而不是去翻两个 ps1 脚本。
+ *
+ * 与 ComfyPowerButton 的差别（都是有意的）：
+ *   · 显示**上下文长度**（128k）—— 这是用户最关心的配置，也是 DSH 侧
+ *     `contextWindow` 必须对齐的那个值；
+ *   · 两者同时运行时给**明确警告色**，而不是静默并排；
+ *   · 状态每 15 秒刷新（Qwen 启停比 ComfyUI 快，10 秒太频繁）。
+ */
+function QwenPowerButton() {
+  const [status, setStatus] = useState<QwenStatus | null>(null);
+  const [busy, setBusy] = useState<'' | 'start' | 'stop' | 'restart'>('');
+  const toast = useToast();
+
+  const refresh = useCallback(async () => {
+    try {
+      setStatus(await api.qwenStatus());
+    } catch {
+      // 查不到不等于服务挂了（可能是 Host 在重启），保持上一次的值
+    }
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => { if (alive) await refresh(); };
+    void tick();
+    const id = window.setInterval(tick, 15000);
+    return () => { alive = false; window.clearInterval(id); };
+  }, [refresh]);
+
+  const act = useCallback(async (kind: 'start' | 'stop' | 'restart') => {
+    if (busy) return;
+    setBusy(kind);
+    try {
+      const r = kind === 'start'
+        ? await api.qwenStart()
+        : kind === 'stop'
+          ? await api.qwenStop()
+          : await api.qwenRestart();
+      if (r.ok) toast.ok(r.detail);
+      else toast.error(r.detail);
+      await refresh();
+    } catch (e) {
+      toast.error(describeError(e));
+    } finally {
+      setBusy('');
+    }
+  }, [busy, refresh, toast]);
+
+  const running = status?.running === true;
+  const canControl = status?.canControl !== false;
+  // 两个都跑 = 抢显存，必须让用户看见
+  const conflict = running && status?.comfyRunning === true;
+  const [showDetail, setShowDetail] = useState(false);
+
+  const ctxLabel = status?.nCtx ? `${Math.round(status.nCtx / 1024)}k` : '';
+  const label = busy === 'start' ? '启动中…'
+    : busy === 'stop' ? '停止中…'
+      : busy === 'restart' ? '重启中…'
+        : running ? `Qwen ${ctxLabel}` : 'Qwen';
+
+  const title = !canControl
+    ? (status?.detail ?? '找不到 ai-runtime，无法从界面启停')
+    : conflict
+      ? `⚠️ Qwen3-VL 与 ComfyUI 同时在运行，会抢 12GB 显存（出片必 OOM）。建议先停一个。\n当前：${status?.detail}`
+      : running
+        ? `${status?.detail}\n模型：${status?.model ?? '?'}\n点击重启（约 15 秒）`
+        : '点一下启动本地 Qwen3-VL（约 15 秒），供 DSH 的 qwen3vl 模型使用';
+
+  return (
+    <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+      <button
+        type="button"
+        className="jz-btn jz-btn--sm jz-btn--ghost"
+        disabled={Boolean(busy) || !canControl}
+        onClick={() => void act(running ? 'restart' : 'start')}
+        title={title}
+        aria-label={running ? '重启 Qwen3-VL' : '启动 Qwen3-VL'}
+        style={{
+          gap: 6,
+          opacity: canControl ? 1 : 0.5,
+          // 冲突时用警示色描边，而不是只靠 tooltip
+          ...(conflict ? { color: 'var(--jz-warn, #d9822b)', borderColor: 'var(--jz-warn, #d9822b)' } : {}),
+        }}
+      >
+        <span
+          className={running ? 'jz-dot jz-dot--ok' : 'jz-dot jz-dot--bad'}
+          style={{ marginRight: 2 }}
+        />
+        <Icon name={running ? 'refresh' : 'play'} size={14} />
+        {label}
+        {conflict ? <span aria-hidden>⚠</span> : null}
+      </button>
+
+      {/* 详情展开：顶栏按钮放不下模型名/端口/上下文，用一个极小的信息按钮切换 */}
+      <button
+        type="button"
+        className="jz-btn jz-btn--icon jz-btn--ghost"
+        onClick={() => setShowDetail((v) => !v)}
+        title="查看 Qwen3-VL 服务详情"
+        aria-label="查看 Qwen3-VL 服务详情"
+        aria-expanded={showDetail}
+        style={{ opacity: 0.65 }}
+      >
+        <Icon name="info" size={13} />
+      </button>
+
+      {showDetail ? (
+        <div
+          role="dialog"
+          style={{
+            position: 'absolute', top: '100%', right: 0, marginTop: 6, zIndex: 40,
+            minWidth: 280, padding: '10px 12px',
+            background: 'var(--jz-bg-raised)', border: '1px solid var(--jz-border)',
+            borderRadius: 'var(--jz-r-sm)', boxShadow: 'var(--jz-shadow-md, 0 6px 20px rgba(0,0,0,.28))',
+            fontSize: 12, lineHeight: 1.7,
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Qwen3-VL（本地 llama.cpp）</div>
+          <Row k="状态" v={status?.detail ?? '未知'} />
+          <Row k="端口" v={status?.port ? String(status.port) : '—'} />
+          <Row k="上下文" v={status?.nCtx ? `${status.nCtx.toLocaleString()} tokens` : '—'} />
+          <Row k="模型" v={status?.model ?? '—'} />
+          <Row k="服务地址" v={status?.url || '—'} />
+          <Row k="运行时" v={status?.runtimeDir || '（找不到 ai-runtime）'} />
+          <Row k="ComfyUI" v={status?.comfyRunning ? '运行中（会抢显存）' : '未运行'} />
+          {conflict ? (
+            <div style={{ marginTop: 6, color: 'var(--jz-warn, #d9822b)' }}>
+              ⚠️ 两者同时运行会 OOM。出片前先停 Qwen3-VL。
+            </div>
+          ) : null}
+          <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--jz-border)', color: 'var(--jz-text-muted)' }}>
+            DSH 侧 provider 名：<code>qwen3vl</code><br />
+            上下文需与 <code>contextWindow</code> 一致（改了要重启 DSH）
+          </div>
+          {running ? (
+            <button
+              type="button"
+              className="jz-btn jz-btn--sm jz-btn--ghost"
+              style={{ marginTop: 8, width: '100%' }}
+              disabled={Boolean(busy)}
+              onClick={() => void act('stop')}
+            >
+              停止 Qwen3-VL
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** 详情面板里的一行「键：值」 */
+function Row({ k, v }: { k: string; v: string }) {
+  return (
+    <div style={{ display: 'flex', gap: 8 }}>
+      <span style={{ color: 'var(--jz-text-muted)', flex: '0 0 68px' }}>{k}</span>
+      <span style={{ wordBreak: 'break-all' }}>{v}</span>
+    </div>
+  );
+}
+
 /* --------------------------------------------------------------- 顶栏 */
 
 function TopBar({ route }: { route: RouteId }) {
@@ -266,6 +434,7 @@ function TopBar({ route }: { route: RouteId }) {
       </div>
 
       <ComfyPowerButton />
+      <QwenPowerButton />
 
       <AppearanceMenu />
     </header>

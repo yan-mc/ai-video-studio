@@ -2495,6 +2495,44 @@ async function routeChecks() {
     }
   });
 
+  await checkAsync('Qwen3-VL 启停：四个路由都注册了', async () => {
+    /**
+     * 顶栏的 Qwen3-VL 开关依赖这四条 —— 它与 ComfyUI 抢同一张 12GB 卡，
+     * 用户需要在同一个界面里切换两者，所以和 /comfy/* 一样"少一条就是死按钮"。
+     */
+    const f = await import('node:fs');
+    const src = f.readFileSync(new URL('../host/api/index.js', import.meta.url), 'utf8');
+    for (const r of ['/qwen/status', '/qwen/start', '/qwen/stop', '/qwen/restart']) {
+      assert.ok(src.includes(`route === '${r}'`), `缺少路由 ${r}`);
+    }
+    // 三个控制路由必须是 POST（写操作要过写令牌），只有 status 是 GET
+    for (const r of ['/qwen/start', '/qwen/stop', '/qwen/restart']) {
+      assert.ok(src.includes(`req.method === 'POST' && route === '${r}'`),
+        `${r} 必须是 POST`);
+    }
+    assert.ok(src.includes("req.method === 'GET' && route === '/qwen/status'"),
+      '/qwen/status 必须是 GET');
+  });
+
+  await checkAsync('Qwen3-VL：参数真源在 ps1，插件侧不自拼 llama 参数', async () => {
+    /**
+     * 启动逻辑（选端口 / -c / -nkvo / 日志 / 失败诊断）只能有一份 ——
+     * 在 ai-runtime/start-qwen3vl.ps1 里。插件侧再拼一遍必然与脚本漂移，
+     * 而且那份脚本属于用户自己的运行环境，会独立演进。
+     */
+    const f = await import('node:fs');
+    const src = f.readFileSync(new URL('../host/services/qwen-server.js', import.meta.url), 'utf8');
+    assert.ok(src.includes('start-qwen3vl.ps1'), '必须调 start-qwen3vl.ps1');
+    assert.ok(src.includes('stop-qwen3vl.ps1'), '必须调 stop-qwen3vl.ps1');
+    // 检查的是**可执行代码**，不是注释：注释里提到 llama-server.exe 是说明性的，
+    // 真正要防的是 `spawn(...'llama-server.exe'...)` 这种自己拼参数。
+    const code = src
+      .replace(/\/\*[\s\S]*?\*\//g, '')   // 去块注释
+      .replace(/^\s*\/\/.*$/gm, '');      // 去行注释
+    assert.ok(!/spawn\([^)]*llama-server/i.test(code),
+      'qwen-server.js 不应直接 spawn llama-server.exe（参数真源在 ps1）');
+  });
+
   await checkAsync('ComfyUI 启停：必须用 pwsh 而不是 powershell.exe', async () => {
     /**
      * 这条守护一个**看起来像语法错误、实际是编码问题**的坑。
