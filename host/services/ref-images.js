@@ -354,50 +354,17 @@ export function normalizeImageMode(mode) {
 }
 
 /**
- * 一次拿到"这次生成到底提交什么"的完整描述。
+ * 上层需要的三个入口（**必须按序调用**）：
  *
- * 这是**上层唯一需要调的入口**。它把三件事一次算好：
- *   解析顺序（resolveRefImages）+ 槽位分配（planImageSlots）+ 首尾帧来源。
+ *   1. `resolveRefImages(shot, cfg)`   → 参考图解析顺序（角色卡 → 人设卡 → 手工 → 场景道具，上限 9）
+ *   2. `resolvePrevizArtifacts(shot,cfg)` → 首/尾帧绝对路径
+ *   3. `planImageSlots(mode, refs, first, last)` → 定长 9 的槽位数组 + `pictureIndexMap`
  *
- * @param {object} shot
- * @param {object} opts
- * @param {object} [opts.cfg]
- * @param {string} [opts.mode]             覆盖镜头卡的 mode
- * @param {(abs:string)=>Promise<string>} [opts.stage] 把绝对路径变成 ComfyUI 文件名
- * @returns {Promise<{
- *   refs: Array, frameSlots: object, reserved: number[],
- *   pictureIndexMap: Map<number,number>, dropped: Array,
- *   stagedImages: string[], warnings: string[],
- * }>}
+ * 这三步的**顺序规则只在这里定义**，四个消费者（generator / render-plan /
+ * shot-context / prompt-compile）都直接调这三个函数，不再各自手写排序。
+ *
+ * ⚠️ 曾经有过一个 `buildSubmissionRefs()` 把三步打包成一次调用，但零调用者
+ *    （三条路径全都绕过它手拼三步），而且它的 `stage` 参数让"传绝对路径"与
+ *    "传 ComfyUI 文件名"两种语义混在一个函数里 —— 两份消费者各自取所需。
+ *    包一层并不会让调用约定变统一，只会多一个会漂移的副本，所以已删除。
  */
-export async function buildSubmissionRefs(shot, { cfg = loadConfig(), mode, stage } = {}) {
-  const warnings = [];
-  const refs = resolveRefImages(shot, cfg);
-
-  // 缺图告警（静默丢素材是本仓库最顽固的失败模式）
-  const missing = refs.filter((r) => !r.abs);
-  if (missing.length) {
-    warnings.push(`有 ${missing.length} 张参考图解析失败（不在 dataDir 内或文件不存在），已跳过`);
-  }
-
-  const previz = resolvePrevizArtifacts(shot, cfg);
-  const firstAbs = previz['{{FIRST_FRAME}}'] || '';
-  const lastAbs = previz['{{LAST_FRAME}}'] || '';
-
-  // 可选的 staging：把绝对路径变成 ComfyUI input 里的文件名
-  const staged = stage
-    ? await Promise.all(refs.map((r) => (r.abs ? stage(r.abs) : Promise.resolve(''))))
-    : refs.map((r) => r.abs);
-  const stagedFirst = stage && firstAbs ? await stage(firstAbs) : firstAbs;
-  const stagedLast = stage && lastAbs ? await stage(lastAbs) : lastAbs;
-
-  const slots = planImageSlots(mode ?? shot?.mode, staged, stagedFirst, stagedLast);
-  if (slots.dropped.length) {
-    warnings.push(
-      `槽位不足：${slots.dropped.map((d) => d.name).join('、')} 未能提交`
-      + '（首尾帧占用槽位后只剩这么多；参考图上限 9 张）',
-    );
-  }
-
-  return { refs, ...slots, stagedImages: slots.images, stagedFirst, stagedLast, warnings };
-}
