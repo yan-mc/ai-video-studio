@@ -318,7 +318,7 @@ export function registerTools(ctx) {
         scenes: a.shots,
       });
       const compiled = compileH3Prompt(pkg);
-      // 兼容旧返回：附上分辨率与帧数建议
+      // 返回值里附上分辨率与帧数建议，调用方（Agent）不用再算一次。
       return {
         ...compiled,
         prompt: compiled.prompt || compilePrompt(prepared),

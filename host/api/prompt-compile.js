@@ -71,7 +71,7 @@ export function compilePrompt(shot, outWarnings = null) {
         continuationIndex: shot.continuationIndex ?? null,
         contextLength: shot.nanfeng?.overrides?.context_length ?? '22',
       });
-      // 兼容旧字段：description/camera/style 已在 toShotInputPackage 里映射。
+      // description / camera / style 已在 toShotInputPackage 里映射，这里不再重复写。
       //
       // 短备注（≤200 字）同时写进 `sceneLayout` **和**第一个镜头的 `action`。
       //
