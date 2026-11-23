@@ -352,6 +352,9 @@ export async function startComfy() {
         resetComfyProbe();
         return { ok: true, port: p2, detail: `已启动（端口 ${p2}）` };
       }
+      // 启动失败必须清掉探测缓存：否则旧端口会被缓存 5 秒，
+      // 用户紧接着再点「启动」时，明明已经起来了也可能报"不可达"。
+      resetComfyProbe();
       return {
         ok: false,
         detail: `启动脚本已退出（code ${exitedCode}）但端口未就绪。`
@@ -360,6 +363,7 @@ export async function startComfy() {
     }
   }
 
+  resetComfyProbe();
   return {
     ok: false,
     detail: '启动超时（180s 内端口未就绪）。请查看 ai-runtime/comfy_err.log',
