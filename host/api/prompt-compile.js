@@ -73,26 +73,12 @@ export function compilePrompt(shot, outWarnings = null) {
       });
       // 兼容旧字段：description/camera/style 已在 toShotInputPackage 里映射。
       //
-      // 注意：这里**不再**把 `shot.prompt` 追加到 sceneLayout。
-      // 完整的用户提示词已在函数开头直接返回；能走到这里的 `prompt`
-      // 只可能是不足 200 字的简短备注，把它当场景补充说明更合理，
-      // 所以限制为短文本，避免长文本重复灌入导致提示词畸形。
+      // 短备注（≤200 字）同时写进 `sceneLayout` **和**第一个镜头的 `action`。
       //
-      // ⚠️ 但它**不能只写进 sceneLayout**（历史缺陷，已实测复现）：
-      //    compileRef2VA 的分支是
-      //        if (scenes.length) { …逐镜头… } else { layout = sceneLayout … }
-      //    （见 h3-prompt.js 的 detailed_description 段），而
-      //    toShotInputPackage **永远**会造一个默认 shots 数组（shots: opts.scenes ?? [{…}]）。
-      //    于是 scenes 恒非空 → sceneLayout 分支恒不执行 →
-      //    只写 sceneLayout 等于把这句话扔进死字段。
-      //
-      //    实测后果：`prompt: "Video depicts a sexual scene between …"`（146 字）
-      //    提交后提示词里**一个字都没有**，模型收到的是 description 编译出来的骨架。
-      //    LoRA 的触发词往往就是这么一句短中文/短英文，正好全落在 200 字以下 ——
-      //    用户以为挂上了 LoRA 就能出效果，实际触发词根本没进提示词。
-      //
-      //    修法：同时追加进 scenes 的第一个镜头 action（那才是真正被读取的字段），
-      //    并做一次去重，避免与 description 相同时重复两遍。
+      // 为什么必须写两处：`toShotInputPackage` 永远会造一个默认 shots 数组，
+      // 于是 `compileRef2VA` 的 `if (scenes.length)` 恒为真、`sceneLayout` 分支
+      // 恒不执行 —— 只写 sceneLayout 等于把这段文字扔进死字段。
+      // LoRA 触发词通常就是一句短文本，正好落在这个长度区间。
       const shortPrompt = shot.prompt ? String(shot.prompt).trim() : '';
       if (shortPrompt && shortPrompt.length <= 200) {
         const desc = String(pkg.sceneLayout ?? '').trim();
@@ -108,26 +94,19 @@ export function compilePrompt(shot, outWarnings = null) {
         }
       }
 
-      // ⚠️ 环境声/配乐要显式带过去。
-      //    早先它们被 workbench 的默认值覆盖（"环境底噪" / "N/A"），
-      //    用户在镜头卡里填的真实值根本没进提示词。
+      // 环境声/配乐要显式带过去：不写就会被 workbench 的默认值
+      // （"环境底噪" / "N/A"）覆盖，镜头卡里填的真实值进不了提示词。
       if (shot.sound) pkg.overall_soundscape = shot.sound;
       if (shot.music) pkg.non_diegetic_music = shot.music;
 
-      // ⚠️ 参考视频/音频的**用途说明**必须走 buildMediaNotes。
+      // 参考视频/音频的**用途说明**必须走 buildMediaNotes。
       //
-      // 历史缺陷：buildMediaNotes 只挂在 /render/compile 上，而那是个
-      // 没人调用的死端点。真实生成路径（本函数）不产 mediaNotes，
-      // 于是 compileRef2VA 只能退化到内置默认句 —— 所有参考视频都被写成
-      // `transfer motion only`，"续篇 / 节奏 / 氛围"这三类用途永远表达不出来，
+      // 缺了它，compileRef2VA 会退化到内置默认句：所有参考视频都被写成
+      // `transfer motion only`，"续篇 / 节奏 / 氛围"三类用途表达不出来，
       // 参考音频也拿不到"谁的音色"绑定。
       try {
         // ⚠️ buildRenderPlan 是**解构对象**入参，不是 (shot, cfg)。
-        //    历史实现写成 `buildRenderPlan(shot, cfg)` —— shot 被当成 opts 解构，
-        //    cfg 被整个忽略，于是 cards / manualImages 全部丢失：
-        //      · mediaNotes 里永远没有 <Video 1> / <Audio 2> 定义句
-        //      · compileRef2VA 的 hasProvidedMediaDefs 恒 false → 退到内置默认句
-        //      · 参考视频的「续篇/节奏/氛围」三种用途永远表达不出来
+        //    传错形状会让 cards / manualImages 静默丢失 → mediaNotes 为空。
         const plan = buildRenderPlan({
           cards: shot.characterCards ?? [],
           manualImages: shot.refs?.images ?? [],
@@ -167,12 +146,9 @@ export function compilePrompt(shot, outWarnings = null) {
   // 兜底：结构化编译抛错时的极简组装
   // ==========================================================================
   //
-  // ⚠️ 历史缺陷：这里曾拼出「风格：X\n运镜：Y\n台词：Z」这种中文标签串。
-  //    那是**没有任何官方格式依据**的自由文本，模型拿到的是一堆冒号标签，
-  //    既不是基础格式也不是六段格式 —— 属于最差的一种输出。
-  //
-  //    现在兜底也遵守官方基础格式：至少产出三字段，让模型能解析。
-  //    宁可少写内容，也不能产出没有结构的东西。
+  // ⚠️ 兜底也必须遵守官方基础格式（至少三字段）。
+  //    拼"风格：X / 运镜：Y / 台词：Z"这种自由文本标签串是没有官方格式依据的，
+  //    模型拿到的只是一堆冒号标签 —— 宁可少写内容，也不能产出没有结构的东西。
   const fallbackDesc = [
     shot.description,
     shot.camera ? `The camera ${shot.camera}.` : '',
