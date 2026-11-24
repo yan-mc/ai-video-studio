@@ -332,8 +332,18 @@ export const api = {
   /* ComfyUI 进程控制（顶栏启停按钮） */
   comfyStatus: () => request<ComfyStatus>('GET', '/comfy/status'),
   comfyStart: () => request<ComfyControlResult>('POST', '/comfy/start', {}),
-  comfyStop: () => request<ComfyControlResult>('POST', '/comfy/stop', {}),
-  comfyRestart: () => request<ComfyControlResult>('POST', '/comfy/restart', {}),
+  /**
+   * 停止 ComfyUI。默认 **purge**：清队列/历史/卸载模型并等显存归还。
+   * `purge:false` 退回轻量行为（只 interrupt + 清队列）。
+   */
+  comfyStop: (opts?: { purge?: boolean }) =>
+    request<ComfyControlResult>('POST', '/comfy/stop', opts ?? {}),
+  /**
+   * 重启 ComfyUI = **彻底初始化**。
+   * 顺序：interrupt → 清队列 → 清历史 → 卸载模型释放显存 → 等显存归还 → 杀进程 → 重新拉起。
+   */
+  comfyRestart: (opts?: { purge?: boolean }) =>
+    request<ComfyControlResult>('POST', '/comfy/restart', opts ?? {}),
 
   /* 配置 */
   getConfig: () => request<AppConfig>('GET', '/config'),

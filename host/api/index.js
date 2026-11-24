@@ -633,7 +633,14 @@ export async function handleApi(req, res) {
     }
 
     if (req.method === 'POST' && route === '/comfy/stop') {
-      const r = await comfyControl.withLock(() => comfyControl.stopComfy());
+      /**
+       * 停止也默认清场 —— 用户点「关闭」的心愿同样是"别让它在后台偷偷跑"。
+       * 传 `{purge:false}` 可退回旧行为（只 interrupt + 清队列）。
+       */
+      const body = await readJsonBody(req).catch(() => ({}));
+      const r = await comfyControl.withLock(
+        () => comfyControl.stopComfy({ purge: body?.purge !== false }),
+      );
       return sendJson(res, r.ok ? 200 : 500, r);
     }
 
@@ -643,7 +650,21 @@ export async function handleApi(req, res) {
     }
 
     if (req.method === 'POST' && route === '/comfy/restart') {
-      const r = await comfyControl.withLock(() => comfyControl.restartComfy());
+      /**
+       * 「重启」= **彻底初始化**，不只是 kill + 拉起。
+       *
+       * 顺序（每一步的理由见 comfy-control.js 的 purgeComfyState 注释）：
+       *   interrupt 当前任务 → 清队列 → 清历史 → 卸载模型+释放显存
+       *   → 等显存真的归还 → 杀进程 → 重新拉起
+       *
+       * 用户的原始诉求：「有时候跑一半的东西我要给它停掉，点这个按钮之后
+       * 希望能把前面跑一半的删了」。所以默认 purge=true。
+       * 传 `{purge:false}` 退回"快速重启"（不清历史/不卸载模型）。
+       */
+      const body = await readJsonBody(req).catch(() => ({}));
+      const r = await comfyControl.withLock(
+        () => comfyControl.restartComfy({ purge: body?.purge !== false }),
+      );
       return sendJson(res, r.ok ? 200 : 500, r);
     }
 

@@ -226,15 +226,26 @@ async function resolveLivePort() {
 /**
  * 停止 ComfyUI。
  *
- * 顺序很重要：先 `/interrupt` 让当前采样收尾，再终止进程。
- * 直接杀进程可能让正在写的 mp4 / safetensors 变成半截文件。
+ * 顺序很重要：先让 ComfyUI **自己把队列/历史清干净、把模型卸掉**，
+ * 再终止进程。直接杀进程有两个后果：
+ *   · 正在写的 mp4 / safetensors 会变成半截文件；
+ *   · 内存里的队列状态随进程消失，但**磁盘上的续写 latent 不会**，
+ *     下次起来那些半截批次仍在（"前面的续写还在"就是这么来的）。
+ *
+ * @param {{purge?: boolean}} [opts]
+ *   purge=true 时执行"清场"序列（清队列 → 清历史 → 卸载模型释放显存）；
+ *   缺省 false 保持原来的轻量行为（只 interrupt + 清队列），供内部重启路径复用。
+ * @returns {Promise<{ok:boolean, detail:string, purged?:object}>}
  */
-export async function stopComfy() {
+export async function stopComfy(opts = {}) {
+  const purge = opts.purge === true;
   const port = await resolveLivePort();
   if (!port) {
     resetComfyProbe();
     return { ok: true, alreadyStopped: true, detail: '本来就没在运行' };
   }
+
+  const purged = purge ? await purgeComfyState(port) : null;
 
   // ① 尽力让当前任务中断（失败不影响后续终止）
   try {
@@ -280,8 +291,190 @@ export async function stopComfy() {
   resetComfyProbe();
   const stopped = !(await portListening(port));
   return stopped
-    ? { ok: true, pid, port, detail: `已停止（pid ${pid}）` }
-    : { ok: false, detail: `pid ${pid} 仍在监听端口 ${port}，未能停止` };
+    ? { ok: true, pid, port, detail: `已停止（pid ${pid}）`, ...(purged ? { purged } : {}) }
+    : { ok: false, detail: `pid ${pid} 仍在监听端口 ${port}，未能停止`, ...(purged ? { purged } : {}) };
+}
+
+/* ==========================================================================
+ * 清场（purge）—— "把跑一半的东西清干净"
+ * ========================================================================== */
+
+/** 轮询 ComfyUI 状态的间隔 */
+const PURGE_POLL_MS = 250;
+/** 等"队列已空"的上限：正在跑的那一单要 respond 到 interrupt，通常 < 3s */
+const PURGE_IDLE_TIMEOUT_MS = 20000;
+/** 等"显存真正归还"的上限 */
+const PURGE_VRAM_TIMEOUT_MS = 20000;
+
+/** 读 /queue：返回 { running, pending } 两个计数 */
+async function queueCounts(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/queue`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) return null;
+    const j = await res.json();
+    return {
+      running: Array.isArray(j?.queue_running) ? j.queue_running.length : 0,
+      pending: Array.isArray(j?.queue_pending) ? j.queue_pending.length : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 读 /system_stats 的显存占用（字节）；拿不到返回 null */
+async function vramUsedBytes(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/system_stats`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) return null;
+    const j = await res.json();
+    const dev = Array.isArray(j?.devices) ? j.devices[0] : null;
+    if (!dev) return null;
+    const total = Number(dev.vram_total);
+    const free = Number(dev.vram_free);
+    if (!Number.isFinite(total) || !Number.isFinite(free)) return null;
+    return { total, free, used: Math.max(0, total - free) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 把 ComfyUI 恢复到"刚启动"的干净状态。
+ *
+ * 为什么这个顺序（每一步都有实测依据）：
+ *
+ *  1) **interrupt 当前任务** —— `main.py` 的 worker 只有在一单跑完后才会
+ *     `q.get_flags()`；不先让它停，后面两件事都不会被处理。
+ *  2) **清队列** `/queue {clear:true}` → `wipe_queue()`，pending 全没。
+ *  3) **清历史** `/history {clear:true}` → `wipe_history()`。
+ *     不清的话 `/history/<id>` 仍能查到上次任务的 outputs，
+ *     调度侧"以为还在跑"的判断会出错。
+ *  4) **卸载模型 + 释放显存** `/free {unload_models:true, free_memory:true}`。
+ *     ⚠️ 这两个参数**只是设 flag**（`execution.py` 的 `set_flag`），
+ *     真正执行在 worker 下一轮循环里：`unload_all_models()` +
+ *     `e.reset()`（清所有节点缓存）+ `gc.collect()` + `soft_empty_cache()`。
+ *     所以要**轮询等它生效**，不能发完就返回。
+ *  5) **等显存真的掉下来** —— 只看 flag 没用，读 `/system_stats` 的
+ *     `vram_free` 比较才知道 H3 的 11GB 是否真的归还。
+ *
+ * @param {number} port
+ * @returns {Promise<{
+ *   queueBefore:{running:number,pending:number}|null,
+ *   idle:boolean, vramBefore:object|null, vramAfter:object|null,
+ *   freedMb:number, modelUnloaded:boolean, waitedMs:number,
+ * }>}
+ */
+export async function purgeComfyState(port) {
+  const t0 = Date.now();
+  const queueBefore = await queueCounts(port);
+  const vramBefore = await vramUsedBytes(port);
+
+  // 1) 让当前任务停下来
+  try {
+    await fetch(`http://127.0.0.1:${port}/interrupt`, {
+      method: 'POST', signal: AbortSignal.timeout(5000),
+    });
+  } catch { /* 尽力而为 */ }
+
+  // 2) 清队列
+  try {
+    await fetch(`http://127.0.0.1:${port}/queue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clear: true }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch { /* 尽力而为 */ }
+
+  // 3) 清历史
+  try {
+    await fetch(`http://127.0.0.1:${port}/history`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clear: true }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch { /* 尽力而为 */ }
+
+  // 4) 等队列空 —— worker 必须空闲才会处理下面的 free flag
+  let idle = false;
+  const idleUntil = Date.now() + PURGE_IDLE_TIMEOUT_MS;
+  while (Date.now() < idleUntil) {
+    const c = await queueCounts(port);
+    if (c && c.running === 0 && c.pending === 0) { idle = true; break; }
+    // 队列查询失败（进程可能已经在收尾）也当作已空
+    if (c === null) { idle = true; break; }
+    await new Promise((r) => setTimeout(r, PURGE_POLL_MS));
+  }
+
+  /**
+   * ⚠️ 队列空之后**再清一次历史**。
+   *
+   * 实测发现：被 interrupt 打断的任务会在收尾时**把自己写进 history**
+   * （`/history` 从 0 条变成 1 条）。如果清历史在 interrupt 之前做，
+   * 那条"跑一半被掐掉"的记录就会留在历史里 —— 而用户的诉求正是
+   * "把跑一半的删了"，留着它既误导又让下一次 `/history/<id>` 查得到幽灵任务。
+   *
+   * 所以顺序必须是：interrupt → 等队列空 → **清历史**（第二次，覆盖收尾写入）。
+   */
+  try {
+    await fetch(`http://127.0.0.1:${port}/history`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clear: true }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch { /* 尽力而为 */ }
+
+  // 5) 请求卸载模型 + 释放显存（只是设 flag）
+  let flagAccepted = false;
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/free`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ unload_models: true, free_memory: true }),
+      signal: AbortSignal.timeout(5000),
+    });
+    flagAccepted = res.ok;
+  } catch { /* ignore */ }
+
+  // 6) 等显存真的降下来（flag 由 worker 异步消费）
+  let vramAfter = vramBefore;
+  let modelUnloaded = false;
+  if (flagAccepted) {
+    const vramUntil = Date.now() + PURGE_VRAM_TIMEOUT_MS;
+    const baseline = vramBefore?.used ?? null;
+    while (Date.now() < vramUntil) {
+      await new Promise((r) => setTimeout(r, PURGE_POLL_MS));
+      const v = await vramUsedBytes(port);
+      if (!v) { vramAfter = vramAfter ?? null; break; }
+      vramAfter = v;
+      // 判定"模型已卸载"：占用掉到基线的 60% 以下，或总量已小于 2GB
+      if (baseline !== null && baseline > 0) {
+        if (v.used <= baseline * 0.6 || v.used <= 2 * 1024 ** 3) { modelUnloaded = true; break; }
+      } else if (v.used <= 2 * 1024 ** 3) {
+        modelUnloaded = true; break;
+      }
+    }
+  }
+
+  const freedMb = (vramBefore && vramAfter)
+    ? Math.round((vramBefore.used - vramAfter.used) / (1024 * 1024))
+    : 0;
+
+  return {
+    queueBefore,
+    idle,
+    vramBefore,
+    vramAfter,
+    freedMb,
+    modelUnloaded,
+    waitedMs: Date.now() - t0,
+  };
 }
 
 /**
@@ -370,12 +563,48 @@ export async function startComfy() {
   };
 }
 
-/** 重启 = 先停后起 */
-export async function restartComfy() {
-  const stopped = await stopComfy();
+/**
+ * 重启 ComfyUI —— **彻底初始化**。
+ *
+ * 语义（用户点顶栏「重启」时期望的就是这个）：
+ *   "把跑一半的东西停掉并清干净，然后给我一个刚启动的 H3。"
+ *
+ * 与单纯 kill + 拉起的关键差别是**先清场再杀**：
+ *   1. `stopComfy({purge:true})` 会 interrupt → wipe_queue → wipe_history →
+ *      unload_all_models → free_memory，并**等到显存真的归还**才杀进程；
+ *   2. 进程重启后节点缓存、显存碎片、历史产物引用全部是干净的。
+ *
+ * ⚠️ 为什么不删 `output/nanfeng_v15_context/`（续写 latent）：
+ *    那是**断点续跑**所依赖的状态。用户明确只要求"清掉跑一半的任务"，
+ *    而续写批次的中间段正是靠这些 latent 接着跑的 —— 删掉会让
+ *    "跑了 3 段、第 4 段失败想续跑"变成必须从头再来。
+ *    确实要连 latent 一起清，用 `/comfy/purge` 的 `deep:true`（见 api 层）。
+ *
+ * @param {{purge?: boolean}} [opts]
+ * @returns {Promise<object>}
+ */
+export async function restartComfy(opts = {}) {
+  const purge = opts.purge !== false;      // 默认执行清场
+  const t0 = Date.now();
+
+  const stopped = await stopComfy({ purge });
   if (!stopped.ok) return { ...stopped, phase: 'stop' };
+
   const started = await startComfy();
-  return { ...started, phase: 'start' };
+  const totalMs = Date.now() - t0;
+
+  const freedMb = stopped.purged?.freedMb ?? 0;
+  const detail = started.ok
+    ? `已重启并清场${freedMb > 0 ? `（释放 ${freedMb} MB 显存）` : ''} · 端口 ${started.port} · ${Math.round(totalMs / 1000)}s`
+    : started.detail;
+
+  return {
+    ...started,
+    detail,
+    phase: 'start',
+    purged: stopped.purged ?? null,
+    totalMs,
+  };
 }
 
 /** 供 API 层做进程内串行，避免两次点击同时启停 */

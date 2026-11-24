@@ -391,6 +391,28 @@ export interface ComfyStatus {
   detail: string;
 }
 
+/**
+ * 清场结果 —— 「重启」时 ComfyUI 恢复了哪些状态。
+ *
+ * 语义是"把跑一半的东西清干净"：队列、历史、显存、节点缓存。
+ * `freedMb` / `modelUnloaded` 用来向用户证明**真的卸掉了**，
+ * 而不只是发了个请求（`/free` 只是设 flag，要等 worker 消费）。
+ */
+export interface ComfyPurgeReport {
+  /** 清场前的队列长度（running=正在跑，pending=排队中） */
+  queueBefore: { running: number; pending: number } | null;
+  /** 是否等到队列彻底空（worker 空下来才会处理 free flag） */
+  idle: boolean;
+  vramBefore: { total: number; free: number; used: number } | null;
+  vramAfter: { total: number; free: number; used: number } | null;
+  /** 释放的显存（MB），拿不到数据时为 0 */
+  freedMb: number;
+  /** 模型是否确认已卸载（显存占用降到阈值以下） */
+  modelUnloaded: boolean;
+  /** 清场耗时（毫秒） */
+  waitedMs: number;
+}
+
 export interface ComfyControlResult {
   ok: boolean;
   detail: string;
@@ -399,6 +421,10 @@ export interface ComfyControlResult {
   port?: number;
   pid?: number;
   phase?: 'stop' | 'start';
+  /** 仅 restart / stop(purge) 返回 */
+  purged?: ComfyPurgeReport | null;
+  /** 仅 restart 返回：停止 + 启动总耗时 */
+  totalMs?: number;
 }
 
 /**

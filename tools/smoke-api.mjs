@@ -2495,6 +2495,47 @@ async function routeChecks() {
     }
   });
 
+  await checkAsync('ComfyUI 重启：清场顺序正确（interrupt → 队列 → 历史 → free → 等显存）', async () => {
+    /**
+     * 这条守的是**顺序**，不是"有没有调用"。
+     *
+     * 实测依据（本轮真机验证）：
+     *   · `/free` 只是 `set_flag`，worker 只在**队列空闲时**才消费它
+     *     （main.py:416 `q.get_flags()`）→ 必须先清队列，后发 free；
+     *   · 被 interrupt 打断的任务会在收尾时**把自己写进 history**
+     *     （实测 history 从 0 变 1）→ 清历史必须在"队列空"之后再来一次，
+     *     否则"跑一半被掐掉"的幽灵任务会留在历史里。
+     *
+     * 顺序错了不会报错，只会让用户看到"重启了但历史里还有那个没跑完的"。
+     */
+    const f = await import('node:fs');
+    const src = f.readFileSync(new URL('../host/services/comfy-control.js', import.meta.url), 'utf8');
+    // 只看可执行代码：注释里也写着 /interrupt、/free，直接 indexOf 会命中注释
+    const code = src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+    const from = code.indexOf('export async function purgeComfyState');
+    assert.ok(from > 0, '找不到 purgeComfyState');
+    const seg = code.slice(from);
+
+    // 路由在代码里是模板字符串（`${...}/interrupt`），所以按路径片段定位
+    const iInterrupt = seg.indexOf('/interrupt');
+    const iQueue = seg.indexOf('/queue');
+    const iFree = seg.indexOf('/free`');
+    const iVramWait = seg.indexOf('vramUsedBytes', iFree);
+
+    assert.ok(iInterrupt > 0, 'purgeComfyState 必须调 /interrupt');
+    assert.ok(iQueue > iInterrupt, '清队列必须在 interrupt 之后');
+    assert.ok(iFree > iQueue, '请求 /free 必须在清队列之后（worker 空闲才处理 flag）');
+    assert.ok(iVramWait > iFree, '发起 /free 之后必须轮询显存，确认真的卸载');
+    assert.ok(seg.includes('idle = true'), '必须有"轮询等队列空"的逻辑');
+
+    // 历史必须清两次：interrupt 前后各一次（后者覆盖被打断任务的收尾写入）
+    const histCount = (seg.match(/\/history/g) ?? []).length;
+    assert.ok(histCount >= 2,
+      `清历史应至少 2 次（interrupt 前后各一次），实际 ${histCount} 次`);
+  });
+
   await checkAsync('ComfyUI 启停：必须用 pwsh 而不是 powershell.exe', async () => {
     /**
      * 这条守护一个**看起来像语法错误、实际是编码问题**的坑。

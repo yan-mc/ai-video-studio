@@ -129,17 +129,26 @@ function AppearanceMenu() {
 /**
  * 顶栏的 ComfyUI 启停按钮。
  *
- * 为什么需要它（不是"顺手做个开关"）：
- *   本地「取消」只对正在跑的那一单发 /interrupt，**已经排进 ComfyUI 队列
- *   但还没开始的任务不会被清掉**。用户看到界面停了，ComfyUI 侧后面还挂着
- *   上一单的段 —— 下一单提交后那些段仍会依次执行，表现就是
- *   "前面的续写还在"。重启进程能一次性清掉队列 + 显存碎片 + 节点缓存。
+ * ============================================================================
+ * 「重启」= 彻底初始化（2026-11-24 起）
+ * ============================================================================
+ *
+ * 用户的原始诉求：「有时候跑一半的东西我要给它停掉，点这个按钮之后希望能把
+ * 前面跑一半的删了」。
+ *
+ * 所以点「重启」不是简单 kill + 拉起，而是后端依次执行：
+ *   interrupt 当前任务 → 清队列 → 清历史 → 卸载模型释放显存
+ *   → **等显存真的归还** → 杀进程 → 重新拉起
+ *
+ * 这样起来的 H3 是干净的：没有上一单的残留队列、没有 11GB 常驻模型、
+ * 没有节点缓存。`/free` 只是设 flag，必须等 worker 消费 —— 所以按钮会
+ * 多转几秒，那几秒是**真的在等显存掉下来**，不是卡住。
  *
  * 交互取舍：
- *   · **只在运行时才显示「重启」**。这是最常用的动作，但重启要等 30~180 秒，
- *     所以必须有进行中的禁用态和明确的 toast，不能让人以为卡住了。
- *   · 未运行时按钮是「启动」，一句话说清"点了会等一会儿"。
- *   · 状态每 10 秒自刷新一次 —— ComfyUI 可能被别处启停，按钮不能显示陈旧状态。
+ *   · **只在运行时才显示「重启」**；未运行时是「启动」。
+ *   · 重启要等 30~180 秒（含模型卸载与冷启动），必须禁用 + 明确 toast。
+ *   · 状态每 10 秒自刷新 —— ComfyUI 可能被别处启停，不能显示陈旧状态。
+ *   · 重启成功后 toast 里带上"释放了多少 MB 显存"，让用户确信清场生效了。
  */
 function ComfyPowerButton() {
   const t = useT();
@@ -170,13 +179,34 @@ function ComfyPowerButton() {
     if (busy) return;
     setBusy(kind);
     try {
+      // restart / stop 都默认 purge=true（清队列/历史/模型）
       const r = kind === 'start'
         ? await api.comfyStart()
         : kind === 'stop'
-          ? await api.comfyStop()
-          : await api.comfyRestart();
-      if (r.ok) toast.ok(r.detail);
-      else toast.error(r.detail);
+          ? await api.comfyStop({ purge: true })
+          : await api.comfyRestart({ purge: true });
+
+      if (r.ok) {
+        // 把清场结果讲清楚：用户点这个按钮就是想知道"跑一半的清了没有"
+        const p = r.purged;
+        if (p && (p.freedMb > 0 || p.queueBefore)) {
+          const bits = [];
+          if (p.queueBefore) {
+            const q = p.queueBefore;
+            if (q.running || q.pending) {
+              bits.push(`清掉 ${q.running} 个在跑 + ${q.pending} 个排队`);
+            }
+          }
+          if (p.freedMb > 0) bits.push(`释放 ${p.freedMb} MB 显存`);
+          if (!p.modelUnloaded && p.freedMb <= 0) bits.push('模型卸载未确认（可能仍占用）');
+          if (bits.length) toast.ok(`${r.detail}｜${bits.join('，')}`);
+          else toast.ok(r.detail);
+        } else {
+          toast.ok(r.detail);
+        }
+      } else {
+        toast.error(r.detail);
+      }
       await refresh();
     } catch (e) {
       toast.error(describeError(e));
@@ -189,7 +219,7 @@ function ComfyPowerButton() {
   const canControl = status?.canControl !== false;
   const label = busy === 'start' ? '启动中…'
     : busy === 'stop' ? '停止中…'
-      : busy === 'restart' ? '重启中…'
+      : busy === 'restart' ? '清场重启…'
         : running ? '重启' : '启动';
 
   return (
@@ -202,10 +232,12 @@ function ComfyPowerButton() {
         !canControl
           ? (status?.detail ?? '找不到 ai-runtime 目录，无法从界面启停')
           : running
-            ? `${t('comfy.restartHint')}（端口 ${status?.port}）`
+            ? `彻底初始化 ComfyUI（端口 ${status?.port}）\n`
+              + '会先清掉正在跑/排队的任务与历史，卸载模型释放显存，再重新拉起。\n'
+              + '约 30~180 秒。'
             : t('comfy.startHint')
       }
-      aria-label={running ? t('comfy.restart') : t('comfy.start')}
+      aria-label={running ? '清场重启 ComfyUI' : t('comfy.start')}
       style={{ gap: 6, opacity: canControl ? 1 : 0.5 }}
     >
       <span
