@@ -12,7 +12,6 @@ import { guard, safeId, safeJoin, resolveUserPath, getWriteToken } from '../secu
 import { dirs, projects, newProject, newShot, PROFILES, resolutionFor, h3Length, H3_MODEL_SLOTS, NODE_TYPES, NODE_LABELS, ASSET_TYPES, ASSET_TYPE_LABELS, PROJECT_CATEGORY_LABELS, listActionCatalog } from '../store/models.js';
 import * as comfy from '../services/comfy-client.js';
 import * as comfyControl from '../services/comfy-control.js';
-import * as qwenServer from '../services/qwen-server.js';
 import * as mockBackend from '../services/mock-backend.js';
 import { cancelJob, CancelledError } from '../services/job-runner.js';
 import { newJob, jobs as jobsStore, isLocalBackendOf } from '../services/job-store.js';
@@ -645,40 +644,6 @@ export async function handleApi(req, res) {
 
     if (req.method === 'POST' && route === '/comfy/restart') {
       const r = await comfyControl.withLock(() => comfyControl.restartComfy());
-      return sendJson(res, r.ok ? 200 : 500, r);
-    }
-
-    /* ------------------------------------------------ Qwen3-VL 进程控制 */
-
-    /**
-     * 本机 llama.cpp 上的 Qwen3-VL（DSH 的 `qwen3vl` provider 用的那个服务）。
-     *
-     * 它与 ComfyUI **抢同一张 12GB 显卡**，所以和上面四个路由并列放在顶栏。
-     * 注意：这两个服务互相独立，插件本身不依赖 qwen3vl 工作 —— 这些路由只是为了
-     * 让用户在同一个界面里切换，不用去翻两个 ps1 脚本。
-     */
-    if (req.method === 'GET' && route === '/qwen/status') {
-      return sendJson(res, 200, { ok: true, ...(await qwenServer.qwenStatus()) });
-    }
-
-    if (req.method === 'POST' && route === '/qwen/start') {
-      const body = await readJsonBody(req);
-      const r = await qwenServer.withQwenLock(() => qwenServer.startQwen({
-        contextLength: body?.contextLength,
-      }));
-      return sendJson(res, r.ok ? 200 : 500, r);
-    }
-
-    if (req.method === 'POST' && route === '/qwen/stop') {
-      const r = await qwenServer.withQwenLock(() => qwenServer.stopQwen());
-      return sendJson(res, r.ok ? 200 : 500, r);
-    }
-
-    if (req.method === 'POST' && route === '/qwen/restart') {
-      const body = await readJsonBody(req);
-      const r = await qwenServer.withQwenLock(() => qwenServer.restartQwen({
-        contextLength: body?.contextLength,
-      }));
       return sendJson(res, r.ok ? 200 : 500, r);
     }
 

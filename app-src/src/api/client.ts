@@ -18,8 +18,6 @@ import type {
   CancelResult,
   ComfyControlResult,
   ComfyStatus,
-  QwenControlResult,
-  QwenStatus,
   GenerateInput,
   H3Analysis,
   H3AnalyzeInput,
@@ -336,14 +334,6 @@ export const api = {
   comfyStart: () => request<ComfyControlResult>('POST', '/comfy/start', {}),
   comfyStop: () => request<ComfyControlResult>('POST', '/comfy/stop', {}),
   comfyRestart: () => request<ComfyControlResult>('POST', '/comfy/restart', {}),
-
-  /* Qwen3-VL 本地推理服务（顶栏开关；与 ComfyUI 抢同一张卡） */
-  qwenStatus: () => request<QwenStatus>('GET', '/qwen/status'),
-  qwenStart: (contextLength?: number) =>
-    request<QwenControlResult>('POST', '/qwen/start', contextLength ? { contextLength } : {}),
-  qwenStop: () => request<QwenControlResult>('POST', '/qwen/stop', {}),
-  qwenRestart: (contextLength?: number) =>
-    request<QwenControlResult>('POST', '/qwen/restart', contextLength ? { contextLength } : {}),
 
   /* 配置 */
   getConfig: () => request<AppConfig>('GET', '/config'),

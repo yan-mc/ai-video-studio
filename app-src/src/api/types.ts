@@ -402,35 +402,6 @@ export interface ComfyControlResult {
 }
 
 /**
- * 本机 Qwen3-VL（llama.cpp）服务状态。
- *
- * 与 `ComfyStatus` 并列但**独立**：它服务于 DSH 的 `qwen3vl` provider，
- * 不是本插件的生成后端。放在同一个界面只因为两者抢同一张 12GB 显卡。
- */
-export interface QwenStatus {
-  ok?: boolean;
-  running: boolean;
-  port: number;
-  url: string;
-  /** ai-runtime 目录；为空表示找不到 start-qwen3vl.ps1，应禁用启停 */
-  runtimeDir: string;
-  canControl: boolean;
-  /** 主模型文件名（GGUF） */
-  model: string | null;
-  /** 服务端实际分配的上下文长度 */
-  nCtx: number | null;
-  /** ComfyUI 是否同时在跑 —— 两者不能共存，用于界面警告 */
-  comfyRunning: boolean;
-  detail: string;
-}
-
-export interface QwenControlResult {
-  ok: boolean;
-  detail: string;
-  status?: QwenStatus;
-}
-
-/**
  * 加速方案选项。
  *
  * 每个方案对应一组 (LoRA, 采样器, 调度器, 步数, shift)，
