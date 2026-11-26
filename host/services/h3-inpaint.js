@@ -23,6 +23,9 @@ import {
   INPAINT_RESOLUTION_PRESETS, INPAINT_AUTO_SCALE, INPAINT_MAX_MP, MAX_CROP_PADDING,
   VENDOR_NODES, inpaintStrength, blurForResolution, autoCropResolution,
   estimateBboxFromStroke, estimateCropBlock, cropSampleEdge, sampleCanvasFor,
+  INPAINT_GRADED_LEVELS, INPAINT_GRADED_DEFAULT, INPAINT_GRADED_COLLAPSE,
+  INPAINT_GRADED_MIN_GRANULARITY_PX, INPAINT_GRADED_STITCH_THRESHOLD,
+  gradedLevel, snapGradedValue, gradedMaskByte,
 } from './inpaint-params.js';
 
 /* ---------------- 兼容导出（历史调用点不需要改 import） ---------------- */
@@ -32,6 +35,9 @@ export {
   INPAINT_RESOLUTION_PRESETS, INPAINT_AUTO_SCALE, INPAINT_MAX_MP, MAX_CROP_PADDING,
   VENDOR_NODES, inpaintStrength, blurForResolution, autoCropResolution,
   estimateBboxFromStroke, estimateCropBlock, cropSampleEdge, sampleCanvasFor,
+  INPAINT_GRADED_LEVELS, INPAINT_GRADED_DEFAULT, INPAINT_GRADED_COLLAPSE,
+  INPAINT_GRADED_MIN_GRANULARITY_PX, INPAINT_GRADED_STITCH_THRESHOLD,
+  gradedLevel, snapGradedValue, gradedMaskByte,
 };
 export { buildInpaintWorkflow } from './inpaint-graph.js';
 export { runH3Inpaint, inpaintMeta, probeInpaintNodes, resetInpaintProbeCache } from './inpaint-run.js';
@@ -92,12 +98,69 @@ export function validateInpaintRequest(body = {}, cfg = loadConfig(), opts = {})
   const strength = inpaintStrength(body.strength);
   const strengthId = strength.id;
 
+  /**
+   * 入参阶段的警告集合。**必须在分级判定之前声明** ——
+   * 分级会往里面写"档位被吸附 / 落在塌陷区 / 与 strength 叠加衰减"三类提示，
+   * 声明晚了就是 TDZ 崩溃（而且只在开分级时崩，更难发现）。
+   */
+  const warnings = [];
+
+  /**
+   * ---- 分级重绘（mask 灰度 = 逐区域去噪强度）
+   *
+   * 两个入参：
+   *   `graded`      boolean，默认 false（**关闭时行为与历史完全一致**）
+   *   `gradedLevel` 档位 id（full/strong/medium/light/keep）或 0..1 的数值
+   *
+   * 数值会**吸附到最近档**并写 warning：用户在滑块上给 0.62 时实际按 0.7 生效，
+   * 不写出来的话，"我明明填了 0.62 却像 0.7" 会变成一条查不出的问题。
+   *
+   * 也与 strength 叠加这件事要提示：strength 砍的是全局步数、gradedLevel 砍的是
+   * 逐区域 sigma，两者相乘。所以分级时推荐 strength=full，否则 0.85 的档会
+   * 变成"轻 × 轻"。
+   */
+  const graded = body.graded === true || body.graded === 'true' || body.graded === 1;
+  const rawLevel = body.gradedLevel ?? body.graded_level;
+  const level = graded ? gradedLevel(rawLevel) : null;
+
+  if (graded) {
+    if (rawLevel != null && rawLevel !== '' && level.snapped) {
+      const asked = typeof rawLevel === 'number' ? rawLevel : String(rawLevel);
+      warnings.push(
+        `分级强度 ${asked} 不在档位上，已吸附到「${level.label}」（mask=${level.mask}）。`
+        + `可用档位：${INPAINT_GRADED_LEVELS.map((l) => `${l.id}=${l.mask}`).join(' / ')}。`,
+      );
+    }
+    /**
+     * 只在调用方**显式**给了非 full 的 strength 时才警告。
+     *
+     * `inpaintStrength()` 在缺省时回落到 `medium`（历史行为，不能改 ——
+     * 那会让所有不传 strength 的旧调用变成 full）。但"没传"不等于
+     * "用户选了中档"，为它报一条"两者会相乘衰减"会把真正的告警淹掉：
+     * Agent 不传 strength 是常态，那样每次分级提交都会带一条假警告。
+     */
+    const strengthGiven = body.strength != null && String(body.strength).trim() !== '';
+    if (strengthGiven && strengthId !== 'full') {
+      warnings.push(
+        `分级重绘同时把「改动强度」设成了「${strength.label}」：`
+        + '后者砍全局 sigma 步数、前者砍逐区域强度，两者会相乘衰减 —— '
+        + '想要"强档真的强"请把改动强度留「完全重绘」。',
+      );
+    }
+    // 0.5 以下不是"更轻"，是"看不见"（实测塌陷区），必须写进 job.warnings
+    if (level.mask > 0 && level.mask < INPAINT_GRADED_COLLAPSE) {
+      warnings.push(
+        `分级档「${level.label}」的 mask=${level.mask} 落在塌陷区（<${INPAINT_GRADED_COLLAPSE}）：`
+        + '6 步 PDD 蒸馏下这一段的效果会断崖式下降，出图可能几乎看不出改动。'
+        + '实测 mask 0.5 的改动量只有 1.0 的 2.5%。要"轻"请用 0.55 档。',
+      );
+    }
+  }
+
   // ---- seed
   let seed = Number(body.seed);
   if (!Number.isFinite(seed) || seed < 0) seed = Math.floor(Math.random() * 2147483647);
   seed = Math.floor(seed) % 2147483648;
-
-  const warnings = [];
 
   // ---- loras：过求解器（分类默认强度 / 单选替换 / 衰减 / 总强度看门狗）
   const rawLoras = Array.isArray(body.loras)
@@ -206,6 +269,14 @@ export function validateInpaintRequest(body = {}, cfg = loadConfig(), opts = {})
     mode,
     strength,
     strengthId,
+    /**
+     * 分级重绘状态。`graded=false` 时 `gradedLevel` 为 null ——
+     * 链路组装与 meta 都只看这一个布尔，不看别的字段推断。
+     */
+    graded,
+    gradedLevel: graded ? { id: level.id, mask: level.mask, label: level.label } : null,
+    /** 分级 mask 的 8-bit 像素值（前端画笔 / 文档对齐用） */
+    gradedByte: graded ? gradedMaskByte(level.mask) : null,
     seed,
     loras,
     crop,

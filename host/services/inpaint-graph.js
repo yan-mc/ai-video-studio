@@ -16,6 +16,7 @@ import {
 } from './h3-image.js';
 import {
   VENDOR_NODES, INPAINT_DENOISE, INPAINT_GROW, INPAINT_BLUR_REF_RES,
+  INPAINT_GRADED_STITCH_THRESHOLD,
   featherFor, blurForResolution, cropSampleEdge, sampleCanvasFor,
 } from './inpaint-params.js';
 
@@ -62,6 +63,28 @@ export async function buildInpaintWorkflow({
   const isCrop = req.mode === 'crop';
   const cropRes = req.crop.baseResolution;
   const steps = effectiveImageSteps(cfg, { forInpaint: true });
+
+  /**
+   * 分级重绘（mask 灰度 = 逐区域去噪强度）。
+   *
+   * 关键差别只有一处：**跳过 GrowMask**。
+   *
+   * GrowMask 是 `scipy.ndimage.grey_dilation` 迭代 `expand` 次（见 ComfyUI
+   * `comfy_extras/nodes_mask.py`）—— 对二值 mask 是"外扩 16px"，对分级 mask
+   * 是"在 33×33 窗口内逐像素取最大值"，也就是**把强档向外吞并、并在档位交界
+   * 处改写值域**，分级信息直接失效。所以分级模式不挂它。
+   *
+   * 那"边界过渡"怎么办？`ImageBlur` 本身就只影响边界：对分段常值场做高斯
+   * 模糊时，**远离任何边界的内部像素值原样保留**，只有边界两侧会过渡。
+   * 这正是"羽化只作用于边界"要的效果，不需要额外节点。
+   *
+   * 贴回（stitch）权重则必须**二值化**：uncrop / ImageCompositeMasked 做的是
+   * `out = dest*(1-m) + src*m`，若把 0.55 的灰度直接当权重，生成内容会被
+   * 原图再混掉 45% —— 强度被算两次（一次在模型里，一次在贴回里）。
+   * 所以先用 ThresholdMask 把「选了 / 没选」分开，再叠对称软边。
+   */
+  const graded = req.graded === true;
+  const gradedValue = graded ? Number(req.gradedLevel?.mask ?? 1) : null;
 
   /* ---------------- 模型链 + LoRA ---------------- */
   let modelOut = ['1', 0];
@@ -127,7 +150,20 @@ export async function buildInpaintWorkflow({
     isCrop ? { strokePixels: req.crop?.strokePixels, bbox: req.crop?.bbox } : null,
     isCrop ? (req.crop?.sampleCanvas ?? null) : null,
   );
-  const blurOpts = { radius: feather.radius, sigma: feather.sigma };
+  /**
+   * 分级模式下羽化再收一档。
+   *
+   * 二值 mask 的羽化带是"选区外圈的软过渡"，宽一点没关系（外面本来就是 0）。
+   * 但分级 mask 的边界可能在**两个档之间**（0.85 挨着 0.55）。宽羽化会把
+   * 中间值糊出一大片 0.6–0.8 的过渡带，而那一段正是预测头交界、改动量
+   * 不稳定的区间。所以分级模式把半径压到 1/3（仍能消除硬锯齿），
+   * 让档位交界处尽量保持"两段常值 + 极窄过渡"。
+   */
+  const featherScale = graded ? 1 / 3 : 1;
+  const blurOpts = {
+    radius: Math.max(1, Math.min(31, Math.round(feather.radius * featherScale))),
+    sigma: Math.max(0.1, Math.min(10.0, Number((feather.sigma * featherScale).toFixed(1)))),
+  };
   const growPx = INPAINT_GROW;
 
   let modelOutForScheduler = modelOut;
@@ -147,7 +183,19 @@ export async function buildInpaintWorkflow({
       baseRadius: blurForResolution(featherRes).radius,
       capBy: feather.capBy,
       strokeWidth: feather.strokeWidth == null ? null : Number(feather.strokeWidth.toFixed(1)),
+      gradedScale: featherScale,
     },
+    /**
+     * 分级状态 —— meta 必须**如实**回报。
+     *   graded      是否走分级链路
+     *   gradedLevel 实际生效档位（id 与 mask 值）
+     *   skipGrow    采样 mask 是否跳过 GrowMask
+     *   maskPath    采样用的 mask 链路（排障时最关键的一行）
+     */
+    graded,
+    gradedLevel: graded ? { id: req.gradedLevel?.id ?? null, mask: gradedValue } : null,
+    skipGrow: graded,
+    maskPath: '',
     grow: growPx,
     /** crop：采样画布长边与（估算的）实际画布；full：就是源图画布 */
     sampleEdge: null,
@@ -169,14 +217,27 @@ export async function buildInpaintWorkflow({
     };
     // 羽化链路（全核心节点，不依赖 kornia / scipy）
     //
-    // ⚠️ 这张羽化 mask（含 GrowMask 外扩）**只能用于采样**，不能用于贴回。
-    //    它比用户选区大一圈，拿它当贴回权重会把生成内容渗到选区外
+    // ⚠️ 这张羽化 mask（分级模式下）或羽化 mask（含 GrowMask 外扩，非分级）
+    //    **只能用于采样**，不能用于贴回。
+    //    非分级时它比用户选区大一圈，拿它当贴回权重会把生成内容渗到选区外
     //    （实测污染 7–23px 的矩形边缘，视觉上是一圈硬切边）。
-    //    贴回用下面独立的 maskFrom（未外扩、未羽化）。
-    wf['72'] = { class_type: 'GrowMask', inputs: { mask: ['70', 1], expand: growPx, tapered_corners: true } };
-    wf['73'] = { class_type: 'MaskToImage', inputs: { mask: ['72', 0] } };
-    wf['74'] = { class_type: 'ImageBlur', inputs: { image: ['73', 0], blur_radius: blurOpts.radius, sigma: blurOpts.sigma } };
-    wf['75'] = { class_type: 'ImageToMask', inputs: { image: ['74', 0], channel: 'red' } };
+    //    贴回用下面独立的 maskFrom。
+    if (graded) {
+      // 分级：**不挂 GrowMask**（它会按 33×33 邻域取最大值，把档位交界抹平、
+      // 把强档往外吞并 —— 见 buildInpaintWorkflow 顶部注释）。
+      // ImageBlur 只改边界、内部值原样保留，正好是"羽化只做边界过渡"。
+      wf['73'] = { class_type: 'MaskToImage', inputs: { mask: ['70', 1] } };
+      wf['74'] = { class_type: 'ImageBlur', inputs: { image: ['73', 0], blur_radius: blurOpts.radius, sigma: blurOpts.sigma } };
+      wf['75'] = { class_type: 'ImageToMask', inputs: { image: ['74', 0], channel: 'red' } };
+      applied.maskPath = 'crop.mask → MaskToImage → ImageBlur(分级窄羽化) → ImageToMask'
+        + '（跳过 GrowMask，灰度值原样进采样）';
+    } else {
+      wf['72'] = { class_type: 'GrowMask', inputs: { mask: ['70', 1], expand: growPx, tapered_corners: true } };
+      wf['73'] = { class_type: 'MaskToImage', inputs: { mask: ['72', 0] } };
+      wf['74'] = { class_type: 'ImageBlur', inputs: { image: ['73', 0], blur_radius: blurOpts.radius, sigma: blurOpts.sigma } };
+      wf['75'] = { class_type: 'ImageToMask', inputs: { image: ['74', 0], channel: 'red' } };
+      applied.maskPath = `crop.mask → GrowMask(+${growPx}) → MaskToImage → ImageBlur → ImageToMask`;
+    }
 
     wf['30'] = { class_type: 'VAEEncode', inputs: { pixels: ['70', 0], vae: ['3', 0] } };
     wf['32'] = { class_type: 'SetLatentNoiseMask', inputs: { samples: ['30', 0], mask: ['75', 0] } };
@@ -187,14 +248,31 @@ export async function buildInpaintWorkflow({
      * 贴回权重：**用户原始选区**（crop 节点第 1 路输出），再叠加一层
      * **对称**软边（blur 半径取羽化的一半）。
      *
-     * 为什么不能用 ['75',0]（外扩 16 + 羽化 22 那张）：它整体比用户选区大一圈，
-     * 以它做权重会把生成内容渗到选区外 16–22px —— 视觉上是一圈矩形硬边。
+     * 为什么不能用 ['75',0]（采样那张）：分级时它带着 0.55/0.7/0.85 的灰度，
+     * 拿它当贴回权重等于把强度**乘第二次**（模型里已经按 0.55 去过噪，
+     * 贴回再混 45% 原图 → 实际只有 0.3 的效果）。
+     * 非分级时它比用户选区大一圈，以它做权重会渗到选区外 16–22px。
+     *
+     * 所以贴回权重必须**先二值化**再羽化。分级链路多挂一个
+     * ThresholdMask（阈值 0.02，只把"完全没选"的像素剔掉）；
+     * **非分级链路的节点与原来一字不差**（crop 输出的 mask 本来就接近二值，
+     * 多挂一个阈值节点只会改变边界几像素，没有收益却增加回退风险）。
      *
      * 为什么软边要对称：blur 的 50% 等值线落在原始边界上，向左向右各让
      * radius/2 过渡。这样边界居中柔化，向外溢出只有几个像素且是渐变，
      * 不会形成可见的接缝。
      */
-    wf['76'] = { class_type: 'MaskToImage', inputs: { mask: ['70', 1] } };
+    if (graded) {
+      wf['71'] = {
+        class_type: 'ThresholdMask',
+        inputs: { mask: ['70', 1], value: INPAINT_GRADED_STITCH_THRESHOLD },
+      };
+      applied.stitchMask = `crop.mask → ThresholdMask(>${INPAINT_GRADED_STITCH_THRESHOLD})`
+        + ' → 对称 ImageBlur(半径/2) → ImageToMask（二值化，避免强度被算两次）';
+    } else {
+      applied.stitchMask = 'crop.mask → 对称 ImageBlur(半径/2) → ImageToMask（原有链路，未改动）';
+    }
+    wf['76'] = { class_type: 'MaskToImage', inputs: { mask: graded ? ['71', 0] : ['70', 1] } };
     wf['77'] = {
       class_type: 'ImageBlur',
       inputs: {
@@ -222,10 +300,20 @@ export async function buildInpaintWorkflow({
   } else {
     /* ---------- 全图 latent 混合 ---------- */
     wf['30'] = { class_type: 'VAEEncode', inputs: { pixels: ['20', 0], vae: ['3', 0] } };
-    wf['72'] = { class_type: 'GrowMask', inputs: { mask: ['50', 0], expand: growPx, tapered_corners: true } };
-    wf['73'] = { class_type: 'MaskToImage', inputs: { mask: ['72', 0] } };
-    wf['74'] = { class_type: 'ImageBlur', inputs: { image: ['73', 0], blur_radius: blurOpts.radius, sigma: blurOpts.sigma } };
-    wf['75'] = { class_type: 'ImageToMask', inputs: { image: ['74', 0], channel: 'red' } };
+    if (graded) {
+      // 同 crop 分支：分级模式跳过 GrowMask，灰度原样进采样（羽化只做边界过渡）
+      wf['73'] = { class_type: 'MaskToImage', inputs: { mask: ['50', 0] } };
+      wf['74'] = { class_type: 'ImageBlur', inputs: { image: ['73', 0], blur_radius: blurOpts.radius, sigma: blurOpts.sigma } };
+      wf['75'] = { class_type: 'ImageToMask', inputs: { image: ['74', 0], channel: 'red' } };
+      applied.maskPath = 'mask → MaskToImage → ImageBlur(分级窄羽化) → ImageToMask'
+        + '（跳过 GrowMask，灰度值原样进采样）';
+    } else {
+      wf['72'] = { class_type: 'GrowMask', inputs: { mask: ['50', 0], expand: growPx, tapered_corners: true } };
+      wf['73'] = { class_type: 'MaskToImage', inputs: { mask: ['72', 0] } };
+      wf['74'] = { class_type: 'ImageBlur', inputs: { image: ['73', 0], blur_radius: blurOpts.radius, sigma: blurOpts.sigma } };
+      wf['75'] = { class_type: 'ImageToMask', inputs: { image: ['74', 0], channel: 'red' } };
+      applied.maskPath = `mask → GrowMask(+${growPx}) → MaskToImage → ImageBlur → ImageToMask`;
+    }
     wf['32'] = { class_type: 'SetLatentNoiseMask', inputs: { samples: ['30', 0], mask: ['75', 0] } };
 
     latFrom = ['32', 0];
@@ -279,15 +367,35 @@ export async function buildInpaintWorkflow({
     };
     wf['11'] = { class_type: 'SaveImage', inputs: { images: ['80', 0], filename_prefix: 'h3inpaint' } };
   } else {
-    // full 模式没有 bbox：用同样的"原始选区 + 对称软边"整幅合成，
-    // 选区外逐像素保留原图。
-    wf['81'] = {
-      class_type: 'MaskToImage', inputs: { mask: ['50', 0] },
-    };
+    /**
+     * full 模式没有 bbox：用同样的"原始选区 + 对称软边"整幅合成，
+     * 选区外逐像素保留原图。
+     *
+     * 合成权重同样必须二值化（分级时）：`ImageCompositeMasked` 做的是
+     * `dest*(1-m) + src*m`，直接拿 0.55 的灰度当权重会把强度乘第二次。
+     * 非分级链路保持原样（不挂阈值节点）。
+     */
+    if (graded) {
+      wf['81'] = {
+        class_type: 'ThresholdMask',
+        inputs: { mask: ['50', 0], value: INPAINT_GRADED_STITCH_THRESHOLD },
+      };
+      wf['85'] = { class_type: 'MaskToImage', inputs: { mask: ['81', 0] } };
+      applied.stitchMask = `mask → ThresholdMask(>${INPAINT_GRADED_STITCH_THRESHOLD})`
+        + ' → 对称 ImageBlur(半径/2) → ImageToMask（二值化，避免强度被算两次）';
+    } else {
+      /**
+       * ⚠️ 非分级**沿用节点号 81**（不是 85）：节点号也是可观测行为差异 ——
+       * 排障时按旧文档/job 历史对节点号是常规做法，无谓改号会让
+       * "为什么这次的 81 不见了"变成一个新问题。
+       */
+      wf['81'] = { class_type: 'MaskToImage', inputs: { mask: ['50', 0] } };
+      applied.stitchMask = 'mask → 对称 ImageBlur(半径/2) → ImageToMask（原有链路，未改动）';
+    }
     wf['82'] = {
       class_type: 'ImageBlur',
       inputs: {
-        image: ['81', 0],
+        image: [graded ? '85' : '81', 0],
         blur_radius: Math.max(1, Math.round(blurOpts.radius / 2)),
         sigma: Math.max(0.1, Number((blurOpts.sigma / 2).toFixed(1))),
       },

@@ -18,6 +18,9 @@ import {
   INPAINT_DENOISE, INPAINT_STRENGTHS, INPAINT_RESOLUTION_PRESETS, INPAINT_AUTO_SCALE,
   INPAINT_CROP_DEFAULTS, INPAINT_GROW, INPAINT_BLUR_BASE, INPAINT_BLUR_REF_RES,
   VENDOR_NODES, blurForResolution,
+  INPAINT_GRADED_LEVELS, INPAINT_GRADED_DEFAULT, INPAINT_GRADED_COLLAPSE,
+  INPAINT_GRADED_MIN_GRANULARITY_PX, INPAINT_GRADED_STITCH_THRESHOLD,
+  gradedMaskByte,
 } from './inpaint-params.js';
 import { buildInpaintWorkflow } from './inpaint-graph.js';
 
@@ -203,7 +206,9 @@ export async function runH3Inpaint({
   const outputsDir = path.join(cfg.dataDir, 'outputs');
   const result = await comfy.runWorkflow({
     cfg, workflow: wf, map: {}, job, outputsDir, onSubmitted, onProgress,
-    progressHint: `局部重绘 · ${req.mode === 'crop' ? 'crop&stitch' : '全图'} · ${req.strength.label}`,
+    progressHint: `局部重绘 · ${req.mode === 'crop' ? 'crop&stitch' : '全图'}`
+      + ` · ${req.strength.label}`
+      + (req.graded ? ` · 分级 ${req.gradedLevel?.label ?? ''}(${req.gradedLevel?.mask ?? ''})` : ''),
   });
 
   return {
@@ -219,6 +224,17 @@ export async function runH3Inpaint({
       loraMode: applied.loraMode,
       loraStack: applied.loraStack,
       crop: req.mode === 'crop' ? req.crop : null,
+      /**
+       * ---- 分级状态（如实回报）
+       *
+       * `graded` 是"这次走的是哪条链路"的唯一判据；`maskPath` / `stitchMask`
+       * 是实际的节点链路人话描述 —— 排障时先看这两行，比翻 workflow JSON 快。
+       */
+      graded: applied.graded,
+      gradedLevel: applied.gradedLevel,
+      skipGrow: applied.skipGrow,
+      maskPath: applied.maskPath,
+      stitchMask: applied.stitchMask,
       /** 以下四项是**实际提交给节点的值**，不是基准常量 */
       grow: applied.grow,
       blur: applied.blur,
@@ -255,6 +271,27 @@ export async function inpaintMeta(cfg = loadConfig()) {
     strengths: INPAINT_STRENGTHS,
     resolutions: INPAINT_RESOLUTION_PRESETS,
     autoScale: INPAINT_AUTO_SCALE,
+    /**
+     * ---- 分级重绘（mask 灰度 = 逐区域去噪强度）
+     *
+     * 这里是**能力声明**（可用档位与校准值），不是"当前是否分级"：
+     * 后者是每次提交的入参，`graded` 默认 false。前端必须读
+     * `gradedDefault` 而不是猜，否则改默认值时会两边不一致。
+     */
+    gradedLevels: INPAINT_GRADED_LEVELS,
+    gradedDefault: INPAINT_GRADED_DEFAULT,
+    gradedSupported: true,
+    /** 塌陷区上沿：低于它的档位实测几乎不可见（0.5 只有 1.0 的 2.5%） */
+    gradedCollapseBelow: INPAINT_GRADED_COLLAPSE,
+    /** 分级的最小可控粒度（2×2 latent patch） */
+    gradedMinGranularityPx: INPAINT_GRADED_MIN_GRANULARITY_PX,
+    gradedStitchThreshold: INPAINT_GRADED_STITCH_THRESHOLD,
+    gradedHint: '分级 = mask 的灰度就是那一块的去噪强度（模型原生能力）。'
+      + '开启后**跳过 GrowMask**（它会按 33×33 邻域取最大值，抹平档位交界），'
+      + '羽化只作用于边界，贴回权重先二值化（否则强度会被算两次）。'
+      + `可用区间 ${INPAINT_GRADED_COLLAPSE}–1.0；低于 ${INPAINT_GRADED_COLLAPSE} 是实测塌陷区。`,
+    /** 每档对应的 8-bit 像素值（前端画笔与后端换算必须同源） */
+    gradedLevelsBytes: INPAINT_GRADED_LEVELS.map((l) => ({ id: l.id, byte: gradedMaskByte(l.mask) })),
     /** 「分辨率稀释」说明 —— 前端据此显示 hint（auto 按 bbox **长边**算，不是面积） */
     resolutionHint: 'crop 模式按 mask 外接框裁剪；bbox 远大于笔画本身时有效分辨率会被稀释。'
       + `auto 档按 bbox 长边 × ${INPAINT_AUTO_SCALE} 给分辨率，保证笔画不被缩小。`,

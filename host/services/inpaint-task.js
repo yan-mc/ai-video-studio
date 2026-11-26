@@ -13,7 +13,10 @@
 import { loadConfig } from '../config.js';
 import { newJob } from './job-store.js';
 import { resolveImageEditRefs } from './ref-images.js';
-import { resolveInpaintSizes, maskMismatchMessage, normalizeCanvasSize, probeMaskBbox } from './image-dims.js';
+import {
+  resolveInpaintSizes, maskMismatchMessage, normalizeCanvasSize, probeMaskBbox,
+  probeMaskIntensity,
+} from './image-dims.js';
 import {
   INPAINT_DENOISE, validateInpaintRequest, resolveCropResolution, resolveStrokePixels,
   guardFullCanvas,
@@ -113,6 +116,43 @@ export async function prepareInpaint(body = {}, cfg = loadConfig(), opts = {}) {
   let bboxH = stroke.bboxH;
   let bboxSource = stroke.bboxW != null ? 'caller' : null;
 
+  /**
+   * ---- 5.5) 分级 mask 自动识别
+   *
+   * 只认**像素**，不认前端状态：分级 mask 可能是 Agent 传的、脚本画的、
+   * 别的工具导出的，前端那套强度 UI 管不到它们。
+   *
+   * 判据来自 `probeMaskIntensity`（选区里"既非全黑也非满白"的像素占比）。
+   * 命中时**只写 warning 不阻断** —— 用户可能确实想用灰度 mask 走二值链路
+   * （例如手绘时就想要硬边），拦下来等于替用户做决定。
+   *
+   * 注意这一步与 bbox 量取**共用同一次 PNG 解码**的语义：两次读盘略浪费，
+   * 但两者判据不同（bbox 只看 >127，强度看分布），强行合并不值得。
+   * 量不出来（非 PNG / 坏了）就静默跳过，不影响后续。
+   */
+  let maskIntensity = null;
+  {
+    const wantGraded = req.graded === true;
+    const measured = await probeMaskIntensity(maskAbs).catch(() => null);
+    if (measured) {
+      maskIntensity = measured;
+      if (measured.graded && !wantGraded) {
+        req.warnings = Array.isArray(req.warnings) ? req.warnings : [];
+        req.warnings.push(
+          `检测到分级 mask：选区里有 ${(measured.gradedFraction * 100).toFixed(0)}% 的像素是中间灰度`
+          + `（均值 ${measured.meanInSelection}/255）。建议开启分级模式，`
+          + '否则这些灰度会被当成"选了/没选"两个值处理，强度信息被丢掉。',
+        );
+      } else if (!measured.graded && wantGraded) {
+        req.warnings = Array.isArray(req.warnings) ? req.warnings : [];
+        req.warnings.push(
+          '已开启分级模式，但 mask 里几乎没有中间灰度（值域接近纯 0/255）：'
+          + '这次所有选区都会按满强度重绘。想要分级效果，请用画笔的"强度"滑块涂出不同灰度。',
+        );
+      }
+    }
+  }
+
   if (bboxW == null) {
     const measured = await probeMaskBbox(maskAbs).catch(() => null);
     if (measured) {
@@ -168,9 +208,28 @@ export async function prepareInpaint(body = {}, cfg = loadConfig(), opts = {}) {
       inpaintStrength: req.strengthId,
       splitAt: req.strength.splitAt,
       denoise: INPAINT_DENOISE,
+      /**
+       * 分级字段必须落进 job.params —— 事后排障时"这次到底走没走分级链路"
+       * 只能从这里查（`job.params.graded`）。只存在 req 里的话，
+       * 任务跑完就没了，而 meta 与历史记录都读 job。
+       */
+      graded: req.graded === true,
+      ...(req.graded ? { gradedLevel: req.gradedLevel, gradedByte: req.gradedByte } : {}),
       seed: req.seed,
       sourceRel: srcRes.ok[0].rel,
       maskRel: maskRes.ok[0].rel,
+      ...(maskIntensity
+        ? {
+          maskIntensity: {
+            graded: maskIntensity.graded,
+            gradedFraction: maskIntensity.gradedFraction,
+            meanInSelection: maskIntensity.meanInSelection,
+            minInSelection: maskIntensity.minInSelection,
+            maxInSelection: maskIntensity.maxInSelection,
+            histogram: maskIntensity.histogram,
+          },
+        }
+        : {}),
       imageLoras: req.loras,
       ...(req.mode === 'crop'
         ? { crop: req.crop, cropResolution: req.crop.baseResolution }
@@ -218,6 +277,13 @@ export function inpaintSubmitSummary(prepared, opts = {}) {
     promptChars: req.promptChars,
     cropResolution,
     cropResolvedByAuto: Boolean(req.crop?.resolvedByAuto),
+    /**
+     * 分级状态必须回给调用方：前端据此显示"这次是按分级跑的"，
+     * Agent 据此确认自己的 `graded` 有没有被识别（传错类型时会被静默当成 false）。
+     */
+    graded: req.graded === true,
+    ...(req.graded ? { gradedLevel: req.gradedLevel, gradedByte: req.gradedByte } : {}),
+    ...(maskIntensity ? { maskLooksGraded: maskIntensity.graded } : {}),
     /**
      * auto 档算出来的实际采样画布：块被整块缩小时的唯一可信依据。
      * 不回这个，前端/Agent 只能拿 baseResolution 猜，而两者不是一回事。

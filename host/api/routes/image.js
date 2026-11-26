@@ -18,7 +18,8 @@ import {
   BREAKDOWN_PROMPT_MAX_CHARS, BREAKDOWN_SIZE, DEFAULT_BREAKDOWN_PROMPT,
   buildBreakdownPrompt, isDefaultBreakdownPrompt, legacyBreakdownFields, breakdownSize,
 } from '../../services/breakdown.js';
-import { resolveImageEditRefs } from '../../services/ref-images.js';
+import { resolveImageEditRefs, appendStyleAnchors } from '../../services/ref-images.js';
+import { compileImagePrompt, imagePromptMeta } from '../../services/image-prompt/index.js';
 import { STRENGTH_LIMITS } from '../../services/lora-catalog.js';
 import { runAndArchive } from '../archive.js';
 import { loadImageWorkflow } from '../backend.js';
@@ -56,6 +57,8 @@ export async function handleImage(req, res, R) {
       sizes: H3_IMAGE_SIZES,
       status: checkImageModels(cfg),
       loraCategories: IMAGE_LORA_CATEGORIES,
+      /** 提示词编译器元信息：画风表 / 段落顺序 / 画风锚说明 / 反 3D 判定 */
+      promptCompiler: imagePromptMeta(),
     });
   }
 
@@ -104,6 +107,46 @@ export async function handleImage(req, res, R) {
     const wf = loadImageWorkflow(cfg);
     if (!wf) return json(500, { error: 'WORKFLOW_MISSING' });
 
+    /**
+     * 提示词编译 —— **默认开启**。
+     *
+     * 为什么默认开：本地没有官方那个 prompt expander（PE），
+     * 用户写一句"画画一个在海边的女孩"时，模型只能照字面理解，
+     * 缺场景细节、缺光线、缺质感。编译这一步就是在补 PE 的职责。
+     *
+     * 三条入口都保留：
+     *   · `text`      —— 短需求 / 中文，展开成完整英文描述
+     *   · `prompt`    —— 用户直接写的提示词；若已是完整英文长描述则**不重写**
+     *   · `compile:false` —— 完全跳过编译器，按原样提交（排障用）
+     *
+     * ⚠️ 编译器本身不改 `body.prompt` 的语义，只做"补齐 + 加约束 + lint"。
+     */
+    const compilerOn = body.compile !== false;
+    let compiled = null;
+    if (compilerOn) {
+      try {
+        compiled = compileImagePrompt({
+          text: body.text ?? '',
+          rawPrompt: body.rawPrompt ?? (body.text ? '' : (body.prompt ?? '')),
+          styleId: body.styleId ?? 'none',
+          styleAnchor: body.styleAnchor
+            ? { ...body.styleAnchor, index: Number(body.styleAnchor.index) }
+            : null,
+          aspect: body.aspect,
+          lettering: body.lettering,
+          negativeHints: body.negativeHints,
+          noText: body.noText,
+        });
+        if (compiled.prompt) body.prompt = compiled.prompt;
+        if (body.styleAnchor && compiled.usedAnchor) {
+          body.styleAnchorMode = body.styleAnchor.mode;
+        }
+      } catch (e) {
+        // 编译失败不该阻断出图：回退到原始 prompt，但把原因告诉用户
+        compiled = { warnings: [`提示词编译失败，已按原文提交：${String(e?.message || e)}`] };
+      }
+    }
+
     // 校验规则集中在 h3-image.js；失败要回**结构化 400**，不能让 code 变成 message
     let req0;
     try {
@@ -138,14 +181,43 @@ export async function handleImage(req, res, R) {
       }
     }
 
+    /**
+     * 画风锚：**独立通道**，永远追加在参考图末尾，绝不占用 `image_1`。
+     *
+     * `image_1` 决定输出画布尺寸且是被编辑的原图 —— 画风图若排到第 1 位，
+     * 文生图会被它的尺寸带偏、编辑会把画风图当成编辑对象。
+     * 详见 services/ref-images.js 的 appendStyleAnchors 注释。
+     */
+    const styleBody = Array.isArray(body.styleAnchorImages) ? body.styleAnchorImages : [];
+    const anchored = appendStyleAnchors(refResolved.ok, styleBody, cfg);
+    const refsWithAnchors = anchored.refs;
+    if (anchored.warnings.length) refWarnings.push(...anchored.warnings);
+    if (anchored.bad.length) {
+      refWarnings.push(
+        `画风参考图无法解析 ${anchored.bad.length} 张：`
+        + anchored.bad.map((b) => `${b.input}（${b.reason}）`).join('；'),
+      );
+    }
+
     const solvedLoras = solveImageLoras(req0.loras, {
       availableFiles: (await probeLoraFiles(cfg)).probed,
-      hasRefImages: refResolved.ok.length > 0,
+      hasRefImages: refsWithAnchors.length > 0,
     });
     const warnings = [...refWarnings, ...imageLoraWarnings(solvedLoras)];
 
+    /**
+     * 交给提交层的 refResolved 必须是**合并画风锚之后**的列表：
+     * 画风图要真正出现在 `images.image_N` 里，否则它只是个 UI 装饰。
+     */
+    const refResolvedFinal = {
+      ...refResolved,
+      ok: refsWithAnchors,
+      styleAnchors: anchored.anchors,
+      firstStyleAnchorIndex: anchored.firstAnchorIndex,
+    };
+
     const { jobs, batchId } = await submitImageJobs({
-      body, cfg, ctx, req0, refResolved, solvedLoras, warnings, wf,
+      body, cfg, ctx, req0, refResolved: refResolvedFinal, solvedLoras, warnings, wf,
     });
 
     return json(200, {
@@ -155,11 +227,25 @@ export async function handleImage(req, res, R) {
       batchId,
       count: jobs.length,
       mode: refResolved.ok.length ? 'edit' : 't2i',
-      refCount: refResolved.ok.length,
-      refRels: refResolved.ok.map((r) => r.rel),
+      refCount: refResolvedFinal.ok.length,
+      refRels: refResolvedFinal.ok.map((r) => r.rel),
+      /** 画风锚单独回报，前端据此提示"哪几张是画风参考" */
+      styleAnchorCount: anchored.anchors.length,
+      styleAnchors: anchored.anchors.map((a) => ({ index: a.index, rel: a.rel })),
       loraCount: solvedLoras.accepted.length,
       loraStack: solvedLoras.accepted.map((a) => `${a.name}@${a.appliedStrength}`),
       promptChars: req0.promptChars,
+      /** 编译器实际做了什么：是否展开、是否注入反 3D、用了哪个画风 */
+      ...(compiled ? {
+        compiled: {
+          used: compiled.prompt !== undefined,
+          usedRaw: Boolean(compiled.usedRaw),
+          styleId: compiled.styleId ?? 'none',
+          anti3dApplied: compiled.anti3dApplied ?? null,
+          chars: compiled.chars ?? null,
+        },
+        promptWarnings: compiled.warnings ?? [],
+      } : {}),
       warnings,
     });
   }

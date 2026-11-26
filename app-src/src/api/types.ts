@@ -544,6 +544,27 @@ export interface ImageLoraItem {
   why: string;
 }
 
+export interface ImagePromptCompilerMeta {
+  maxChars: number;
+  sections: Array<{ id: string; zh: string; en: string; hint: string }>;
+  sectionOrder: string[];
+  styles: Array<{ id: string; name: string; category: string; changesAppearance?: boolean }>;
+  anti3d: Array<{ id: string; name: string; category: string; dimensionality: string; anti3d: boolean }>;
+  anchor: {
+    modes: Array<{ id: string; name: string; desc: string }>;
+    strengths: Array<{ id: string; name: string; desc: string }>;
+    advice: {
+      summary: string; why: string;
+      modes: Array<{ id: string; name: string; desc: string }>;
+      strengths: Array<{ id: string; name: string; desc: string }>;
+      promptExample: string; pitfalls: string[];
+    };
+    maxAnchors: number;
+  };
+  acceptsChinese: boolean;
+  note: string;
+}
+
 export interface ImageMetaPayload {
   models: Record<string, string>;
   vae: string;
@@ -565,6 +586,8 @@ export interface ImageMetaPayload {
   sizes: ImageSizeOption[];
   status: ImageModelStatus;
   loraCategories: LoraCategory[];
+  /** 提示词编译器元信息（画风表 / 段落 / 画风锚说明 / 反 3D 判定） */
+  promptCompiler?: ImagePromptCompilerMeta;
 }
 
 export interface ImageLoraCatalogPayload {
@@ -608,6 +631,24 @@ export interface ImageGenerateInput {
   loras?: Array<{ name: string; strength?: number }>;
   projectId?: string;
   shotId?: string;
+
+  /* ---- 提示词编译器 / 画风（v4.1） ---- */
+
+  /** 短需求或中文描述；与 prompt 二选一，会被展开成完整英文描述 */
+  text?: string;
+  /** 画风 id（见 /image/meta 的 promptCompiler.styles）；'none' = 不指定 */
+  styleId?: string;
+  /** 画风参考图：只借画法不借内容；永远追加在 refImages 末尾，不占 image_1 */
+  styleAnchorImages?: string[];
+  styleAnchorMode?: 'style-only' | 'style+palette';
+  /** 要避免的东西（图像侧合法，会并进正面提示词） */
+  negativeHints?: string[];
+  /** 画面上要出现的字（逐字进引号） */
+  lettering?: string | string[];
+  /** 显式声明画面无文字 */
+  noText?: boolean;
+  /** 是否编译提示词（默认 true）；false = 按原文提交，排障用 */
+  compile?: boolean;
 }
 
 export interface ImageGenerateResult {
@@ -671,6 +712,39 @@ export interface InpaintResolutionPreset {
   value: number | null;
 }
 
+/**
+ * 分级重绘的一档。
+ *
+ * ⚠️ `mask` 是**实测校准值**，不是线性插值结果：6 步 PDD 蒸馏下
+ * mask 0.5 的改动量只有 1.0 的 2.5%（预测头交界处塌陷）。
+ * 所以 UI 必须直接展示后端给的 `mask`，不要自己按百分比推算。
+ */
+export interface InpaintGradedLevel {
+  id: 'full' | 'strong' | 'medium' | 'light' | 'keep' | string;
+  /** 0..1 —— 写进 mask 的灰度值，也就是那一块的去噪强度 */
+  mask: number;
+  label: string;
+  hint: string;
+}
+
+/**
+ * mask 的强度分布摘要（`/image/inpaint` 的响应与前端自算同形）。
+ *
+ * `graded` 为真 = 这张 mask 里确实有中间灰度（用户涂了分级，或是外部给的
+ * 分级 mask）。它只用于提示，不参与链路判定 —— 那个只看提交的 `graded`。
+ */
+export interface InpaintMaskIntensity {
+  graded: boolean;
+  /** "中间灰度"像素占选区像素的比例 0..1 */
+  gradedFraction: number;
+  /** 以下三个是 0..255 的通道值（不是 0..1），与 PNG 直方图对齐 */
+  meanInSelection: number;
+  minInSelection: number;
+  maxInSelection: number;
+  /** 按 0.1 分 10 档的像素计数 */
+  histogram: number[];
+}
+
 export interface InpaintMetaPayload {
   /** 恒为 1.0 —— PDD 6 头网格的硬约束，不可配置 */
   denoise: number;
@@ -684,6 +758,26 @@ export interface InpaintMetaPayload {
   resolutions: InpaintResolutionPreset[];
   autoScale: number;
   resolutionHint: string;
+  /**
+   * ---- 分级重绘（mask 灰度 = 逐区域去噪强度，模型原生能力）
+   *
+   * 这组字段是**能力声明**，不是"当前开着分级"：
+   * 后者是每次提交的入参（`InpaintInput.graded`，默认 false）。
+   */
+  gradedLevels: InpaintGradedLevel[];
+  /** 默认档位 id（改默认值时前端应当跟着走，不要写死） */
+  gradedDefault: string;
+  gradedSupported: boolean;
+  /** 塌陷区上沿：低于它的档位实测几乎不可见（0.5 只有 1.0 的 2.5%） */
+  gradedCollapseBelow: number;
+  /** 分级的最小可控粒度（2×2 latent patch，约 32×32 像素） */
+  gradedMinGranularityPx: number;
+  /** 贴回用的二值化阈值 */
+  gradedStitchThreshold: number;
+  /** 后端给的一句话说明（UI 可直接展示，避免两边各写一份） */
+  gradedHint: string;
+  /** 每档对应的 8-bit 像素值 */
+  gradedLevelsBytes: Array<{ id: string; byte: number }>;
   /** 基准 grow（latent 网格常数，不随分辨率缩放） */
   grow: number;
   /** 基准羽化（1024² 档）；实际生效值按采样分辨率缩放 */
@@ -711,7 +805,12 @@ export interface InpaintInput {
   prompt: string;
   /** 源图（dataDir 相对路径或 dataURL） */
   source: string;
-  /** mask 图（白色=重绘区域），**尺寸必须与源图一致** */
+  /**
+   * mask 图（**灰度 = 强度**，黑底）。
+   *
+   * 尺寸必须与源图一致。`graded=false` 时它被当二值 mask 用；
+   * `graded=true` 时每一块的灰度就是那一块的去噪强度（0=保留，1=满重绘）。
+   */
   mask: string;
   mode?: 'crop' | 'full';
   strength?: 'full' | 'strong' | 'medium' | 'light';
@@ -724,6 +823,16 @@ export interface InpaintInput {
   bboxH?: number;
   /** full 模式：源图非 32 倍数时显式放行（会被 VAE 居中裁边，warning 里有说明） */
   fullCanvasTrim?: boolean;
+  /**
+   * 分级重绘开关（默认 false）。
+   *
+   * `true` 时后端**跳过 GrowMask**（它会按 33×33 邻域取最大值，把档位交界
+   * 抹平、把强档往外吞并），羽化只作用于边界，贴回权重先二值化。
+   * `false` 时链路与历史完全一致。
+   */
+  graded?: boolean;
+  /** 分级档位 id（full/strong/medium/light/keep）或 0..1 的数值 */
+  gradedLevel?: string | number;
   crop?: {
     resolutionId?: 'auto' | '512' | '768' | '1024' | '1280' | string;
     baseResolution?: number;
@@ -754,6 +863,13 @@ export interface InpaintResult {
   cropSampleCanvas?: { w: number; h: number } | null;
   cropBlockDownscaled?: boolean;
   cropBlockDownscaleRatio?: number;
+  /** 本次是否按分级链路跑的（`graded` 传错类型时这里会是 false，可据此发现） */
+  graded?: boolean;
+  gradedLevel?: { id: string; mask: number; label: string } | null;
+  /** 该档对应的 8-bit 像素值 */
+  gradedByte?: number | null;
+  /** 后端从像素量出来的 mask 强度分布（用于"你这张 mask 看起来是分级的"提示） */
+  maskLooksGraded?: boolean;
   warnings?: string[];
 }
 

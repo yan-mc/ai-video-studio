@@ -182,15 +182,19 @@ export function maskMismatchMessage(src, mask) {
  */
 
 /**
- * 读 PNG 的像素数据并求非零区域的外接框。
+ * 逐行扫描 PNG 的 8-bit 亮度（**内部共用实现**，不做任何判定）。
  *
  * 只支持 8-bit 灰度 / RGB / RGBA / 灰度+alpha 的非隔行 PNG —— 这正是
  * MaskEditor 导出的格式（黑底白区 RGBA）。其它格式返回 null。
  *
+ * 为什么回调逐行而不是整体返回：2048² 的 RGBA 解出来是 16 MB，
+ * 而两个消费者（bbox / 强度分布）都只需要**行内亮度**，没必要再留一份。
+ *
  * @param {string} absPath
- * @returns {Promise<{w:number,h:number,strokePixels:number}|null>}
+ * @param {(y:number, lum:Uint8Array, width:number) => void} onRow
+ * @returns {Promise<{w:number,h:number}|null>}
  */
-export async function probeMaskBbox(absPath) {
+async function scanPngLuma(absPath, onRow) {
   let buf;
   try {
     buf = await fs.promises.readFile(absPath);
@@ -241,8 +245,7 @@ export async function probeMaskBbox(absPath) {
 
   const cur = Buffer.alloc(stride);
   const prev = Buffer.alloc(stride);
-  let minX = Infinity; let minY = Infinity; let maxX = -1; let maxY = -1;
-  let strokePixels = 0;
+  const lum = new Uint8Array(width);
   let p = 0;
 
   for (let y = 0; y < height; y += 1) {
@@ -268,8 +271,32 @@ export async function probeMaskBbox(absPath) {
     // 亮度取最大值通道；MaskEditor 导出的是 R=G=B 的黑白图
     for (let x = 0; x < width; x += 1) {
       const o = x * bpp;
-      const lum = channels >= 3 ? Math.max(cur[o], cur[o + 1], cur[o + 2]) : cur[o];
-      if (lum > 127) {
+      lum[x] = channels >= 3 ? Math.max(cur[o], cur[o + 1], cur[o + 2]) : cur[o];
+    }
+    onRow(y, lum, width);
+
+    cur.copy(prev);
+  }
+
+  return { w: width, h: height };
+}
+
+/**
+ * 读 PNG 的像素数据并求非零区域的外接框。
+ *
+ * 阈值固定 127（与前端 canvas 的 alpha>127 判定同源）：bbox 只服务
+ * 「auto 分辨率要按哪块算」，半透明边缘不该把 bbox 撑大。
+ *
+ * @param {string} absPath
+ * @returns {Promise<{w:number,h:number,strokePixels:number}|null>}
+ */
+export async function probeMaskBbox(absPath) {
+  let minX = Infinity; let minY = Infinity; let maxX = -1; let maxY = -1;
+  let strokePixels = 0;
+
+  const dims = await scanPngLuma(absPath, (y, lum, width) => {
+    for (let x = 0; x < width; x += 1) {
+      if (lum[x] > 127) {
         strokePixels += 1;
         if (x < minX) minX = x;
         if (x > maxX) maxX = x;
@@ -277,15 +304,83 @@ export async function probeMaskBbox(absPath) {
         if (y > maxY) maxY = y;
       }
     }
-
-    cur.copy(prev);
-  }
-
+  });
+  if (!dims) return null;
   if (strokePixels === 0) return null;
 
   return {
     w: maxX - minX + 1,
     h: maxY - minY + 1,
     strokePixels,
+  };
+}
+
+/**
+ * 量出 mask 的**强度分布** —— 判断用户给的是不是一张分级（灰度）mask。
+ *
+ * 为什么要真量而不是问前端：分级 mask 是**外部**送进来的文件（Agent、
+ * 手写脚本、别的工具导出的 PNG），前端的强度状态管不到它们。
+ * 后端只能靠像素自己判断，否则用户传了灰度 mask 却走二值链路，
+ * 出图会是"该轻的地方没轻、该重的地方没重"，且不报错。
+ *
+ * 判据（`graded`）：存在**既非全黑也非满白**的选区像素，且这类像素
+ * 占选区像素的比例超过 `minGradedFraction`。1% 的容忍度用来吸收
+ * 抗锯齿边缘（普通铅笔刷在软边硬度下也会产生一点点灰边）。
+ *
+ * @param {string} absPath
+ * @param {{minGradedFraction?:number}} [opts]
+ * @returns {Promise<{
+ *   w:number, h:number, sampledPixels:number,
+ *   selectedPixels:number, meanInSelection:number,
+ *   minInSelection:number, maxInSelection:number,
+ *   midPixels:number, gradedFraction:number, graded:boolean,
+ *   histogram:number[],
+ * }|null>}
+ *
+ * `histogram` 是按 0.1 分 10 档的像素计数（下标 0..9），供 warning 文案
+ * 与排障时看清"灰度到底分布在哪一段"。
+ */
+export async function probeMaskIntensity(absPath, opts = {}) {
+  const minGradedFraction = Number.isFinite(opts.minGradedFraction)
+    ? opts.minGradedFraction
+    : 0.01;
+
+  const histogram = new Array(10).fill(0);
+  let selectedPixels = 0;
+  let midPixels = 0;
+  let sum = 0;
+  let min = 255;
+  let max = 0;
+  let sampledPixels = 0;
+
+  const dims = await scanPngLuma(absPath, (y, lum, width) => {
+    for (let x = 0; x < width; x += 1) {
+      const v = lum[x];
+      sampledPixels += 1;
+      if (v <= 0) continue;
+      selectedPixels += 1;
+      sum += v;
+      if (v < min) min = v;
+      if (v > max) max = v;
+      // 「中间值」= 既不接近 0 也不接近 255
+      if (v > 20 && v < 235) midPixels += 1;
+      histogram[Math.min(9, Math.floor((v / 256) * 10))] += 1;
+    }
+  });
+  if (!dims) return null;
+
+  const gradedFraction = selectedPixels > 0 ? midPixels / selectedPixels : 0;
+  return {
+    w: dims.w,
+    h: dims.h,
+    sampledPixels,
+    selectedPixels,
+    meanInSelection: selectedPixels > 0 ? Number((sum / selectedPixels).toFixed(2)) : 0,
+    minInSelection: selectedPixels > 0 ? min : 0,
+    maxInSelection: selectedPixels > 0 ? max : 0,
+    midPixels,
+    gradedFraction: Number(gradedFraction.toFixed(4)),
+    graded: selectedPixels > 0 && gradedFraction > minGradedFraction,
+    histogram,
   };
 }

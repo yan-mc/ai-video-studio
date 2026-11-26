@@ -49,6 +49,14 @@ export interface BrushSettings {
   /** 间距档位 0..100（映射成 spacing = size × 系数） */
   stepSize: number;
   shape: BrushShape;
+  /**
+   * 笔压 / 强度 0..1 —— **只在分级重绘开启时生效**，涂出来的灰度就是 mask 值。
+   *
+   * 与 `opacity` 的区别不是叫法：`opacity` 是普通涂抹的叠色不透明度（同一处
+   * 涂两遍会越来越白），而 `strength` 是**取最大值**合并（同一处涂两遍仍是
+   * 那一档，不会越涂越强）—— 后者才是"分级"该有的语义，见 mergeShapeMax。
+   */
+  strength: number;
 }
 
 export const DEFAULT_BRUSH: BrushSettings = {
@@ -57,7 +65,16 @@ export const DEFAULT_BRUSH: BrushSettings = {
   opacity: 1,
   stepSize: 25,
   shape: 'arc',
+  strength: 1,
 };
+
+/** 画布矩形（脏区重绘用） */
+export interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
 
 /* ============================================================ 颜色 */
 
@@ -357,4 +374,285 @@ export function screenToCanvas(
     x: (e.clientX - rect.left) * sx,
     y: (e.clientY - rect.top) * sy,
   };
+}
+
+/* ============================================================
+ * 分级重绘（mask 灰度 = 逐区域去噪强度）
+ * ============================================================
+ *
+ * 数据层约定（**动这里之前先读完**）：
+ *
+ *   · mask 画布上，一个像素的**灰度 = 该像素的重绘强度**（0=保留，1=满重绘），
+ *     统一存在 **alpha 通道**里，RGB 恒为 255。
+ *     为什么用 alpha 不直接用 RGB：`destination-out`（橡皮）只动 alpha，
+ *     用 RGB 存灰度的话「擦除」这个语义就没了；而 alpha 天然表达
+ *     "这个像素被选中多少"。导出时再把 alpha 写回 RGB 即可（见 MaskEditor）。
+ *
+ *   · 合并规则是**取最大值**，不是叠色：
+ *     同一处涂 0.55 再涂 0.85 应该得到 0.85（用户想加大强度），
+ *     而不是 0.55 + 0.85 或者越涂越脏。取最大值也让"补涂"可以反复进行，
+ *     且不会因为多刷了两下把一档刷成另一档。
+ *
+ *   · 0 强度 = 不做任何事。视觉上等同擦除（MaskEditor 会把光标与提示切到
+ *     "擦除"态），避免用户"涂了没反应"的困惑。
+ */
+
+/** 局部矩形裁剪（夹到画布内；空返回 null） */
+export function clampRect(r: Rect, w: number, h: number): Rect | null {
+  const x0 = Math.max(0, Math.floor(r.x));
+  const y0 = Math.max(0, Math.floor(r.y));
+  const x1 = Math.min(w, Math.ceil(r.x + r.w));
+  const y1 = Math.min(h, Math.ceil(r.y + r.h));
+  if (x1 <= x0 || y1 <= y0) return null;
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+/** 两个矩形的并集（任一方为空则返回另一方） */
+export function unionRect(a: Rect | null, b: Rect | null): Rect | null {
+  if (!a) return b;
+  if (!b) return a;
+  const x0 = Math.min(a.x, b.x);
+  const y0 = Math.min(a.y, b.y);
+  const x1 = Math.max(a.x + a.w, b.x + b.w);
+  const y1 = Math.max(a.y + a.h, b.y + b.h);
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
+/**
+ * 分级笔刷印 —— **取最大值**合并，不是叠色。
+ *
+ * 为什么不用 `globalCompositeOperation = 'lighten'`：
+ * lighten 比的是 **RGB 通道**（源 rgb 恒 255，永远赢），而且它完全忽略 alpha，
+ * 结果是"一涂就整块变 255"。这里 alpha 才是数据，只能在 JS 里逐像素比。
+ *
+ * 为什么按脏区（`dirty`）而不是全画布：1024² 每帧全图 readback 是 4 MB ×
+ * 每 pointermove 一次，2048² 直接卡死。脏区 = 这一笔的两个印子外接框。
+ *
+ * 软边由 `hardness` 决定（与 `stampBrush` 同一套衰减），只是把笔刷的 alpha
+ * 剖面**乘以强度**而不是直接写成 opacity。
+ *
+ * @param ctx     mask 画布上下文
+ * @param p       位置（canvas 像素）
+ * @param brush   笔刷设置（用 size / hardness / strength）
+ * @param canvasW 画布宽（脏区裁剪用）
+ * @param canvasH 画布高
+ * @returns 本次实际改动的矩形（可能为 null）
+ */
+export function stampStrength(
+  ctx: CanvasRenderingContext2D,
+  p: Point,
+  brush: BrushSettings,
+  canvasW: number,
+  canvasH: number,
+): Rect | null {
+  const value = Math.max(0, Math.min(1, brush.strength));
+  // 0 强度 = 什么都不做（UI 上会显示成"擦除"，见 MaskEditor）
+  if (value <= 0) return null;
+
+  const radius = Math.max(0.5, brush.size / 2);
+  const hardness = Math.max(0, Math.min(1, brush.hardness));
+  const hardRadius = radius * hardness;
+  const fadeRange = Math.max(1e-6, radius - hardRadius);
+
+  const rect = clampRect(
+    { x: p.x - radius - 1, y: p.y - radius - 1, w: radius * 2 + 2, h: radius * 2 + 2 },
+    canvasW,
+    canvasH,
+  );
+  if (!rect) return null;
+
+  const img = ctx.getImageData(rect.x, rect.y, rect.w, rect.h);
+  const d = img.data;
+  const cx = p.x - rect.x;
+  const cy = p.y - rect.y;
+
+  for (let y = 0; y < rect.h; y += 1) {
+    const dy = y + 0.5 - cy;
+    for (let x = 0; x < rect.w; x += 1) {
+      const dx = x + 0.5 - cx;
+      const dist = Math.hypot(dx, dy);
+      let profile = 0;
+      if (dist <= hardRadius) profile = 1;
+      else if (dist <= radius) {
+        const t = (dist - hardRadius) / fadeRange;
+        profile = Math.pow(1 - t, 2);       // 与 stampBrush 的软边同一条曲线
+      }
+      if (profile <= 0) continue;
+
+      const target = Math.round(value * profile * 255);
+      const idx = (y * rect.w + x) * 4;
+      if (target > d[idx + 3]) {
+        d[idx] = 255;
+        d[idx + 1] = 255;
+        d[idx + 2] = 255;
+        d[idx + 3] = target;
+      }
+    }
+  }
+  ctx.putImageData(img, rect.x, rect.y);
+  return rect;
+}
+
+/**
+ * 分级笔画（内部做样条插值 + 均匀重采样，与 `drawStroke` 同一套）。
+ *
+ * @returns 整条笔画覆盖的脏区
+ */
+export function drawStrengthStroke(
+  ctx: CanvasRenderingContext2D,
+  raw: Point[],
+  brush: BrushSettings,
+  canvasW: number,
+  canvasH: number,
+): Rect | null {
+  if (raw.length === 0) return null;
+  const spacing = spacingFor(brush.size, brush.stepSize);
+  const pts = raw.length === 1 ? raw : interpolateStroke(raw, spacing);
+  let dirty: Rect | null = null;
+  for (const p of pts) dirty = unionRect(dirty, stampStrength(ctx, p, brush, canvasW, canvasH));
+  return dirty;
+}
+
+/**
+ * 把整块画布的选区**整体改档**（"一键分级"）。
+ *
+ * 语义（三个都要，缺一个就不好用）：
+ *   · 只动**已有选区**（alpha>0）的像素，未涂区域保持 0 —— 否则一键降档会把
+ *     整幅图变成选区；
+ *   · `mode='set'`  把选区内所有像素**统一设为**该档（"先框大范围再统一降强度"）；
+ *   · `mode='scale'`按比例**乘**（0.55 档对 1.0 的选区 = 乘 0.55），
+ *     适合"已有渐变、整体压暗一档"。
+ *
+ * @returns 是否真的改动了像素（没选区时返回 false，UI 据此提示而不是静默无效）
+ */
+export function recolorSelection(
+  ctx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  value: number,
+  mode: 'set' | 'scale' = 'set',
+): boolean {
+  const v = Math.max(0, Math.min(1, value));
+  const img = ctx.getImageData(0, 0, w, h);
+  const d = img.data;
+  let touched = false;
+
+  for (let i = 0; i < d.length; i += 4) {
+    const a = d[i + 3];
+    if (a === 0) continue;                 // 没选中的像素一律不动
+    let next;
+    if (mode === 'set') {
+      next = Math.round(v * 255);
+    } else {
+      next = Math.round(a * v);
+    }
+    if (next !== a) {
+      d[i + 3] = Math.max(0, Math.min(255, next));
+      d[i] = 255;
+      d[i + 1] = 255;
+      d[i + 2] = 255;
+      touched = true;
+    }
+  }
+  if (touched) ctx.putImageData(img, 0, 0);
+  return touched;
+}
+
+/**
+ * 强度 0..1 → 覆盖层 RGBA（r,g,b 各 0..255，a 也 0..255）。
+ *
+ * **唯一实现**：`strengthToOverlayColor`（CSS 字符串）与 `paintOverlay`
+ * （逐像素合成）都调它。分成两份的后果是"图例色块"与"画布上真实的红色"
+ * 慢慢对不上，而那正是用户判断"我涂的是哪一档"的唯一依据。
+ *
+ * 视觉语义（与面板图例一致）：
+ *   · 1.00 → 深朱红、alpha 0.75（一眼看出"这里会大改"）
+ *   · 0.85 → 0.62
+ *   · 0.70 → 0.48
+ *   · 0.55 → 0.34（可用区间下沿，仍明显可见）
+ *   · 0.30 → 0.15 且偏黄 —— **塌陷区用不同色相警示**，
+ *            "涂了但很淡"与"涂了但没效果"必须能一眼区分
+ *   · 0     → 完全无色
+ *
+ * 为什么 alpha 在上面那段是**线性**的：可用区间只有 0.55–1.0（见
+ * `INPAINT_GRADED_COLLAPSE`），把整段 0..1 线性映射到 0..0.75 会让
+ * 0.55 与 1.0 只差 0.4 个 alpha，深色底图上几乎分不出。所以把 0.5–1.0
+ * 撑开到 0.30–0.75，塌陷区（<0.5）另用低 alpha + 偏黄色相。
+ *
+ * @param strength 0..1
+ * @returns `[r, g, b, a]`（a 为 0..255）
+ */
+export function strengthToRgba(strength: number): [number, number, number, number] {
+  const s = Math.max(0, Math.min(1, Number.isFinite(strength) ? strength : 0));
+  if (s <= 0) return [255, 150, 40, 0];
+
+  let alpha: number;
+  let r: number;
+  let g: number;
+  let b: number;
+
+  if (s >= 0.5) {
+    const t = (s - 0.5) / 0.5;                    // 0..1，覆盖"可用区间"
+    alpha = 0.30 + 0.45 * t;
+    // 橙 (240,140,60) → 深朱红 (206,32,32)
+    r = Math.round(240 - 34 * t);
+    g = Math.round(140 - 108 * t);
+    b = Math.round(60 - 28 * t);
+  } else {
+    const t = s / 0.5;                            // 0..1，塌陷区
+    alpha = 0.30 * Math.pow(t, 1.1);
+    // 更黄 (250,200,60) → 橙 (240,140,60)：色相偏移即"警告"
+    r = Math.round(250 - 10 * t);
+    g = Math.round(200 - 60 * t);
+    b = Math.round(60);
+  }
+
+  return [r, g, b, Math.round(Math.max(0, Math.min(1, alpha)) * 255)];
+}
+
+/**
+ * 分级色带：强度 0..1 → 覆盖层 CSS 颜色。
+ *
+ * @param strength 0..1
+ * @returns `rgba(r,g,b,a)` 字符串
+ */
+export function strengthToOverlayColor(strength: number): string {
+  const [r, g, b, a] = strengthToRgba(strength);
+  return `rgba(${r},${g},${b},${(a / 255).toFixed(3)})`;
+}
+
+/**
+ * 把 mask 画布按"灰度 = 强度"渲染成覆盖层。
+ *
+ * 直接在像素层合成而不是用 `destination-in`：后者只能整块乘一个 alpha，
+ * 无法让 0.55 与 1.0 显示成不同深浅 —— 那正是分级 UI 的核心诉求。
+ *
+ * @param src    mask 画布（数据在 alpha 通道）
+ * @param dst    覆盖层画布（同尺寸）
+ */
+export function paintOverlay(src: HTMLCanvasElement, dst: HTMLCanvasElement): void {
+  const w = src.width;
+  const h = src.height;
+  if (dst.width !== w) dst.width = w;
+  if (dst.height !== h) dst.height = h;
+  const sctx = src.getContext('2d');
+  const dctx = dst.getContext('2d');
+  if (!sctx || !dctx) return;
+
+  const s = sctx.getImageData(0, 0, w, h);
+  const out = dctx.createImageData(w, h);
+  const sd = s.data;
+  const od = out.data;
+
+  for (let i = 0; i < sd.length; i += 4) {
+    const a = sd[i + 3];
+    if (a === 0) continue;
+    // 与图例共用 strengthToRgba：两处各写一套会让"色块"和"画布上的红"对不上
+    const [r, g, b, oa] = strengthToRgba(a / 255);
+    od[i] = r;
+    od[i + 1] = g;
+    od[i + 2] = b;
+    od[i + 3] = oa;
+  }
+  dctx.putImageData(out, 0, 0);
 }

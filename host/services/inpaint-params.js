@@ -29,6 +29,132 @@ export function inpaintStrength(id) {
   return INPAINT_STRENGTHS.find((s) => s.id === key) ?? INPAINT_STRENGTHS[2];
 }
 
+/* ============================================================ 分级重绘 */
+
+/**
+ * 分级重绘 = **mask 的灰度值就是那一块的去噪强度**（模型原生能力，已实测）。
+ *
+ * 源码依据 `comfy/ldm/minimax/model.py:757-765`：
+ *   `rows_t = (1.0 - m * sigma_v).clamp(max=t_pin_v)`
+ * `m` 是 mask 值，**按浮点原样**参与逐行 timestep 计算，不做二值化；
+ * `mask_row_values()` 还会做 2×2 最大池化，所以最小可控粒度约 32×32 像素。
+ *
+ * ⚠️ 与 `INPAINT_STRENGTHS` **不是同一件事**，不要混用：
+ *   · `strength`（SplitSigmas 切点）改的是**全局** sigma 网格，砍步数；
+ *   · `gradedLevel`（mask 灰度）改的是**逐区域**强度，步数不变。
+ *   两个机制会叠加衰减，所以分级模式下建议 strength 保持 full。
+ *
+ * ⚠️ 档位值**必须按实测校准，不能按线性直觉**：1024² / full / 同一提示词实测
+ *   mask 1.00 → 改动量 121.4 / 232
+ *   mask 0.50 → 改动量   3.1 /  89   ← 只有 1.0 的 2.5%（塌陷区）
+ *   mask 0.20 → 改动量   0.6 /  34
+ * 原因是 6 步 PDD 蒸馏下 `1 - m*sigma` 落在哪个预测头区间决定实际效果，
+ * 0.5 正好落在头与头的交界处。**可用区间是 0.55–1.0**，低于 0.5 基本不可见。
+ */
+export const INPAINT_GRADED_LEVELS = Object.freeze([
+  {
+    id: 'full',
+    mask: 1.0,
+    label: '完全重绘',
+    hint: '整块按提示词重新生成（= 普通重绘满强度），改动最明显',
+  },
+  {
+    id: 'strong',
+    mask: 0.85,
+    label: '强',
+    hint: '大改，保留大致构图与色调（实测约 1.0 的一半效果）',
+  },
+  {
+    id: 'medium',
+    mask: 0.7,
+    label: '中',
+    hint: '中等改动：换材质/换色/加装饰性细节',
+  },
+  {
+    id: 'light',
+    mask: 0.55,
+    label: '轻',
+    hint: '小幅修饰（可用区间下沿，再低就进入塌陷区）',
+  },
+  {
+    id: 'keep',
+    mask: 0,
+    label: '保留',
+    hint: '这一块完全不动（= 从选区里擦掉）',
+  },
+]);
+
+/** 分级档默认值（= 满强度，等价于"没分级"的普通重绘） */
+export const INPAINT_GRADED_DEFAULT = 'full';
+
+/**
+ * 塌陷区上沿：mask 值低于它以后改动量**断崖式下降**（不是线性变弱）。
+ * 前端据此画警示色带，后端据此写 warning。
+ */
+export const INPAINT_GRADED_COLLAPSE = 0.5;
+
+/** 分级 mask 的最小可控粒度（像素，2×2 latent patch） */
+export const INPAINT_GRADED_MIN_GRANULARITY_PX = 32;
+
+/** 贴回用二值 mask 的阈值：低于它的像素视为"没选"，不参与贴回 */
+export const INPAINT_GRADED_STITCH_THRESHOLD = 0.02;
+
+/**
+ * 按 id（或数值）取分级档；找不到回落默认档。
+ *
+ * 数值入参按**最近档**吸附：用户在滑块上给 0.62 时落到「中 0.7」而不是报错，
+ * 但调用方要能从返回的 `id` 看出实际生效的是哪一档。
+ *
+ * 非法 id 一律回落 `INPAINT_GRADED_DEFAULT`（= 1.0，与"没分级"等价）并标
+ * `snapped: true`：
+ *   回落 0 会让拼错一个字母（`gradedLevel: 'strng'`）变成"整块不重绘"，
+ *   用户看到的是"点了重绘但没反应"；回落 1.0 只是"改得比预期多"，
+ *   而且 warning 里写清了实际档位，一眼能看出来。
+ *
+ * @param {string|number|null|undefined} id
+ * @returns {{id:string, mask:number, label:string, hint:string, snapped:boolean}}
+ */
+export function gradedLevel(id) {
+  const fallback = INPAINT_GRADED_LEVELS.find((l) => l.id === INPAINT_GRADED_DEFAULT)
+    ?? INPAINT_GRADED_LEVELS[0];
+
+  if (typeof id === 'number' && Number.isFinite(id)) return snapGradedValue(id);
+  const key = String(id ?? '').trim().toLowerCase();
+  if (!key) return { ...fallback, snapped: false };
+
+  const byId = INPAINT_GRADED_LEVELS.find((l) => l.id === key);
+  if (byId) return { ...byId, snapped: false };
+
+  // 纯数字字符串也当数值（前端 select 的 value 一律是 string）
+  if (/^-?\d+(\.\d+)?$/.test(key)) return snapGradedValue(Number(key));
+  return { ...fallback, snapped: true };
+}
+
+/**
+ * 数值 → 最近档。
+ * @param {number} value
+ * @returns {{id:string, mask:number, label:string, hint:string, snapped:boolean}}
+ */
+export function snapGradedValue(value) {
+  const v = Math.max(0, Math.min(1, Number(value)));
+  let best = INPAINT_GRADED_LEVELS[0];
+  let bestD = Infinity;
+  for (const l of INPAINT_GRADED_LEVELS) {
+    const d = Math.abs(l.mask - v);
+    if (d < bestD) { bestD = d; best = l; }
+  }
+  return { ...best, snapped: Math.abs(best.mask - v) > 1e-6 };
+}
+
+/**
+ * 某一档的 8-bit mask 像素值（前端画笔与后端校验用同一个换算）。
+ * @param {number} maskValue 0..1
+ * @returns {number} 0..255
+ */
+export function gradedMaskByte(maskValue) {
+  return Math.max(0, Math.min(255, Math.round(Number(maskValue) * 255)));
+}
+
 /**
  * GrowMask 膨胀量。**latent 网格常数，不随分辨率缩放**：输入已是裁剪块分辨率，
  * 1 latent 格恒为 16px。按 res/1024 缩放会让 448² 档只剩 7px（不足一格），

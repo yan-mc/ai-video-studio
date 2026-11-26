@@ -24,6 +24,7 @@ import {
   imageLoraWarnings, solveImageLoras, submitImageJobs, writeProgress,
 } from './api/image-task.js';
 import { prepareInpaint, inpaintSubmitSummary } from './services/inpaint-task.js';
+import { compileImagePrompt, imagePromptMeta } from './services/image-prompt/index.js';
 import { withVaultCards, resolvePictureIndices } from './services/shot-context.js';
 import { readWorkflowCached } from './services/workflow-paths.js';
 import * as comfy from './services/comfy-client.js';
@@ -860,6 +861,21 @@ export function registerTools(ctx) {
         },
         projectId: { type: 'string' },
 
+        /* ---- 提示词编译器 / 画风 ---- */
+        text: { type: 'string', description: '短需求或中文描述（会展开成完整英文描述；与 prompt 二选一）' },
+        styleId: { type: 'string', description: '画风 id（见 action=meta 的 styles，或 "none"）。2D 画风会自动注入反 3D 约束' },
+        styleAnchorImages: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '画风参考图（最多 2 张，dataDir 相对路径）。只借画法不借内容，永远追加在参考图末尾，不占 image_1',
+        },
+        styleAnchorMode: {
+          type: 'string',
+          enum: ['style-only', 'style+palette'],
+          description: '画风锚借用范围：style-only=只借画法与质感（推荐）/ style+palette=连配色一起借',
+        },
+        compile: { type: 'boolean', description: '是否编译提示词（默认 true）。false = 按原文提交，排障用' },
+
         /* ---- action=inpaint 专用 ---- */
         sourceImage: { type: 'string', description: 'inpaint：源图（dataDir 相对路径或 dataURL）' },
         maskImage: { type: 'string', description: 'inpaint：mask 图（白色=重绘区域，尺寸必须与源图一致）' },
@@ -870,6 +886,8 @@ export function registerTools(ctx) {
         strokePixels: { type: 'number', description: 'inpaint：mask 的非零像素数（auto 档估算 bbox 用）' },
         bboxW: { type: 'number', description: 'inpaint：mask 外接框宽（auto 档按这个算分辨率，最准）' },
         bboxH: { type: 'number', description: 'inpaint：mask 外接框高' },
+        graded: { type: 'boolean', description: 'inpaint：分级重绘开关。mask 的灰度 = 该像素的重绘强度（1.0 全重绘，0.55 小幅修饰）' },
+        gradedLevel: { type: 'string', enum: ['full', 'strong', 'medium', 'light', 'keep'], description: 'inpaint：分级档位（graded=true 时生效）。按实测校准：full=1.0 / strong=0.85 / medium=0.7 / light=0.55 / keep=0' },
       },
       required: ['action'],
       additionalProperties: false,
@@ -902,6 +920,8 @@ export function registerTools(ctx) {
             + 'Civitai 上必须用 baseModel = "MiniMax H3 Image" 过滤（视频 LoRA 键集相同但语义不同，不要混用）。',
           // 局部重绘能力：denoiseLocked 是关键声明（PDD 6 头网格的硬约束）
           inpaint: await inpaintMeta(cfg),
+          /** 提示词编译器：画风表 / 段落顺序 / 画风锚说明 / 反 3D 判定 */
+          promptCompiler: imagePromptMeta(),
         };
       }
 
@@ -937,6 +957,7 @@ export function registerTools(ctx) {
             strokePixels: a.strokePixels,
             bboxW: a.bboxW,
             bboxH: a.bboxH,
+            ...(a.graded ? { graded: true, gradedLevel: a.gradedLevel } : {}),
             ...(a.cropResolutionId || a.cropResolution
               ? { crop: { resolutionId: a.cropResolutionId, baseResolution: a.cropResolution } }
               : {}),
@@ -968,6 +989,27 @@ export function registerTools(ctx) {
       }
 
       if (a.action !== 'generate') throw new Error(`UNKNOWN_ACTION: ${JSON.stringify(a.action)}`);
+
+      /**
+       * 提示词编译 —— 与 REST `/image/generate` 走**同一份**实现。
+       *
+       * Agent 最容易只给一句中文，而本地没有官方 prompt expander，
+       * 不展开就会得到平庸结果。所以这里默认开启编译，规则完全复用。
+       */
+      let compiled = null;
+      if (a.compile !== false) {
+        try {
+          compiled = compileImagePrompt({
+            text: a.text ?? '',
+            rawPrompt: a.rawPrompt ?? (a.text ? '' : (a.prompt ?? '')),
+            styleId: a.styleId ?? 'none',
+            aspect: a.aspect,
+          });
+          if (compiled.prompt) a.prompt = compiled.prompt;
+        } catch (e) {
+          compiled = { warnings: [`提示词编译失败，已按原文提交：${String(e?.message || e)}`] };
+        }
+      }
 
       // 入参校验规则与 REST 共用同一份
       const req0 = validateImageRequest(a, cfg);
@@ -1005,6 +1047,16 @@ export function registerTools(ctx) {
         loraStack: solvedLoras.accepted.map((x) => `${x.name}@${x.appliedStrength}`),
         seed: seeds[0],
         warnings,
+        /** 编译器实际做了什么（用了哪个画风、是否注入反 3D、字符数） */
+        ...(compiled ? {
+          compiled: {
+            usedRaw: Boolean(compiled.usedRaw),
+            styleId: compiled.styleId ?? 'none',
+            anti3dApplied: compiled.anti3dApplied ?? null,
+            chars: compiled.chars ?? null,
+          },
+          promptWarnings: compiled.warnings ?? [],
+        } : {}),
         note: '用 studio_jobs 查进度；制品已自动归档进素材库',
       };
     },

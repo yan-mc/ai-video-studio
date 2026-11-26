@@ -416,3 +416,96 @@ function toDataRel(abs, cfg) {
     return rel.split(path.sep).join('/');
   } catch { return ''; }
 }
+
+/* ============================================================================
+ * 画风锚（style anchor）—— 参考图的独立通道
+ * ============================================================================
+ *
+ * 为什么必须独立，不能混进 refImages 数组：
+ *
+ *   `image_1` 在 H3-Image 里有**特殊语义** —— 它决定输出画布尺寸，并且是
+ *   "被编辑的原图"。如果把画风参考图塞进数组第 1 位：
+ *     · 文生图时画布会被画风图的尺寸带偏（用户选 2048² 却出 1024²）
+ *     · 编辑时画风图会被当成被编辑对象，原图反而退到第 2 位
+ *
+ *   所以画风锚**永远追加在末尾**，且它单独计数、单独回报。
+ *
+ * 另一个关键区别（来自官方节点文档）：
+ *   · 接 VAE   → 参考图被锚定为 reference latent，像素级强约束
+ *   · 不接 VAE → 只经文本编码器，是"松散"的风格信号
+ *   我们统一接 VAE，所以提示词必须显式声明"只借画法，不要复制主体"。
+ */
+
+/** 画风锚最多几张（1 张足够，多张会互相拉扯风格） */
+export const MAX_STYLE_ANCHORS = 2;
+
+/**
+ * 把画风锚解析后拼到参考图列表**末尾**。
+ *
+ * @param {Array<{abs:string, rel:string, index:number}>} refs  已解析的编辑/参考图
+ * @param {Array<string|{rel?:string,absPath?:string}>} anchors 用户给的画风锚（顺序保留）
+ * @param {object} [cfg]
+ * @param {{max?:number}} [opts] 总张数上限（含画风锚），默认 MAX_IMAGE_EDIT_REFS
+ * @returns {{
+ *   refs: Array<{abs:string, rel:string, index:number, styleAnchor?:boolean}>,
+ *   anchors: Array<{abs:string, rel:string, index:number, styleAnchor:true}>,
+ *   firstAnchorIndex: number|null,
+ *   bad: Array<{input:string, reason:string}>,
+ *   dropped: number,
+ *   warnings: string[],
+ * }}
+ */
+export function appendStyleAnchors(refs, anchors, cfg = loadConfig(), opts = {}) {
+  const max = Number.isFinite(opts.max) && opts.max > 0 ? Math.floor(opts.max) : MAX_IMAGE_EDIT_REFS;
+  const base = Array.isArray(refs) ? refs.slice() : [];
+  const warnings = [];
+
+  const wanted = (Array.isArray(anchors) ? anchors : []).filter((x) => {
+    const raw = typeof x === 'string' ? x : (x?.rel ?? x?.absPath ?? '');
+    return String(raw ?? '').trim() !== '';
+  });
+
+  if (!wanted.length) {
+    return { refs: base, anchors: [], firstAnchorIndex: null, bad: [], dropped: 0, warnings };
+  }
+
+  if (wanted.length > MAX_STYLE_ANCHORS) {
+    warnings.push(
+      `画风参考图给了 ${wanted.length} 张，只取前 ${MAX_STYLE_ANCHORS} 张 —— `
+      + '多张不同风格的图会互相拉扯，产出"既不 A 也不 B"的混合体。',
+    );
+  }
+
+  const take = wanted.slice(0, MAX_STYLE_ANCHORS);
+  const resolved = resolveImageEditRefs(take, cfg, { max: take.length });
+
+  // 剩余槽位：画风锚只能追加，不能挤掉已有的原图/参考图
+  const remaining = Math.max(0, max - base.length);
+  if (resolved.ok.length > remaining) {
+    warnings.push(
+      `参考图已占 ${base.length} 张，上限 ${max} 张，`
+      + `只能再放 ${remaining} 张画风参考图（多了会挤掉你给的参考）。`,
+    );
+  }
+
+  const anchorsOk = resolved.ok.slice(0, remaining).map((r, i) => ({
+    abs: r.abs,
+    rel: r.rel,
+    index: base.length + i + 1,
+    styleAnchor: true,
+  }));
+
+  const dropped = Math.max(0, resolved.ok.length - anchorsOk.length) + resolved.dropped;
+  if (dropped > 0 && anchorsOk.length === 0) {
+    warnings.push('画风参考图没有可用槽位，已全部忽略。');
+  }
+
+  return {
+    refs: [...base, ...anchorsOk],
+    anchors: anchorsOk,
+    firstAnchorIndex: anchorsOk.length ? anchorsOk[0].index : null,
+    bad: resolved.bad,
+    dropped,
+    warnings,
+  };
+}
