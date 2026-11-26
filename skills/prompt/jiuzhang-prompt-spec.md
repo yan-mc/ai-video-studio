@@ -417,6 +417,86 @@ H3-Image 的 prompt 是自由文本，编码器正常理解否定词；这与视
 crop 模式要求 `vendor/inpaint-nodes` 已部署（否则提交前报 `INPAINT_NODES_MISSING`）；
 提示词上限同样 **4096 字符**。
 
+### 12.1 图像提示词的正确结构（编译器 `services/image-prompt/`）
+
+本地**没有**官方那个 prompt expander（PE），所以「把一句话展开成完整描述」由编译器补。
+官方推荐顺序（`spec.js` 的 `SECTION_ORDER`）：
+
+```
+用途 → 布局 → 主体 → 动作 → 场景 → 光线 → 相机 → 质感 → 文字
+```
+
+- **必须写英文**。中文能出图但遵循度明显更低；引号内的画面文字可以保留中文。
+- **风格词放最后，且要用可观测的画法**：`flat cel shading` / `two-tone shadows` /
+  `clean dark linework` / `35mm photo`。写 `masterpiece`/`cinematic`/`8k` 等于没写
+  （`lint.js` 会列出来提示）。
+- **`anime style` 不够**：底座在 2D 题材上天然偏 3D，2D 画风必须显式反着写
+  （编译器按画风自动注入，见 §12.2）。
+- **文字**：每个词进引号 + 说明位置；不想要文字就显式声明。
+  ⚠️ 画面里有霓虹/招牌/海报/黑板这类"天然带字"元素时，**一句 `contains no text` 压不住**
+  （实测会画出假名乱码），要用强化声明逐项点出"招牌表面只承载纯色"。
+
+### 12.2 画风控制：只有三条通道，没有第四条
+
+| 通道 | 强度 | 怎么用 |
+|---|---|---|
+| 提示词画法描述 | 中偏弱 | `styleId` 选预设，或自己写可观测的画法词 |
+| **参考图（画风锚）** | **最强、零成本** | `styleAnchorImages` 传一张目标画风的成品图 |
+| LoRA | 强但重 | `loras`，总强度 ≤2 |
+| ~~负面提示词~~ | **不存在** | cfg=1；要避免的写进正面提示词 |
+| ~~style 参数 / preset~~ | **不存在** | API / 节点 / 插件三层都没有 |
+
+**画风锚的写法要点**（这是最容易翻车的一条）：
+
+- 必须显式说明**只借画法与质感**，并**排除主体/构图/镜头角度的迁移** ——
+  否则模型会把参考图里的人和物一起搬过来；
+- 画风锚**不能混进 `refImages`**：那会占掉 `image_1`（决定画布尺寸 + 是被编辑的原图）；
+- 只传 1 张（最多 2 张）。两张不同风格的图会互相拉扯，产出"既不 A 也不 B"的混合体；
+- 参考图里有文字时，文字也可能被带进来。
+
+正确示范：
+
+```
+a young woman reading by a window, soft afternoon light, 35mm photo,
+matching the rendering style of <Picture 2> but with a different subject and composition
+```
+
+`anti3d.js` 会对 2D 类画风（11 套里的 9 套）自动追加反 3D 约束；
+`ufotable`（3D 背景+2D 角色）与 `toon3d-pbr`（3D 半写实）**不注入** —— 它们本来就要 3D 打底，
+硬加会与画风打架。
+
+### 12.3 分级重绘：mask 的灰度就是重绘强度
+
+H3-Image 的 mask **不是二值的**：`rows_t = 1 - m * sigma`，mask 值直接决定该像素的去噪强度。
+所以可以做「有的地方大改、有的地方小改」。
+
+**实测校准的可用档位**（`INPAINT_GRADED_LEVELS`）：
+
+| 档 | mask | 实测改动量 | 用途 |
+|---|---|---|---|
+| `full` | 1.0 | 49.08 | 完全重新生成 |
+| `strong` | 0.85 | 33.97 | 大改，保留大致构图 |
+| `medium` | 0.7 | 5.07 | 换材质/换色/加装饰 |
+| `light` | 0.55 | 2.31 | 小幅修饰 |
+| `keep` | 0 | 0 | 完全不动（= 从选区擦掉）|
+
+⚠️ **0.5 以下是塌陷区**：6 步 PDD 蒸馏下 `1 - m*sigma` 落在预测头交界处，
+改动量只有 1.0 的 2.5%，几乎不可见。所以档位是**实测校准值，不是线性直觉**。
+
+⚠️ 手动传灰度 mask 但不开 `graded` 时，`GrowMask` 会按邻域取最大值把档位压平
+（连 0.55 都会被拉成 1.0）。要分级就必须 `graded: true`。
+
+### 12.4 局部重绘的提示词要把「改完是什么样」写全
+
+模型**没有 mask 感知**，它只知道"按提示词改这张图"。所以：
+
+- 写「改完之后整幅图是什么样」，不是「在那个框里画什么」。
+  `a red lantern` 可能得到「整幅图变成一个红灯笼」；
+  正确是 `a night street with a red paper lantern hanging from the eaves, everything else unchanged`。
+- 必须加保留句：`Keep everything else exactly the same.`
+- 指向参考图时用 `<Picture 1>`：`Replace the car in <Picture 1> with the one in <Picture 2>.`
+- **禁止链式多轮编辑**：实测第 3 轮开始崩、第 10 轮人已认不出。
+
 ## 13. 立绘拆解（角色设定卡）规范
 
 **只有一个输入：整段提示词。** 后端**不做任何拼装、不改写、不追加**，只做 `trim` 与长度校验

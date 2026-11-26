@@ -59,6 +59,13 @@ export async function handleImage(req, res, R) {
       loraCategories: IMAGE_LORA_CATEGORIES,
       /** 提示词编译器元信息：画风表 / 段落顺序 / 画风锚说明 / 反 3D 判定 */
       promptCompiler: imagePromptMeta(),
+      /**
+       * 局部重绘能力（含分级档位）。
+       *
+       * 前端的分级面板从 `meta.inpaint.gradedLevels` 读档位表 ——
+       * 这是**唯一真源**，档位校准值改了前端就跟着变，不在前端写死。
+       */
+      inpaint: await inpaintMeta(cfg),
     });
   }
 

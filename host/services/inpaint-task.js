@@ -250,6 +250,15 @@ export async function prepareInpaint(body = {}, cfg = loadConfig(), opts = {}) {
     sourceRel: srcRes.ok[0].rel,
     maskRel: maskRes.ok[0].rel,
     cropResolution: req.mode === 'crop' ? req.crop.baseResolution : null,
+    /**
+     * mask 强度分布**必须随返回值传出去**。
+     *
+     * `maskIntensity` 是本函数的局部变量；`inpaintSubmitSummary()` 在另一个作用域里，
+     * 直接引用会抛 `ReferenceError: maskIntensity is not defined` ——
+     * 而且是在 `try/catch` 之外，于是整条 REST 变成 500。
+     * 这里显式放进返回值，让下游按字段取。
+     */
+    maskIntensity,
   };
 }
 
@@ -263,7 +272,7 @@ export async function prepareInpaint(body = {}, cfg = loadConfig(), opts = {}) {
  * @param {{forAgent?:boolean}} [opts]
  */
 export function inpaintSubmitSummary(prepared, opts = {}) {
-  const { job, req, sourceRel, maskRel, cropResolution } = prepared;
+  const { job, req, sourceRel, maskRel, cropResolution, maskIntensity } = prepared;
   const warnings = Array.isArray(req.warnings) && req.warnings.length ? req.warnings : null;
 
   const base = {

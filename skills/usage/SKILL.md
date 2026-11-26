@@ -92,9 +92,34 @@ const { token, origin } = await (await fetch(`http://127.0.0.1:${port}/jiuzhang/
 | `cropResolution` | number | **inpaint** | 手动档分辨率（32 倍数）；只给它不给 id 即手动档 |
 | `strokePixels` | number | **inpaint** | mask 非零像素数（兜底估 bbox） |
 | `bboxW` / `bboxH` | number | **inpaint** | mask 外接框。**优先从 mask 文件实测**，实测失败才用它们 |
+| `graded` | boolean | **inpaint** | 分级重绘开关。mask 的**灰度 = 该像素的重绘强度**（1.0 全重绘，0.55 小幅修饰） |
+| `gradedLevel` | `full\|strong\|medium\|light\|keep` | **inpaint** | 分级档位，按实测校准 1.0 / 0.85 / 0.7 / 0.55 / 0 |
+| `text` | string | generate | 短需求或**中文**描述；会被展开成完整英文描述（与 `prompt` 二选一） |
+| `styleId` | string | generate | 画风 id（见 `action=meta` 的 `promptCompiler.styles`，或 `none`）。2D 画风自动注入反 3D 约束 |
+| `styleAnchorImages` | string[] | generate | **画风参考图**（≤2 张）。只借画法不借内容，**永远追加在参考图末尾、不占 `image_1`** |
+| `styleAnchorMode` | `style-only\|style+palette` | generate | 画风锚借用范围：只借画法 / 连配色一起借 |
+| `compile` | boolean | generate | 是否编译提示词（默认 `true`）；`false` = 按原文提交，排障用 |
 
-返回：`{ ok, jobId, jobIds, batchId, count, mode:'edit'|'t2i', refCount, loraStack, seed, warnings, note }`。
+返回：`{ ok, jobId, jobIds, batchId, count, mode:'edit'|'t2i', refCount, loraStack, seed, warnings, compiled, promptWarnings, note }`。
+`compiled` 告诉你编译器做了什么：`{ usedRaw, styleId, anti3dApplied, chars }`，
+`anti3dApplied` 三态（`true` 已具备 / `false` 2D 但缺 / `null` 该画风不需要）。
 Agent 出图产物留在 `data/outputs/`（**不进素材库**），REST `/image/generate` 才走归档。
+
+#### 什么时候用哪个入参
+
+| 你的输入 | 怎么传 |
+|---|---|
+| 中文一句话（「穿红裙的少女站在霓虹街道上」）| `text`，编译器展开成完整英文描述 |
+| 已经写好的完整英文长描述 | `prompt`（≥40 词时**不会被重写**，只做 lint 与画风约束注入） |
+| 想固定某种画风 | `styleId`（11 套预设）或 `styleAnchorImages`（传一张目标画风的成品图，**更强**） |
+| 要画面上出现特定文字 | `lettering`（逐字进引号；不传会自动声明"画面无文字"） |
+| 想跳过编译器排障 | `compile:false` |
+
+> ⚠️ 画风锚**不要**混进 `refImages`：那会占掉 `image_1`（决定画布尺寸 + 是被编辑的原图），
+> 导致文生图尺寸被带偏、编辑时画风图被当成编辑对象。
+
+> ⚠️ 分级重绘的 `gradedLevel` 是**档位**，不是 mask 值；`graded` 关闭时它被忽略。
+> 手动传灰度 mask 而不开 `graded`，`GrowMask` 会把档位压平（连 0.55 都会被拉成 1.0）。
 
 ### 1.5 提示词 / 分镜 / 工坊
 
