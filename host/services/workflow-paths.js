@@ -1,29 +1,16 @@
 /**
- * ComfyUI 工作流模板的定位 —— **单一真源**。
+ * ComfyUI 工作流模板定位 —— 单一真源。
  *
- * 为什么需要这个模块：
- *   `workflows/*.json` 是**插件自带的模板**（随仓库分发、随插件更新），
- *   不属于运行时数据。而 `cfg.dataDir` 是**用户可改**的运行时数据目录。
- *   把模板定位绑在 dataDir 上，用户一改数据目录，生成就报
- *   `WORKFLOW_MISSING: 缺少 data/workflows/h3.json` —— 指向一个插件里明明
- *   存在的文件，用户无从自查。
+ * `workflows/*.json` 是插件自带的模板（随仓库分发），不属于运行时数据；
+ * `cfg.dataDir` 则是用户可改的。绑在 dataDir 上会导致用户一改数据目录就报
+ * `WORKFLOW_MISSING`，指向一个插件里明明存在的文件。
  *
- *   之前这个定位逻辑散在四处、三套写法：
- *     - host/index.js                 root/data/workflows/          ✅
- *     - host/api/index.js             dirs().root/workflows/        ❌（dirs().root = dataDir）
- *     - host/tools.js                 `${dirs().root}/workflows/`  ❌（字符串拼接）
- *     - host/services/h3-workshop.js  cfg.dataDir/workflows/       ❌
- *   四处不一致本身就是隐患。这里统一。
+ * 定位优先级：① 配置 `workflowDir` ② 环境变量 `DSH_JZ_WORKFLOW_DIR`
+ * ③ 插件根 `<plugin>/data/workflows`（正常情况）④ `cfg.dataDir/workflows`
+ * （兼容把模板复制过去的存量用户）⑤ 从模块位置向上找 `data/workflows`。
  *
- * 定位优先级（先精确、后兜底）：
- *   1) 显式配置 `workflowDir`（新增的白名单键，给"模板放别处"的高级用户）
- *   2) 显式环境变量 `DSH_JZ_WORKFLOW_DIR`（部署/测试用）
- *   3) 插件根 `<plugin>/data/workflows`            ← 正常情况走这条
- *   4) `cfg.dataDir/workflows`                     ← 兼容老版本：用户曾把模板复制过去
- *   5) 从模块位置向上找 `data/workflows`（插件被 link 到任意位置也能命中）
- *
- * 注意：**只有 3) 是随仓库分发的正解**；4) 保留是为了不破坏已经手工复制过
- * 模板的存量用户，找到时会给出提示但继续工作。
+ * 直接改 `data/config.json` 或设环境变量需要重启才生效
+ * （缓存由 `resetWorkflowCache()` 清，只有 `POST /config` 会调它）。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -49,13 +36,22 @@ function firstExistingDir(candidates) {
   return '';
 }
 
+/** 缓存键必须覆盖**所有**影响解析结果的输入：dataDir / workflowDir / 环境变量 */
+function dirCacheKey(cfg) {
+  return [
+    String(cfg?.dataDir ?? ''),
+    String(cfg?.workflowDir ?? ''),
+    String(process.env.DSH_JZ_WORKFLOW_DIR ?? ''),
+  ].join('\0');
+}
+
 /**
  * 解析工作流模板目录（绝对路径）。找不到也返回首选路径，让上层报错时能指向人话。
  * @param {object} [cfg]
  * @returns {string}
  */
 export function resolveWorkflowDir(cfg = loadConfig()) {
-  const key = String(cfg?.dataDir ?? '');
+  const key = dirCacheKey(cfg);
   const cached = dirCache.get(key);
   if (cached) return cached;
 

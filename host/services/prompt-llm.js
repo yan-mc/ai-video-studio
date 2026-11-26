@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(HERE, '..', '..');
-const SCRIPT = path.join(PLUGIN_ROOT, 'tools', 'prompt-llm', 'translate_server.py');
+const SCRIPT = path.join(PLUGIN_ROOT, 'host', 'python', 'translate_server.py');
 
 /**
  * 超时设置。

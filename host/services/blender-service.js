@@ -405,21 +405,16 @@ export function buildSceneSpec(shot, opts = {}) {
   /**
    * 帧数必须落在 H3 的 `17k+5` 网格上。
    *
-   * ⚠️ 历史缺陷：这里以前写 `frames = round(dur * fps)`，5 秒 → **120 帧**。
-   *    而 H3 的长度约束是 17k+5（124 / 141 / … / 362），120 根本不是合法值。
-   *    后果：渲出来的控制/参考视频比目标视频**短 4 帧**，尾部的走位没人跟，
-   *    模型只能自己编最后 1/6 秒 —— 表现为"最后一下动作突然失真"。
-   *    参考视频被裁短这件事，社区已经专门记录过（120 帧 blockout 被裁成 107）。
+   * 不能写 `frames = round(dur * fps)`：5 秒会得到 120 帧，而 H3 的长度约束是
+   * 17k+5（124 / 141 / … / 362），120 不是合法值 —— 参考视频比目标视频短 4 帧，
+   * 尾部走位没人跟，表现为"最后一下动作突然失真"。
    *
-   *    现在统一按 h3Length() 取网格值，与生成时用的 `{{LENGTH}}` 完全一致。
+   * 统一按 h3Length() 取网格值，与生成时用的 `{{LENGTH}}` 完全一致。
    *    （h3Length 是 store/models.js 的**单一真源**，不要再在别处重算。）
    *
    * ⚠️ `opts.frames` 也**必须**落回网格。
-   *    历史缺陷：`Math.round(opts.frames || h3Length(dur))` 在传入 frames 时
-   *    完全绕过网格校验 —— 传 30 就是 30、传 100 就是 100、传 120 就是 120
-   *    （注释上面痛骂过的 120 帧缺陷原样回来）。而传入路径是敞开的：
-   *    `POST /blender/render` 的 body.frames、`studio_blender` 的 a.frames
-   *    （schema 里连 min/max 都没有）。
+   *    `Math.round(opts.frames || h3Length(dur))` 会完全绕过网格校验，
+   *    而 body.frames 与 studio_blender 的 a.frames 都是敞开的入参。
    *    行为：把请求帧数换算成秒再取最近的网格值，非法值永远不会进 spec。
    */
   const requested = Number(opts.frames);
@@ -603,11 +598,9 @@ export async function renderControl({ mode, spec, cfg = loadConfig(), jobId = ''
    *   2. 帧数**等于** spec 声明的 frames（部分渲染不能当成功）
    *   3. `_running` 哨兵不存在（render_shot.py 正常收尾才会删它）
    *
-   * 历史缺陷：只判 `pngs.length > 0`。Blender 中途被杀 / 显存耗尽 /
-   * pad 阶段崩掉时，磁盘上已有几十上百帧 5 位 PNG → 判定成功 →
-   * ffmpeg 把残缺序列编成一段**时长错误**的 mp4 交给 H3，
-   * 模型把残缺运动当完整参考，而用户看到的是「成功 124 帧」。
-   * 这是最难发现的一类失败。
+   * 不能只判 `pngs.length > 0`：Blender 中途被杀 / 显存耗尽 / pad 阶段崩掉时，
+   * 磁盘上已有几十上百帧 PNG → 判定成功 → 残缺序列被编成时长错误的 mp4 交给 H3，
+   * 而用户看到的是「成功 N 帧」。这是最难发现的一类失败。
    */
   const wantFrames = Number(spec?.frames) || 0;
   const sentinelPath = path.join(workDir, '_running');
@@ -814,9 +807,8 @@ export const ASSET_EXTS = Object.freeze(['.glb', '.gltf', '.fbx', '.obj']);
  *
  * 扫描 `assets/3d/`、`assets/models/` 与 `assets/` 根（**含一层子目录**）。
  *
- * ⚠️ 历史缺陷：只 readdirSync 一层，`assets/3d/<角色>/walk.glb` 这种
- *    按角色分目录存放的模型永远列不出来。实测用户把 fbx 放进 assets/3d/
- *    能看见，再建一个子目录就"消失"了。
+ * ⚠️ 必须递归一层子目录：否则 `assets/3d/<角色>/walk.glb` 这种按角色分目录
+ *    存放的模型永远列不出来（放进 assets/3d/ 根能看到，建子目录就"消失"）。
  *
  * kind：
  *   actor — .fbx（Mixamo 动作/角色），或文件名含 mixamo/char/rig
@@ -894,10 +886,9 @@ export async function listAssetActions({ assetRel, cfg = loadConfig(), timeoutMs
   /**
    * ⚠️ stdout 与 stderr 必须**拼接**，不能 `stdout || stderr`。
    *
-   * 历史缺陷：`String(r.stdout || r.stderr || '')` 在 stderr 非空时只返回 stderr，
-   * 而 `JZ_*` 标记全部打在 stdout。Blender 每次运行都会往 stderr 写一条
-   * `DeprecationWarning: 'Material.use_nodes' ...`，于是 `out` 恒等于那条警告，
-   * 下面的正则永远匹配不到 —— 读模型动作名的功能**从来没成功过**。
+   * `String(r.stdout || r.stderr || '')` 在 stderr 非空时只返回 stderr，而 `JZ_*` 
+   * 标记全部打在 stdout；Blender 每次都往 stderr 写 DeprecationWarning，
+   * 于是 `out` 恒等于那条警告，下面的正则永远匹配不到。
    */
   const out = `${r.stdout || ''}\n${r.stderr || ''}`;
   if (/JZ_IMPORT_ERR/.test(out)) {
@@ -908,10 +899,9 @@ export async function listAssetActions({ assetRel, cfg = loadConfig(), timeoutMs
   /**
    * ⚠️ 必须行首锚定 + **贪婪**匹配。
    *
-   * 历史缺陷：`/JZ_ACTIONS:(\[[\s\S]*?\])/` 的 `*?` 遇到第一个 `]` 就停，
-   * 而每条动作自带 `"frames": [1.0, 24.0]` —— 于是截断成
-   * `[{"name":"…","frames": [1.0, 24.0]`，`JSON.parse` 必然失败。
-   * 实测：任何带动作的模型都会抛 ACTION_LIST_PARSE_FAILED。
+   * 必须贪婪匹配：`(\[[\s\S]*?\])` 的 `*?` 遇到第一个 `]` 就停，而每条动作
+   * 自带 `"frames": [1.0, 24.0]`，会截断成非法 JSON，调用方必然收到
+   * ACTION_LIST_PARSE_FAILED。
    */
   const m = /^JZ_ACTIONS:(\[[\s\S]*\])\s*$/m.exec(out);
   if (!m) {

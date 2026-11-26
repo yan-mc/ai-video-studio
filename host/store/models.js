@@ -81,18 +81,14 @@ export const NODE_LABELS = Object.freeze({
 });
 
 /**
- * 模式归一化 —— **单一真源**。
+ * 模式归一化 —— **单一真源** 是 `store/mode-aliases.js`（本文件仅转发）。
  *
- * 问题：两套词表一直没打通。
- *   - 画布/前端用短名：t2v / i2v / fl2v / ref2v
- *   - H3 提示词编译器只认：t2va / i2va / fl2va / l2va / ref2va
- * 而 `newShot()` 默认给 `mode: 't2v'`，`validateShot()` 也用 'i2v'/'fl2v' 判断。
- * 结果：
- *   · 用默认值建的镜头卡，编译器认不出 mode → 一律落到"三段式 T2VA"
- *     （i2v 的首帧对齐、fl2v 的首尾帧对齐指令全部丢失）
- *   · validateShot 的"首帧模式需要 1 张参考图"永远不触发（因为收到的是 t2va）
+ * 两套词表必须打通：画布/前端用短名（t2v / i2v / fl2v / ref2v），
+ * H3 提示词编译器只认长名（t2va / i2va / fl2va / l2va / ref2va）。
+ * 词表不统一时：默认建的镜头卡编译器认不出 mode → 一律落到"三段式 T2VA"
+ * （首帧/首尾帧对齐指令全部丢失），且 `validateShot` 的模式校验永远不触发。
  *
- * 这里统一成编译器认的长名（t2va 系），并保留短名作为输入别名。
+ * 统一成编译器认的长名（t2va 系），并保留短名作为输入别名。
  */
 /** 这个模式是否"需要至少 N 张参考图" */
 export function modeImageRequirement(mode) {
@@ -103,15 +99,13 @@ export function modeImageRequirement(mode) {
   return 0;
 }
 
-/** 结果节点子类型（参考实现 resultKind） */
+/**
+ * 结果节点子类型 —— 由前端 `app-src/src/canvas/types.ts` 的同名联合类型对齐，
+ * 后端只在元信息里透传，不参与校验。
+ */
 export const RESULT_KINDS = Object.freeze([
   'generic', 'storyboardGenOutput', 'storyboardSplitExport',
   'storyboardFrameEdit', 'videoGeneratorOutput',
-]);
-
-/** 任务状态（参考实现任务状态机 + 本地扩展） */
-export const JOB_STATUS = Object.freeze([
-  'queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted',
 ]);
 
 /**
@@ -125,11 +119,17 @@ export const H3_CANVAS_16x9 = Object.freeze({
   0.98: [1344, 768],
 });
 
+/**
+ * 档位表 —— 只描述**画布与步数**，不含后端字段。
+ *
+ * 后端由 `cfg.defaultBackend` / 镜头卡 `shot.backend` 决定，
+ * 档位与后端是正交的两个选择（同一档位在 h3-nanfeng 与 h3-local 上都能跑）。
+ */
 export const PROFILES = Object.freeze({
-  'P12-draft':   { backend: 'h3-local', mp: 0.4,  steps: 4, cfg: 1.0, label: '12G 草稿 480p（864×480）' },
-  'P16-std':     { backend: 'h3-local', mp: 0.5,  steps: 4, cfg: 1.0, label: '12G 标准 544p（960×544）' },
-  'P24-quality': { backend: 'h3-local', mp: 0.6,  steps: 4, cfg: 1.0, label: '12G 高质 608p（1056×608）' },
-  'P768-quality':{ backend: 'h3-local', mp: 0.98, steps: 4, cfg: 1.0, label: '768p 官方档（1344×768）' },
+  'P12-draft':    { mp: 0.4,  steps: 4, cfg: 1.0, label: '12G 草稿 480p（864×480）' },
+  'P16-std':      { mp: 0.5,  steps: 4, cfg: 1.0, label: '12G 标准 544p（960×544）' },
+  'P24-quality':  { mp: 0.6,  steps: 4, cfg: 1.0, label: '12G 高质 608p（1056×608）' },
+  'P768-quality': { mp: 0.98, steps: 4, cfg: 1.0, label: '768p 官方档（1344×768）' },
 });
 
 export function profileOf(name) {
@@ -159,20 +159,14 @@ export function resolutionFor(profileName, ratio = '16:9') {
 }
 
 /**
- * H3 length 必须在 `17k+5` 网格上。
+ * H3 length 必须在 `17k+5` 网格上，且**夹到 [124, 362]**。
  *
  * 网格：5, 22, 39, …, 107, **124**, 141, …, 362
  *
- * ⚠️ 必须夹到 **[124, 362]**，不能只夹下限 5。
- *
- *    官方训练区间是 124–362 帧（≈5.17–15.08 秒）。节点 schema 允许
- *    5–3600 step 17，但**训不出来的长度会退化成噪声**。
- *    实测：脚本拆段给出 4.3 秒的场景，这里算成 **107 帧**（≈4.46 秒）——
- *    落在网格上、但在训练区间之外。用户拿到的是"能动但很怪"的片子。
- *
- *    以前本函数只 `Math.max(5, …)`，与 `h3-prompt.js` 的 `h3Frames()`
- *    （那是**对的**，夹到 124–362）不一致 —— 两条链路给出不同帧数。
- *    现在两边都夹到 124–362。
+ * 官方训练区间是 124–362 帧（≈5.17–15.08 秒）。节点 schema 允许 5–3600 step 17，
+ * 但**训不出来的长度会退化成噪声**：脚本拆段给出 4.3 秒时算成 107 帧（≈4.46 秒），
+ * 落在网格上却在训练区间之外 —— 用户拿到的是"能动但很怪"的片子。
+ * 必须与 `h3-prompt.js` 的 `h3Frames()` 保持同一区间，否则两条链路给出不同帧数。
  *
  * @param {number} durationSec 期望时长（秒）
  * @param {number} [fps=24]
@@ -232,18 +226,11 @@ function dirs() {
 export { dirs };
 
 /**
- * ⚠️ 存储句柄必须**惰性**创建，不能模块级求值。
+ * 存储句柄必须**惰性**创建，不能模块级求值。
  *
- * 原先写的是：
- *   export const projects = collectionStore(path.join(dirs().root, 'projects.json'), ...)
- *   export const assets   = collectionStore(dirs().assetsIndex, ...)
- * 而 dirs() 依赖 loadConfig().dataDir —— 模块加载时就执行一次，
- * 之后用户在设置页改 dataDir 也不会重建句柄。
- * 实测：改完数据目录后，项目仍然写进**旧目录**，用户看到的是"项目列表全空了"。
- * （同文件下面关于 jobs 的注释早就说过这个问题，但 projects/assets 没改。）
- *
- * 现在改成惰性单例：每次取用时比对文件路径，变了就重建。
- * 对外仍是 `projects` / `assets` 这两个名字，调用点不用改。
+ * `dirs()` 依赖 `loadConfig().dataDir`，模块加载时求值一次的话，
+ * 用户在设置页改 dataDir 后句柄不会重建，项目仍写进旧目录
+ * （表现是"项目列表全空了"）。每次取用时比对文件路径，变了就重建。
  */
 function lazily(build) {
   let store = null;
@@ -268,7 +255,6 @@ const assetsStore = lazily(() => collectionStore(dirs().assetsIndex, { prefix: '
 export const projects = {
   get file() { return projectsStore().file; },
   list: () => projectsStore().list(),
-  listSync: () => projectsStore().listSync(),
   get: (id) => projectsStore().get(id),
   upsert: (item) => projectsStore().upsert(item),
   remove: (id) => projectsStore().remove(id),
@@ -279,7 +265,6 @@ export const projects = {
 export const assets = {
   get file() { return assetsStore().file; },
   list: () => assetsStore().list(),
-  listSync: () => assetsStore().listSync(),
   get: (id) => assetsStore().get(id),
   upsert: (item) => assetsStore().upsert(item),
   remove: (id) => assetsStore().remove(id),
@@ -331,7 +316,7 @@ export function newShot({ title = '', episodeIndex = 1, shotIndex = 1, ...rest }
      * 取值合法性由 services/accel-plan.js 校验（未知值回退默认并告警）。
      */
     accelPlan: typeof rest.accelPlan === 'string' ? rest.accelPlan : '',
-    // 南风 V15 是默认视频后端；h3-local 为旧的模板替换路径，保留作回退
+    // 南风 V15 是默认视频后端；h3-local 为原生节点模板路径（画布默认用它），保留作回退
     backend: rest.backend || 'h3-nanfeng',
     style: rest.style || '',
     styleId: typeof rest.styleId === 'string' ? rest.styleId : '',
@@ -350,11 +335,8 @@ export function newShot({ title = '', episodeIndex = 1, shotIndex = 1, ...rest }
     music: rest.music || '',
     prompt: rest.prompt || '',
     /**
-     * 参考素材。
-     *
-     * ⚠️ 必须继承 `rest.refs`，不能写死空数组 —— 否则 REST / studio_shot
-     *    传进来的参考图、参考视频、参考音频全部丢失，
-     *    生成时 Ref2VA 拿不到任何素材。
+     * 参考素材。必须继承 `rest.refs`，不能写死空数组 —— 否则 REST / studio_shot
+     * 传进来的参考图、视频、音频全部丢失，生成时 Ref2VA 拿不到任何素材。
      */
     refs: {
       images: Array.isArray(rest.refs?.images) ? rest.refs.images.slice(0, 9) : [],
@@ -405,18 +387,14 @@ export function newShot({ title = '', episodeIndex = 1, shotIndex = 1, ...rest }
  * assetRel 有值时用导入的 glb 模型代替程序化人偶（见 blender-service）。
  */
 /**
- * 动作白名单 —— **从 Blender 侧的 actions.py 派生**，不在这里手抄。
+ * 动作白名单 —— **从 `host/blender/actions.py` 派生**，不在这里手抄。
  *
- * ⚠️ 历史缺陷：这三份枚举各写各的，长期漂移：
- *     · 前端渲染页下拉  57 项
- *     · 这里（后端白名单）59 项
- *     · render_shot.py 的 action_curve 只有 27 个分支
- *   结果 32 个动作"前端能选、后端收下、Blender 渲出来人站着不动"，
- *   而且全程没有任何报错或警告。实测 point / step-forward 等完全静止。
+ * 三份枚举各写各的会长期漂移：前端下拉 57 项 / 后端白名单 59 项 /
+ * `render_shot.py` 的 action_curve 只有 27 个分支 —— 结果是一批动作"前端能选、
+ * 后端收下、Blender 渲出来人站着不动"，且全程没有任何报错。
  *
- * 现在 actions.py 是唯一真源：它在 host/blender/actions.py，
- * 不 import bpy，可以用普通 CPython 直接读取解析。
- * 解析失败时**退化为"不限制"**并打日志 —— 宁可放开也不要静默丢动作。
+ * `actions.py` 是唯一真源：它不 import bpy，可以用普通 CPython 直接读解析。
+ * 解析失败时**退化为"不限制"**并留兜底清单 —— 宁可放开也不要静默丢动作。
  */
 let ACTION_CATALOG_CACHE = null;
 
@@ -457,10 +435,6 @@ export function actionCatalog() {
     file,
   };
   return ACTION_CATALOG_CACHE;
-}
-
-export function isKnownAction(action) {
-  return actionCatalog().set.has(String(action || ''));
 }
 
 /** 动作清单（供 REST / 工具 / 前端下拉使用） */
@@ -505,13 +479,10 @@ export function normalizeActors(input) {
         rotationDeg: num(a.rotationDeg, 0),
         // 动作名归一化。
         //
-        // ⚠️ 关键改动：**导入模型（有 assetRel）的动作名原样保留**。
-        //    历史实现一律过白名单，而 Mixamo 导出的 Action 名是
-        //    "Armature|Armature|walk" 这种，必然不在白名单里 →
-        //    被静默改写成 'stand' → 用户"选了动作、渲出来人不动"，
-        //    而且 validation.warnings 是空数组（实测确认）。
-        //    导入模型的动作由模型自己的 Action 驱动（apply_fbx_action），
-        //    白名单管不到，也不该管。
+        // 导入模型（有 assetRel）的动作名**原样保留**：Mixamo 导出的 Action 名是
+        // "Armature|Armature|walk" 这种，必不在白名单里，过白名单会被静默改成
+        // 'stand'（用户"选了动作、渲出来人不动"）。这类动作由模型自己的 Action
+        // 驱动（apply_fbx_action），白名单管不到，也不该管。
         action: (a.assetRel ? action : (actionCatalog().set.has(action) ? action : 'stand')),
         startFrame: Math.max(0, Math.round(num(a.startFrame, 0))),
         // 未给时不写入 —— buildSceneSpec 会回落到"整段时长"。
@@ -561,9 +532,8 @@ export function normalizeProps(input) {
 /**
  * 3D 机位的**权威默认值**（镜头卡坐标系：x=左右, y=高度, z=深度）。
  *
- * ⚠️ 只有这一份。normalizeCamera3d 与 blender-service.buildSceneSpec 都从这里取，
- *    历史上两处各写一套（一个 [0,-4.2,1.6]、一个 [0,1.6,-4.2]），
- *    前者把相机放到地下 4.2 米，渲出纯灰空画面。
+ * **只有这一份**：`normalizeCamera3d` 与 `blender-service.buildSceneSpec` 都从这里取。
+ * 两处各写一套时字段顺序会错（把相机放到地下 4.2 米，渲出纯灰空画面）。
  *
  * 语义：相机在人物**前方** 4.2 米、高 1.6 米，朝人物胸口（高 0.95 米）看。
  */
@@ -606,9 +576,9 @@ export function normalizeCamera3d(input) {
 /**
  * 镜头卡校验。
  *
- * ⚠️ 用 normalizeMode 判定，不要再写裸字符串 'i2v'/'fl2v'。
- *    之前写成 `shot.mode === 'i2v'`，而存储里实际是规范名 t2va 系（或历史短名），
- *    两个词表对不上 → 这两条"首帧/首尾帧需要几张图"的校验**永远不会触发**。
+ * 必须用 `normalizeMode` 判定，不能写裸字符串 `'i2v'`/`'fl2v'` —— 存储里实际是
+ * 规范名 t2va 系（或历史短名），两个词表对不上时"首帧/首尾帧需要几张图"的校验
+ * 永远不会触发。
  */
 export function validateShot(shot) {
   const warnings = [];

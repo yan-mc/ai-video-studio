@@ -1,25 +1,13 @@
 /**
  * 渲染计划 —— 把「一个镜头这次要传什么」算成一份确定的清单。
  *
- * ============================================================================
- * 为什么需要这个模块
- * ============================================================================
+ * 渲染一个镜头涉及**参考图**、**参考视频**、**提示词**三类数据，它们强耦合：
+ *   · `<Picture N>` 指的是第 N 张参考图，而顺序取决于"勾了哪些角色卡、每卡出几张"；
+ *   · ref_images 上限 9 张（整条提示词共享），被裁掉的那张编号就失效；
+ *   · 角色卡的文字设定要填进 subject_definitions 并标注引用第几张图。
  *
- * 渲染一个镜头涉及三类数据：**参考图**、**参考视频**、**提示词**。
- * 它们有一个强耦合关系，散在各处实现时极易出错：
- *
- *   · 提示词里的 `<Picture N>` 指的是**第 N 张参考图**，
- *     而参考图的顺序取决于"哪些角色卡被勾选、每张卡出几张图"。
- *   · H3 的 ref_images 上限是 9 张（整条提示词共享），超了会被裁，
- *     被裁掉的那张在提示词里的编号就失效了。
- *   · 角色卡的文字设定要填进 subject_definitions，并标注引用第几张图。
- *
- * 这三件事必须由**同一份数据**推导，否则必然错位 ——
- * 之前 `pictureIndex` 按"卡的序号"算，而实际上传顺序是
- * "卡A的图、卡B的图、手工图、首尾帧"，一旦有卡没图或有手工图，编号就全错。
- *
- * 所以：**先算出图片清单，再按清单位置生成编号，最后拼提示词。**
- * 这份清单就是「渲染计划」。
+ * 这三件事必须由**同一份数据**推导，否则编号必然错位。
+ * 所以：先算出图片清单 → 按清单位置生成编号 → 最后拼提示词。
  */
 
 import { H3_MAX_REF_IMAGES, H3_MAX_TOTAL_REFS, cardImagesFor } from './character-vault.js';
@@ -43,35 +31,28 @@ export const H3_MAX_REF_AUDIOS = 3;
 /**
  * 参考视频 + 参考音频的**合计时长上限**（秒）。
  *
- * 为什么是 14.8 而不是 15：
- *   H3 的参考输入是"总预算"制 —— 视频和音频共用同一段时间轴预算，
- *   超过之后模型会开始截断/降级，而且**不报错**（静默失效）。
- *   15 是理论边界，但探测得到的时长本身有 ±0.1s 的测量误差，
- *   贴着 15 卡容易在实际提交时越界。留 0.2s 余量，取 **14.8**。
+ * H3 的参考输入是"总预算"制 —— 视频和音频共用同一段时间轴，超过后模型开始
+ * 截断/降级且**不报错**。15 是理论边界，但探测时长本身有 ±0.1s 误差，
+ * 贴着 15 卡容易实际提交时越界，所以留 0.2s 余量取 14.8。
  *
- * 注意：这个限制**只约束参考输入的总时长**，与被生成的视频长度
- * （shot.durationSec，1–15s）是两回事，不要混淆。
+ * 这个限制**只约束参考输入的总时长**，与生成的视频长度（shot.durationSec，1–15s）
+ * 是两回事。
  */
 export const MAX_REFS_TOTAL_SEC = 14.8;
 
 /**
- * 参考视频/音频的**单段**时长范围（秒）。
+ * 参考视频/音频的**单段**时长范围（秒），与 `h3-prompt.js` 的 H3_LIMITS 一致。
  *
- * 来自 `h3-prompt.js` 的 H3_LIMITS.audioClipSec / videoClipSec（都是 2–15）。
- * 这里独立定义一份是因为 render-plan 不该依赖提示词编译器；
- * 两处数值必须一致，`verify-all.mjs` 有断言盯着。
+ * 这里独立定义一份是因为 render-plan 不该依赖提示词编译器；两处数值必须相同。
  */
 export const CLIP_SEC_RANGE = Object.freeze([2, 15]);
 
 /**
- * 参考图缩放策略。
+ * 参考图缩放策略（节点 schema 的 ref_image_size）：
+ *   match — 按生成面积等比缩小（快，日常够用）
+ *   max   — 短边固定 2048，身份保真最好，但官方注明"可能慢数倍"
  *
- * 来自节点 schema 的 ref_image_size：
- *   match — 每张参考图按生成面积等比缩小（快，日常够用）
- *   max   — 短边固定 2048，身份保真度最好，但官方注明"可能慢数倍"
- *
- * 为什么做成档位：这是**质量 vs 速度**的真实取舍，用户该知道并能选。
- * 角色卡图本身分辨率高时，max 能保住细节；但 12GB 显存跑 max 会很吃力。
+ * 这是**质量 vs 速度**的真实取舍，用户该知道并能选。
  */
 export const REF_IMAGE_SIZE_MODES = Object.freeze([
   { id: 'match', name: '跟随生成面积（快）', desc: '按输出分辨率等比缩放，日常首选' },
@@ -83,23 +64,20 @@ export function normalizeRefImageSize(v) {
 }
 
 /**
- * `max` 模式的显存门槛。
+ * `max` 模式的显存门槛：**4GB 空闲**。
  *
- * 依据：`max` 把每张参考图缩到短边 2048（约 4.2MP），编码成 latent 后
- * 要常驻在整个采样过程中（官方注明"reference tokens ride through every sampling step"）。
- * 实测 12GB 卡跑 `max` + 2048² 参考图已经接近上限。
- *
- * 阈值取 4GB 空闲：低于这个数，模型权重加载 + `max` 参考图很容易 OOM。
- * 这个数字偏保守 —— 宁可提前降级并告知，也不要跑到一半崩掉。
+ * `max` 把每张参考图缩到短边 2048（约 4.2MP），编码成 latent 后要常驻整个采样过程
+ * （官方原话 "reference tokens ride through every sampling step"）。
+ * 实测 12GB 卡跑 `max` + 2048² 参考图已接近上限；低于 4GB 空闲时
+ * 模型权重加载 + max 参考图很容易 OOM。数字偏保守 —— 宁可提前降级并告知，
+ * 也不要跑到一半崩掉。
  */
 export const MAX_MODE_MIN_FREE_VRAM_BYTES = 4 * 1024 * 1024 * 1024;
 
 /**
- * 决定这次到底用哪个 ref_image_size。
- *
- * 设计原则：**不静默降级**。
- * 自动降级本身是好事（避免 OOM），但用户必须知道"你要的 max 没生效、原因是什么"。
- * 所以这里返回 `{ value, requested, downgraded, reason }`，由调用方展示。
+ * 决定这次到底用哪个 ref_image_size。原则：**不静默降级** ——
+ * 自动降级本身是好事（避免 OOM），但用户必须知道"你要的 max 没生效、原因是什么"，
+ * 所以返回 `{ value, requested, downgraded, reason }` 由调用方展示。
  *
  * 显存信息不可用时**不降级**（宁可按用户要求跑，失败时 ComfyUI 会明确报 OOM）。
  *
@@ -130,31 +108,20 @@ export function decideRefImageSize(requested, vram) {
 /**
  * 组装渲染计划。
  *
- * ============================================================================
- * H3 的参考输入有**四类**，编号规则各不相同（详见 docs/H3参考输入契约.md）
- * ============================================================================
- *
- *   ref_images        → <Picture i>   按类型独立累加
- *   ref_videos        → <Video k>     按类型独立累加
- *   ref_video_audios  → <Audio j>     与 <Video k> **同号**
- *   ref_audios        → <Audio j>     **全局累加**，且排在所有视频音轨之后
- *
- * 最容易错的一点：**视频自带的音轨会占用 <Audio> 编号**。
- * 例：1 个带音轨的视频 + 1 个独立音频
- *     → <Audio 1> 是视频音轨，<Audio 2> 才是独立音频。
- * 如果按"独立音频 = Audio 1"去写，提示词就全错。
- *
- * 本函数把四类都算进显式的 `audioIndex`，避免调用方自己推。
+ * H3 的四类参考输入编号规则各不相同：`ref_images → <Picture i>`、
+ * `ref_videos → <Video k>`、`ref_video_audios → <Audio j>`（与 Video **同号**）、
+ * `ref_audios → <Audio j>`（全局累加，排在所有视频音轨之后）。
+ * 最容易错的是**视频自带音轨会占用 <Audio> 编号**：1 个带音轨视频 + 1 个独立音频时，
+ * `<Audio 1>` 是视频音轨、`<Audio 2>` 才是独立音频。本函数把四类都算进显式
+ * `audioIndex`，避免调用方自己推。
  *
  * @param {object} opts
  * @param {object[]} [opts.cards]        已解析的角色卡（含 resolvedImages）
  * @param {string[]} [opts.manualImages] 手工参考图（rel 或绝对路径）
- * @param {object}   [opts.previz]       { firstFramePath, lastFramePath }（与 store/models.js 的镜头卡字段一致）
+ * @param {object}   [opts.previz]       { firstFramePath, lastFramePath }
  * @param {string[]} [opts.sceneImages]  场景/道具参考
  * @param {Array<{rel:string,name?:string,hasAudio?:boolean}>} [opts.videos]
- *        参考视频（rel 指向素材库里的视频文件）
  * @param {Array<{rel:string,name?:string}>} [opts.audios]
- *        独立参考音频
  */
 export function buildRenderPlan({
   cards = [],
@@ -384,29 +351,20 @@ export function buildRenderPlan({
   else suggestedMode = 't2va';
 
   /**
-   * ============================================================================
-   * 把「预览编号」对齐到「真实提交编号」（历史 P0）
-   * ============================================================================
+   * 把「预览编号」对齐到「真实提交编号」。
    *
-   * ⚠️ 这里原来直接把 `images[i].index = i + 1` 当作 `<Picture N>`。
-   *    但真实提交走的是 `ref-images.planImageSlots`：**首尾帧会占用
-   *    图片1 / 图片2**，参考图从后面的槽位开始填。
+   * 真实提交走 `ref-images.planImageSlots`：**首尾帧会占用 图片1 / 图片2**，
+   * 参考图从后面的槽位开始填。所以本函数的 index 必须由 `pictureIndexMap` 给出，
+   * 不能是 `i + 1` —— 否则渲染页显示的编号与提示词里的编号整体差 1–2，
+   * 用户以为 `<Picture 1>` 是角色、模型看到的却是首帧（串脸且不报错）。
    *
-   *    实测（fl2va，1 张角色卡 + 1 张手工图 + 首尾帧）：
-   *      真实提交：card.png = <Picture 3>、manual.png = <Picture 4>
-   *      本函数：  card.png = <Picture 1>、manual.png = <Picture 2>
-   *
-   *    于是渲染页显示的编号与提示词里的编号**整体差 2** ——
-   *    用户以为 <Picture 1> 是角色，模型看到的是首帧。串脸且不报错。
-   *
-   * 现在：参考图部分用 `planImageSlots` 重算 index；首尾帧单独列出，
-   *      不再混进 images 数组（它们不是"参考图"，是槽位占用者）。
+   * 首尾帧单独列出，不再混进 images 数组：它们不是"参考图"，是槽位占用者。
    */
   const refOnly = images.filter((x) => x.source !== REF_SOURCES.PREVIZ_FIRST
     && x.source !== REF_SOURCES.PREVIZ_LAST);
   const firstRel = previz?.firstFramePath ?? '';
   const lastRel = previz?.lastFramePath ?? '';
-  /** 用**镜头卡的真实 mode**；调用方没传时才退回推断值。 */
+  /** 用镜头卡的真实 mode；调用方没传时才退回推断值 */
   const slotMode = mode ?? suggestedMode;
   const slotPlan = planImageSlots(
     slotMode,
@@ -495,15 +453,10 @@ export function buildRenderPlan({
 /**
  * 视频/音频的用途说明 —— **英文，进 subject_definitions**。
  *
- * 为什么需要：H3 用 `<Video k>` / `<Audio j>` 标签引用参考素材，
- * 但模型不知道"这段是参考什么的"。用一句自然语言指明用途，比只给标签有效得多。
- *
- * ⚠️ 历史缺陷：这个函数以前返回中文句子，调用方还把它们拼成
- *    `reference_notes:\n…` 塞在提示词**最前面**。两个问题：
- *      ① `reference_notes` 不是官方字段，模型不认识，纯噪声；
- *      ② 官方明确"模型对开头权重最高"，把说明堆在开头会与风格定调打架。
- *    现在返回英文 <Video N>/<Audio N> 定义句，由 h3-prompt 的
- *    subject_definitions 段统一承载（那里本来就是放这些的地方）。
+ * H3 用 `<Video k>` / `<Audio j>` 标签引用参考素材，但模型不知道"这段是参考什么的"。
+ * 一句自然语言指明用途远比只给标签有效。必须英文（正文语言一致），
+ * 且必须放在 subject_definitions 段里 —— 官方明确模型对**开头**权重最高，
+ * 把说明堆在提示词最前面会与风格定调争权重；`reference_notes` 也不是官方字段。
  *
  * @param {object} plan buildRenderPlan 的返回值
  * @returns {string[]} 每行一句英文定义
@@ -540,16 +493,13 @@ function countBy(arr, key) {
 export function subjectsForPrompt(plan) {
   return (plan?.subjects ?? []).map((s, i) => {
     /**
-     * ⚠️ 三态语义必须原样传下去：`null` = **这张卡确实没有图**。
+     * 三态语义必须原样传下去：`null` = **这张卡确实没有图**。
      *
-     * 历史缺陷：这里写的是 `s.pictureIndex ?? (i + 1)`，而 `??` 对 `null`
-     * 也生效 —— 于是 `buildRenderPlan` 产出的"卡被完全裁掉 → pictureIndex:
-     * null"被静默改写成"第 i+1 张图"。下游 h3-prompt 的 `normalizeSubjects`
-     * 用 `pictureIndex === null` 判断无图，拿到正整数就判成有图 →
-     * subject_definitions 写出 `<Picture N>`（指向**别的角色的图**），
-     * retention_analysis 写出 `fully_preserved`（没有东西可保）。
-     *
-     * 现在：`null` 就走 `null`；只有 `undefined`（字段缺失）才兜底编号。
+     * `??` 对 `null` 也生效，所以不能用 `s.pictureIndex ?? (i + 1)` ——
+     * 那会把"卡被裁掉 → pictureIndex: null"改写成"第 i+1 张图"。
+     * 下游 h3-prompt 用 `=== null` 判断无图，拿到正整数就判成有图，
+     * 于是 subject_definitions 写出指向**别的角色**的 `<Picture N>`。
+     * 现在：`null` 就走 `null`，只有 `undefined`（字段缺失）才兜底编号。
      */
     const explicitNull = s.pictureIndex === null;
     const hasImage = s.hasImage !== false && !explicitNull;

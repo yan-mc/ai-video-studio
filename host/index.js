@@ -244,10 +244,9 @@ export function apply(ctx) {
     });
     // 3D 资产静态服务。
     //
-    // ⚠️ 原来 baseDir 指向 `app-dist`（SPA 构建产物），语义与 README 宣称的
-    //    "3D 资产静态" 不符，而且前端从未引用过这个前缀。
-    //    现在改成服务 `<dataDir>/assets`（glb/gltf/fbx/obj 都落在这里），
-    //    这样画布/预演页面要直接内联加载 3D 模型时有个稳定的同源地址。
+    // 服务 <dataDir>/assets（glb/gltf/fbx/obj 落在这里），让画布/预演页面
+    // 能直接内联加载 3D 模型。注意该目录同时含用户上传的图片，
+    // 所以 serveStatic 对 `.svg` 一律强制 attachment + nosniff（见 static.js）。
     const disposeAsset = ctx.webServer.register({
       kind: 'prefix',
       path: ASSET_PREFIX,

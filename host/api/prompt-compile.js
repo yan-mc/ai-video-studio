@@ -1,9 +1,7 @@
 /**
  * 提示词编译入口 —— 被 host/tools.js 直接 import。
  *
- * 从 api/index.js 逐字迁出（原 2811-3019 行）。
- *
- * 两条路径：手写成品（>200 字整段采用）与官方结构化编译；
+ *  * 两条路径：手写成品（>200 字整段采用）与官方结构化编译；
  * 结构化编译失败时退回官方基础格式的三字段兜底。
  */
 import { compileH3Prompt, H3_LIMITS, toShotInputPackage, truncatePromptKeepFields } from '../bridge/index.js';
@@ -177,26 +175,17 @@ export function compilePrompt(shot, outWarnings = null) {
 export function deriveSubjectsFromShot(shot) {
   // 参考图编号的**唯一权威**在 services/ref-images.js：先按真实提交顺序解析，
   // 再由 planImageSlots 分配最终 <Picture N>（首尾帧会占用槽位，所以编号
-  // 不等于"手工图数组的第 N 个"）。
-  //
-  // 历史缺陷（已修）：这里曾经是**第三套**编号实现 ——
-  //   const imgs = (shot.refs?.images ?? []).slice(0, 9);
-  //   → ① 完全无视角色卡（角色卡优先于手工图，编号会整体错位）；
-  //     ② 无视首尾帧占槽（fl2va 时 <Picture 1> 其实指向首帧）；
-  //     ③ 名字硬编码成"角色1..N"，与提示词里的人物名对不上。
+  // 不等于"手工图数组的第 N 个"，也不等于"第几张角色卡"）。
   const refs = resolveRefImages(shot);
   if (!refs.length) return [];
   /**
-   * ⚠️⚠️ 必须把首/尾帧也传进去（历史 P0：这里是**第三套编号实现**）。
+   * 必须把首/尾帧也传进去 —— 槽位分配取决于「首尾帧占不占槽」：
+   *   · fl2va：首帧占 图片1、尾帧占 图片2 → 参考图从 <Picture 3> 起
+   *   · i2va ：首帧占 图片1                → 参考图从 <Picture 2> 起
    *
-   *    planImageSlots 的槽位分配取决于「首尾帧占不占槽」：
-   *      · fl2va：首帧占 图片1、尾帧占 图片2 → 参考图从 <Picture 3> 起
-   *      · i2va ：首帧占 图片1                → 参考图从 <Picture 2> 起
-   *
-   *    旧写法传的是空字符串（等于"没有首尾帧"），于是在 fl2va 下
-   *    这里算出 <Picture 1>，而真实提交算出的才是 <Picture 3> ——
-   *    **同一个镜头，编译出的提示词认为角色是 1 号、实际提交是 3 号**，
-   *    相差 2，表现为串脸，且任何日志都不说。
+   * 传空字符串（等于"没有首尾帧"）会让 fl2va 下这里算出 <Picture 1>，
+   * 而真实提交算出 <Picture 3> —— 同一镜头提示词与实物差 2，
+   * 表现为串脸且无任何日志。
    */
   const previzSlots = resolvePrevizArtifacts(shot);
   const slots = planImageSlots(

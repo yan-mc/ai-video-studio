@@ -10,14 +10,11 @@ import { loadConfig } from '../config.js';
  * 走本地 GPU 的后端 —— **单一真源**。
  *
  * 12GB 显存跑不了并行，所以这些后端必须串行（见 job-runner 的并发闸门）。
- * h3-image / h3-local / h3-nanfeng 共用同一张卡和同一份文本编码器，漏掉它会：
- *   · 绕过并发闸门 → 视频与图像同时上卡 → OOM
+ * h3-image / h3-local / h3-nanfeng 共用同一张卡和同一份文本编码器，漏掉任何一个：
+ *   · 会绕过并发闸门 → 视频与图像同时上卡 → OOM
  *   · 取消时不被当作本地后端 → 远端 /interrupt 不发出，GPU 继续空烧
  *
- * ⚠️ 历史事故：`h3-nanfeng` 成为默认后端时漏加了这里。
- *    后果是续写批次把多个 H3 任务同时推给 12GB 卡（OOM），
- *    以及"点取消后 UI 显示已取消、ComfyUI 还在跑满全程"。
- *    新增任何走本地显卡的后端，**必须**同步加到这里。
+ * 新增任何走本地显卡的后端，**必须**同步加到这里。
  */
 export const LOCAL_BACKENDS = new Set(['mock', 'h3-local', 'h3-image', 'h3-nanfeng']);
 
@@ -60,20 +57,11 @@ export function newJob({ projectId, shotId, backendId, prompt, params, mode }) {
 }
 
 /**
- * 保留策略。
+ * 保留策略 —— 只在任务终结时触发，不影响进行中的任务。
  *
- * 为什么需要：`jobs.json` 只增不减 —— 每次生成都会追加一条**完整**记录
- * （含 prompt 全文、221 参数快照、全部 outputs），而 `/jobs` 和 `/monitor`
- * 每次请求都会全量读盘。长期用下去这个文件会膨胀到几十 MB，
- * 面板加载越来越慢，最后是一次编辑卡顿或 JSON 解析超时。
- *
- * 策略（只在任务终结时触发，不影响进行中的任务）：
- *   · 终态（completed / failed / cancelled / interrupted）保留最近 MAX_FINISHED 条
- *   · 未终结（queued / running）**永不**裁剪
- *   · 额外按时间兜底：超过 FINISHED_TTL_MS 的终态记录也裁掉
- *
- * 数值取"够用不臃肿"：500 条终态足以翻回好几天的历史，
- * 按本项目单镜 5 分钟算相当于 40 小时的实际产出。
+ * `jobs.json` 只增不减（每次生成追加 prompt 全文 + 参数快照 + outputs），而 `/jobs`
+ * 与 `/monitor` 每次都全量读盘。终态保留最近 MAX_FINISHED 条、未终结的**永不**裁剪、
+ * 超过 FINISHED_TTL_MS 的终态也裁掉。500 条按单镜 5 分钟算约 40 小时的实际产出。
  */
 const MAX_FINISHED = 500;
 const FINISHED_TTL_MS = 30 * 24 * 60 * 60 * 1000;   // 30 天
@@ -81,12 +69,11 @@ const FINISHED_TTL_MS = 30 * 24 * 60 * 60 * 1000;   // 30 天
 export const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
 
 /**
- * 裁剪终态任务。返回 { removed } —— 只在真的删了东西时才写盘。
+ * 裁剪终态任务。返回 { removed } —— **没有可删项时绝不写盘**。
  *
- * ⚠️ 整个"读-算-写"必须在**同一个** `updateJson` mutator 内完成。
- *    先 `list()` 再 `replaceAll()` 会留下一个窗口：这期间新落盘的 completed
- *    记录会被本次覆盖写回旧快照（丢一条任务历史）。窗口在
- *    `maxConcurrentLocal>1` 时真实可达，而那个值用户可改。
+ * 读-算-写必须在同一个 `updateJson` mutator 内完成（先 list 再整体替换会覆盖掉
+ * 期间并发落盘的记录）。mutator 返回 `undefined` 表示"不要写"，
+ * json-store 据此跳过整份重写 —— jobs.json 500KB+，每次终结都重写太浪费。
  *
  * @returns {Promise<{removed:number}>}
  */
@@ -105,7 +92,7 @@ export async function pruneJobs() {
       if (TERMINAL.has(j.status)) finished.push(j);
       else live.push(j);
     }
-    if (!finished.length) return list;
+    if (!finished.length) return undefined;   // 没有终态记录 → 不写盘
 
     // 新的在前
     finished.sort((a, b) => (b.updatedAt ?? b.createdAt ?? 0) - (a.updatedAt ?? a.createdAt ?? 0));
@@ -117,7 +104,7 @@ export async function pruneJobs() {
     });
 
     removed = list.length - (live.length + keep.length);
-    if (removed <= 0) return list;
+    if (removed <= 0) return undefined;       // 无可删项 → 不写盘
 
     const kept = new Set([...live.map((j) => j?.id), ...keep.map((j) => j?.id)]);
     // 保持原顺序：file 里是什么顺序，写回去就是什么顺序

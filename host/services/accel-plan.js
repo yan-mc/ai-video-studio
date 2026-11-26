@@ -1,51 +1,17 @@
 /**
  * H3 加速方案（Acceleration Plan）。
  *
- * ============================================================================
- * 为什么需要这一层
- * ============================================================================
+ * 本项目只维护 DMAD 一条路线：单个通用 LoRA（Ref2VA / FL2VA / T2VA 共用），
+ * 采样器 `lcm`、调度 `simple`、shift **12 / 2**（音频是 2 不是 3），
+ * 步数必须落在学生训练的那一档（4step / 8step）。
  *
- * H3 原模型是 50 步、无 CFG 的 guidance-distilled 模型。社区用**蒸馏 LoRA**
- * 把它压到 4–8 步。本项目统一采用 DMAD 一条路线：
+ * shift 必须显式设：`MiniMaxH3` 模型的 `sampling_settings` 写死 `12.0 / 3.0`，
+ * 那是**未蒸馏原模型**的取值；每个蒸馏 LoRA 都在特定 shift 上训出来，用错 sigma 网格
+ * 会与训练分布错位（不报错，只是画质/动态变差）。所以方案声明了 shift 就必须插
+ * `MiniMaxH3SigmaShift` 节点，不能依赖模型默认值。
  *
- *   ┌─ dmad ─────────────────────────────────────────────────────────────┐
- *   │ DMAD（ZhengmingYu/DMAD，arXiv:2610.02188，字节 + 德州农工）        │
- *   │   对抗蒸馏（两个判别器头 + 共享 backbone，不需要辅助扩散模型）      │
- *   │   **单个通用 LoRA**，Ref2VA / FL2VA / T2VA 都用它                   │
- *   │   采样器 **lcm**，调度 simple，shift **12 / 2**（注意音频是 2 不是 3）│
- *   │   步数必须严格 4（4step 学生）或 8（8step 学生）                    │
- *   └────────────────────────────────────────────────────────────────────┘
- *
- * 历史说明：早期还接过 LightX2V Turbo（轨迹蒸馏，ref/fl2v 各一个专用 LoRA，
- * 采样器 euler）。实测它在视频理解（角色形态 / 动作连续性 / 音频起伏）上
- * 明显弱于 DMAD，已整条移除，不再作为回退方案。
- *
- * ============================================================================
- * 为什么必须显式设 shift
- * ============================================================================
- *
- * 模型自带的 `sampling_settings`（ComfyUI `supported_models.py` 的
- * `MiniMaxH3`）写死 `shift: 12.0, audio_shift: 3.0`。这是**未经蒸馏的原模型**
- * 的取值。而每个蒸馏 LoRA 是在特定 shift 上训出来的（见上面表格），
- * 用错了 sigma 网格就会和训练分布错位 —— 不会报错，只是画质/动态变差。
- *
- * 所以：**只要方案声明了 shift，就必须插 `MiniMaxH3SigmaShift` 节点**，
- * 不能依赖模型默认值。
- *
- * 实测依据：
- *   · shift=12 时 simple 8 步的 video sigma = [1,.988,.973,.952,.923,.878,.800,.632]→0
- *   · 16 步**不是** 8 步的细分，而是整条曲线重采样 → 训练点对不上
- *   · audio_shift 不改变 video sigma，只改 `audio_scale = shift/audio_shift`
- *     这一个标量（2→6.0，3→4.0），它被传给 DiT 缩放音频目标
- *
- * ============================================================================
- * 输入约束（实测确认：DMAD **不改变**任何输入要求）
- * ============================================================================
- *
- * 2026-11-16 实测（scripts/dmad_capability*.mjs）：在 DMAD 下这些全部被
- * ComfyUI 接受 —— 参考图 1/2 张、首尾帧、参考视频、参考音频、图+视频+音频混合。
- * 所以参考图 ≤9 / 视频 ≤3 / 音频 ≤3 / 总 ≤12 / 帧数 17k+5 / 分辨率 32 倍数
- * 这些约束**完全由插件层负责**，与选哪个加速方案无关。
+ * DMAD **不改变**任何输入要求：参考图 ≤9 / 视频 ≤3 / 音频 ≤3 / 总 ≤12 /
+ * 帧数 17k+5 / 分辨率 32 倍数这些约束完全由插件层负责。
  */
 
 /** 方案 id → 定义。默认方案由 config.accelPlan 决定（缺省 'dmad8'）。 */
@@ -68,7 +34,7 @@ export const ACCEL_PLANS = Object.freeze({
     steps: 8,
     shiftVideo: 12,
     shiftAudio: 2,
-    // 这套组合是 DMAD 学生的训练设定；偏离它就是分布外
+    /** 学生按 8 步从零训练：偏离即分布外，`checkSteps` 会拒绝并回退 */
     strictSteps: true,
     hint: 'DMAD 8 步学生，音画质量优先。单镜比 4 步慢约一倍。',
   },
@@ -84,29 +50,21 @@ export const ACCEL_PLANS = Object.freeze({
     steps: 4,
     shiftVideo: 12,
     shiftAudio: 2,
+    /** 学生按 4 步从零训练：偏离即分布外，`checkSteps` 会拒绝并回退 */
     strictSteps: true,
     hint: 'DMAD 4 步学生。最快，适合草稿与批量试错。',
   },
 
-  // LightX2V Turbo（轨迹蒸馏，ref/fl2v 各一个专用 LoRA，采样器 euler）已移除：
-  // 仅在边缘锐度上略好，视频理解明显弱于 DMAD。本项目只维护 DMAD 一条线，
+  // LightX2V Turbo 已移除（边缘锐度略好，但视频理解明显弱于 DMAD）。
   // 旧配置里若还写着 lightx2v，accelPlanOf() 会告警并回退到 dmad8。
 
   /**
    * 不做加速：用**原模型**跑，步数由用户决定。
    *
-   * ==========================================================================
-   * 为什么 `steps` 不再是固定 50
-   * ==========================================================================
-   *
-   * 50 步是原模型的「参考默认值」，不是硬性要求 —— 它是按照
-   * 「质量优先」给的保守数字。但 50 步在 5 秒片上也确实慢到接近
-   * 半小时级别，很多人想要的其实是 25～30 步的折中。
-   *
-   * 所以这里的 50 只作为**推荐值**（`defaultSteps`）用于前端预填与校验基准，
-   * 真正提交的步数由 `task.steps` / `job.params.steps` 决定。
-   * `minSteps` 是不能低于的安全线 —— 低于它去噪根本没收敛
-   * （见 `checkSteps()` 里对 `family==='none'` 的判定）。
+   * 50 只是**推荐值**（前端预填、`checkSteps` 校验基准），不是硬性要求 ——
+   * 它在 5 秒片上慢到接近半小时级别，很多人要的其实是 25～30 步的折中。
+   * 真正提交的步数由 `job.params.steps` 决定，`stepsRange.min` 是不能低于的安全线
+   * （低于它去噪根本没收敛）。
    */
   'none': {
     id: 'none',
@@ -121,6 +79,7 @@ export const ACCEL_PLANS = Object.freeze({
     stepsRange: { min: 20, max: 80, step: 1 },
     shiftVideo: null,
     shiftAudio: null,
+    /** 原模型步数本就可调，按 stepsRange 校验而不是锁死 */
     strictSteps: false,
     hint: '不挂 LoRA，用原模型。步数可调（默认 50，建议 25–30 起试），单镜较慢。',
   },
@@ -142,12 +101,10 @@ export function accelPlanOf(id) {
 /**
  * 把 ComfyUI 返回的 LoRA 名拆成"目录 + 纯文件名"。
  *
- * ⚠️ ComfyUI 的 `folder_paths.recursive_search` 是 `os.walk(followlinks=True)`，
- * 子目录会被递归扫描，返回的名字**带目录前缀**：
- *   `00_turbo\dmad_..._8step_....safetensors`（Windows 反斜杠）
- *
- * 而 `ACCEL_PLANS` 里声明的是**纯文件名**。两边的形状不一致，直接 `includes()`
- * 永远匹配不到 —— 表现就是"明明装了却报没装"。
+ * `folder_paths.recursive_search` 是 `os.walk(followlinks=True)`，子目录会被递归扫描，
+ * 返回的名字**带目录前缀**（Windows 上还是反斜杠）：`00_turbo\dmad_..._8step_....safetensors`。
+ * 而 `ACCEL_PLANS` 里声明的是纯文件名 —— 直接 `includes()` 永远匹配不到，
+ * 表现就是"明明装了却报没装"。
  */
 function splitLoraName(name) {
   const s = String(name ?? '').replace(/\\/g, '/');
@@ -160,21 +117,12 @@ function splitLoraName(name) {
 /**
  * 从文件名推断一个加速 LoRA 属于哪个学生（步数 / 家族）。
  *
- * ============================================================================
- * 为什么必须有这一层
- * ============================================================================
+ * DMAD 发布的是**两个互相独立的学生**（`_4step_` / `_8step_`），是两份不同的权重，
+ * 不是"同一模型的粗细两档"。把 8step 文件配 4 步采样（或反过来）不会报错，
+ * 只是整条采样轨迹落在学生没见过的分布外 —— 画面"看起来能出、就是不对"。
  *
- * DMAD 发布的是**两个互相独立的学生**：
- *   `..._4step_full_critic_...`  按 4 步从零训练
- *   `..._8step_full_critic_...`  按 8 步从零训练
- * 它们**不是**"同一个模型的粗细两档"，而是两份不同的权重。
- *
- * 把 8step 文件配 4 步采样（或反过来）不会报错，只是整条采样轨迹
- * 落在这个学生没见过的训练分布外 —— 画面"看起来能出、就是不对"。
- *
- * 本机 `models/loras` 目前只有这两个文件（已实测 object_info 确认），
- * 但用户随时可能再装 LightX2V / PDMD / FastH3 等其它家族，
- * 所以这里按**文件名**识别，识别不出就返回 unknown 而不是瞎猜。
+ * 用户随时可能再装其它家族，所以按**文件名**识别，识别不出返回 unknown 而不是瞎猜。
+ * 强度恒 1.0：蒸馏学生是学生本体，不是风格补丁。
  *
  * @param {string} fileName
  * @returns {{ family: string, steps: number|null, strength: number, confidence: 'exact'|'guess'|'unknown' }}
@@ -194,14 +142,6 @@ export function classifyAccelLora(fileName) {
           : name.includes('turbo') ? 'turbo'
             : 'unknown';
 
-  /**
-   * 强度：蒸馏学生是**学生本体**，不是风格补丁。
-   *
-   * 官方原话（DMAD comfyui README）："the LoRA is the distilled student,
-   * not a style"。压到 0.5 等于让一个"半蒸馏"的混合体去跑 4 步 ——
-   * 去噪不干净，表现为糊、油、动态粘滞。
-   * 所以加速 LoRA 的强度恒为 1.0，任何方案都不该改它。
-   */
   const strength = 1.0;
 
   if (steps == null) return { family, steps: null, strength, confidence: family === 'unknown' ? 'unknown' : 'guess' };
@@ -209,32 +149,16 @@ export function classifyAccelLora(fileName) {
 }
 
 /**
- * 按 ComfyUI 里**实际存在**的 LoRA 文件挑选加速方案。
- *
- * ============================================================================
- * 为什么需要自动匹配
- * ============================================================================
- *
- * 历史缺陷：`ACCEL_PLANS` 里的 `lora` 字段是**写死的文件名**。用户换机、
- * 重命名、或只装了一个学生时，写死的名字在 ComfyUI 里不存在 —— 
- * ComfyUI 会在 `/prompt` 阶段返回 `value_not_in_list`，
- * 而错误信息里只有一个文件名，用户完全看不出"是我的加速方案没配对"。
- *
- * 更糟的静默版本：如果 `sanitize()` 把不存在的 LoRA 回退成「未选择」，
- * 蒸馏栈变空 —— 4/8 步跑在未蒸馏原模型上，**能出片但质量悄悄崩**。
- * 这正是 accel-plan.js 反复警告的分布外采样。
- *
- * 这里改成：先看 ComfyUI 真实有哪些文件，再按"家族 + 步数"匹配。
- * 匹配不到就**保留方案声明**并产生一条明确的 warning（交给 job 层展示），
- * 绝不静默换成「未选择」。
- */
-
-/**
  * 按"ComfyUI 里到底装了哪个学生"反查最合适的方案。
  *
- * 这是**防错配**的核心：LoRA 与 (步数 / 采样器 / 调度器 / shift) 必须永远成套。
- * 少装一个学生时，正确做法不是"还用原方案的步数去跑另一个学生"
- * （那是分布外采样，能出片但质量崩），而是**整套换到匹配的方案上**。
+ * `ACCEL_PLANS` 里的 `lora` 只是声明名，用户换机、重命名或只装一个学生时可能不存在。
+ * 两种后果都不好：`/prompt` 阶段返回 `value_not_in_list`（错误信息只有一个文件名，
+ * 看不出是方案没配对），或 `sanitize()` 回退成「未选择」→ 蒸馏栈变空 → 4/8 步跑在
+ * 未蒸馏原模型上，能出片但质量悄悄崩。
+ *
+ * 所以先看真实文件、再按「家族 + 步数」匹配；匹配不到就保留方案声明并产生明确
+ * warning，绝不静默换成「未选择」。LoRA 与 (步数 / 采样器 / 调度器 / shift) 必须
+ * 永远成套 —— 少装一个学生时要**整套换方案**，而不是用原步数去跑另一个学生。
  *
  * @param {string} planId
  * @param {string[]|null} loraFiles
@@ -266,13 +190,9 @@ export function resolveAccelForFiles(planId, loraFiles) {
     };
   }
 
-  /**
-   * ⚠️ 比对用**纯文件名**，提交用**完整名（含目录）**。
-   *
-   * `ACCEL_PLANS` 声明的是 `dmad_..._8step_....safetensors`，
-   * 而 ComfyUI 现在返回 `00_turbo\dmad_..._8step_....safetensors`。
-   * 只按字符串全等比对会永远 miss（"装了却说没装"）。
-   */
+  // 比对用**纯文件名**，提交用**完整名（含目录）**：
+  // 声明的是 `dmad_..._8step_....safetensors`，ComfyUI 返回的是
+  // `00_turbo\dmad_..._8step_....safetensors`，全等比对会永远 miss。
   const byBase = new Map(files.map((f) => [f.base, f]));
 
   // 1) 声明名存在（纯名比对）→ 用**带目录的完整名**提交
@@ -280,17 +200,8 @@ export function resolveAccelForFiles(planId, loraFiles) {
   if (exactFile) {
     const meta = classifyAccelLora(base.lora);
     const resolved = exactFile.dir ? `${exactFile.dir}/${exactFile.base}` : exactFile.base;
-    /**
-     * ⚠️ 历史 P0（本次修复）：这里原来是 `const note = exactFile.dir ? [] : warnings`，
-     *    逻辑写反了 —— LoRA 放在子目录（本机实际布局 `00_turbo/...`）时，
-     *    它把**已经累积的 warnings 全部丢掉**，包括：
-     *      · 「未知加速方案已回退到 dmad8」
-     *      · 「声明名不存在，已按同家族替换」
-     *    于是用户改错了方案名，界面上一句提示都没有，只有画质变差。
-     *
-     *    正确语义：命中子目录只是"提交时要用带目录的完整名"，
-     *    应该在 warnings 里**追加一条说明**，而不是清空前面的。
-     */
+    // 命中子目录只追加一条说明，**不能清空**已累积的 warnings
+    // （否则"未知方案已回退""声明名不存在已替换"这类提示会静默消失）
     const note = exactFile.dir
       ? [...warnings, `已按子目录完整名提交：${resolved}`]
       : warnings;
@@ -349,6 +260,10 @@ export function resolveAccelForFiles(planId, loraFiles) {
 /**
  * 把方案解析成**本次生成实际要用的参数**。
  *
+ * `needShiftNode`：`shiftVideo == null` 表示"用模型默认"（只有 none 方案会这样）；
+ * 其它方案一律必须插 SigmaShift 节点 —— 模型默认的 12/3 是按原模型 50 步标定的，
+ * 不是给蒸馏学生用的。
+ *
  * @param {string} planId
  * @returns {{plan, lora, sampler, scheduler, steps, shiftVideo, shiftAudio, warnings:string[]}}
  */
@@ -362,14 +277,6 @@ export function planForShot(planId) {
   const lora = plan.lora ?? '';
   const shiftVideo = plan.shiftVideo ?? null;
   const shiftAudio = plan.shiftAudio ?? null;
-
-  /**
-   * ⚠️ shift 显式性的判定。
-   *
-   * `null` 表示"用模型默认"（只有 none 方案会这样）。
-   * 其它方案一律**必须**插 SigmaShift 节点 —— 模型默认的 12/3 是按原模型
-   * 50 步标定的，不是给蒸馏学生用的。
-   */
   const needShiftNode = shiftVideo != null;
 
   return {
@@ -390,7 +297,10 @@ export function planForShot(planId) {
  *
  * DMAD 学生是在**连续时间**上训的（官方明确说 --steps 自由），
  * 但 8step 学生是**按 8 步从零训**的，偏离 8 就是分布外。
- * 折中：允许改，但给出警告并记录，绝不静默。
+ * `strictSteps` 的方案（dmad4 / dmad8）偏离训练步数会让整条采样轨迹落在学生
+ * 没见过的分布上 —— 能出片，但质量悄悄崩。所以：
+ *   · `strictSteps: true`  → **拒绝**（`ok: false`，调用方回退到方案推荐步数）
+ *   · 其余                  → 允许，但给出警告并记录，绝不静默
  */
 export function checkSteps(planId, steps) {
   const { plan } = accelPlanOf(planId);
@@ -398,6 +308,14 @@ export function checkSteps(planId, steps) {
   if (!Number.isFinite(n) || n < 1) return { ok: false, warning: '步数非法' };
   if (n === plan.steps) return { ok: true, warning: '' };
   if (plan.family === 'dmad') {
+    if (plan.strictSteps) {
+      return {
+        ok: false,
+        warning: `${plan.label} 是按 ${plan.steps} 步从零训练的学生，不能改成 ${n} 步 —— `
+          + '偏离训练步数属于分布外采样，画面能出但质感与动态会明显变差。'
+          + `已按 ${plan.steps} 步执行；要别的步数请改用「不加速」方案。`,
+      };
+    }
     return {
       ok: true,
       warning: `${plan.label} 是按 ${plan.steps} 步训练的，你传了 ${n} 步 —— `
@@ -406,23 +324,14 @@ export function checkSteps(planId, steps) {
   }
 
   /**
-   * 不加速（`none`）时的步数校验 —— 现在按 `stepsRange` 判定，不再硬编码 50%。
+   * 不加速（`none`）的步数校验：安全线来自 `plan.stepsRange`（min 默认 20）。
    *
-   * ==========================================================================
-   * 为什么必须校验，以及为什么阈值来自方案定义
-   * ==========================================================================
-   *
-   * 以前这里直接 `return { ok: true, warning: '' }` —— 不加速方案**不校验步数**。
-   * 于是「选 none 但前端 steps 仍是 8」这种组合一路绿灯跑到 ComfyUI，
-   * 结果是原模型只用 8 步去噪，远未收敛，出片一片模糊。
-   *
-   * 而这不是「分布外」那么轻：蒸馏学生在 8 步是**训练设定**，
-   * 原模型在 8 步是**没跑完**。前者质量下滑，后者是废片。
-   *
-   * 现在步数可调，安全线来自 `plan.stepsRange.min`（默认 20）：
-   *   · 低于 min → 拒绝（没跑完去噪）
+   *   · 低于 min → 拒绝（去噪没跑完，出片模糊）
    *   · 高于 max → 只警告（能跑，但收益递减、耗时线性增长）
    *   · 中间区间 → 放行
+   *
+   * 必须校验：蒸馏学生在 8 步是**训练设定**，原模型在 8 步是**没跑完**.
+   * 「选 none 但 steps 仍是 8」一路绿灯的结果是废片。
    */
   if (plan.family === 'none') {
     const min = plan.stepsRange?.min ?? Math.ceil(plan.steps * 0.5);

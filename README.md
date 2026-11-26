@@ -47,7 +47,7 @@ ComfyUI 给你一个节点图；九章给你的是「从剧本到成片」的全
 |---|---|---|
 | `h3-nanfeng` | 南风 V15（221 参数 → 内部展开 ~40 节点） | **主力视频生成**：二采 / 续写 / 全参数控制 |
 | `h3-local` | 官方工作流模板替换 | 精简路径，排障对照用 |
-| `h3-image` | H3-Image 33B | 文生图、参考图编辑、角色设定卡、立绘拆解 |
+| `h3-image` | H3-Image 33B | 文生图、**参考图编辑（≤16 张，第 1 张 = 编辑目标）**、批量出图、**图像 LoRA**、角色设定卡、立绘拆解 |
 
 ### 🧠 智能分镜：零 API Key
 
@@ -301,9 +301,7 @@ host/services/*      业务层（执行器 / Blender / 素材 / LoRA / 剪辑…
 界面默认**折叠全部无效参数**并标注原因，不让人在 95（47 死 + 48 缺依赖）个不响应的旋钮上瞎试。
 
 > 完整逐条审计见 **[参数审计报告](docs/PARAM-AUDIT.md)**
-> （生成命令 `npm run audit:params`，逐项对照 `h3_generator.py` 源码核实）。
-> 自检：`node -e "import('./host/bridge/vendors/nanfeng/schema.js').then(m=>{const i=m.inertParams();console.log(i.length,i.filter(p=>p.flag==='dead').length,'dead')})"`
-> → 期望 `95 47 dead`
+> （逐项对照 `h3_generator.py` 源码核实）。
 
 ### 内置预设
 
@@ -336,7 +334,7 @@ host/services/*      业务层（执行器 / Blender / 素材 / LoRA / 剪辑…
 | `studio_h3_workshop` | 剧本 → 中性分段 + 资产提示词（**只产文本**） |
 | `studio_blender` | 3D 预演渲染（health / assets / actions / spec / render） |
 | `studio_post` | ffmpeg 后处理（含 **`stripAudio` 去音轨**） |
-| `studio_image` | H3-Image 出图 / 立绘拆解 |
+| `studio_image` | H3-Image 出图（`meta` / `lora` / `generate`：文生图 / 参考图编辑 / 批量 / LoRA）|
 | `studio_toolbox` | 提示词模板 / 服化道 / 孤儿清理 / 日志 |
 
 ---
@@ -420,7 +418,9 @@ dsh-jiuzhang-studio/
 │  │  ├─ generator.js      执行器（runH3Nanfeng / runH3Local）
 │  │  ├─ comfy-client.js   ComfyUI 客户端（探测 / 上传 / 轮询 / 取消）
 │  │  ├─ accel-plan.js     DMAD 加速方案 + LoRA 学生匹配
-│  │  ├─ lora-catalog.js   LoRA 分类 / 互斥 / 衰减 / 看门狗
+│  │  ├─ lora-catalog.js   LoRA 分类 / 互斥 / 衰减 / 看门狗（**视频**那套）
+│  │  ├─ h3-image.js       H3-Image 出图（尺寸表 / 32 倍数自检 / 入参校验 / LoRA 注入 / 批量）
+│  │  ├─ h3-image-lora.js  H3-Image LoRA 目录与求解（**独立于视频那套**，只有 5 个轴）
 │  │  ├─ job-runner.js     任务状态机 + 并发闸门
 │  │  ├─ blender-service.js Blender 子进程编排
 │  │  └─ …                 素材 / 剪辑 / 后处理 / 换人 / 剧本工坊
@@ -430,8 +430,8 @@ dsh-jiuzhang-studio/
 │  └─ src/{pages,canvas,components,api,ui}
 ├─ app-dist/                构建产物（入库，随插件分发）
 ├─ vendor/nanfeng/          南风 V15 Python 节点（部署时复制进 custom_nodes）
+├─ vendor/inpaint-nodes/     局部重绘的 crop&stitch 节点（同上）
 ├─ skills/                  ★ 唯一 Skill 根目录
-├─ tools/                   开发工具（冒烟 207 项 / 路由一致性 / 参数审计 / 剪辑验收）
 ├─ docs/                    机制查明与参数审计
 ├─ client.js                DSH 侧栏入口
 └─ cordis.patch.yml         DSH 加载补丁
@@ -442,18 +442,14 @@ dsh-jiuzhang-studio/
 ## 开发
 
 ```powershell
-pnpm run build          # 构建 SPA（tsc --noEmit && vite build）
-npm test                # 冒烟测试（207 项真执行）
+pnpm run build          # 构建 SPA（vite build）
 npm run typecheck       # 仅类型检查
-npm run check:routes    # SPA/NAV/client 三方路由一致性（method+path 双键校验）
-npm run audit:params    # 221 参数有效性审计
-npm run preview         # 独立预览服务器（不启动 DSH）
 ```
 
 **改动后必须做的五件事**：
 
 1. `node --check` —— 只查语法，**必要但不充分**
-2. **模拟 ctx 跑 `apply()`** —— `npm test` 会做，能抓未定义变量
+2. **模拟 ctx 跑 `apply()`** —— 能抓未定义变量（漏一个 import 就让整个插件 fiber failed）
 3. 重启 DSH 后确认 `fiberPhase` 是 `active`
 4. 调一个真实工具 —— 能抓运行时字段丢失
 5. 改 `inject` 后**必须重启 DSH**（HMR 不会重新解析 inject）

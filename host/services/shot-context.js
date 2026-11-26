@@ -1,36 +1,25 @@
 /**
- * 生成入参准备 —— **REST 与 Agent 工具的单一真源**。
+ * 生成入参准备 —— REST 与 Agent 工具的单一真源。
  *
- * 解决什么问题：
- *   `services/generator.js` 已经把「执行器」统一了（runH3Local / runH3ImageLocal），
- *   但「入参准备」还没统一：
- *     - POST /jiuzhang/api/generate  会调 withVaultCards（解析项目/镜头绑定的角色卡、
- *       探测参考视频音频），然后 compilePrompt
- *     - studio_generate 工具       直接 compilePrompt(shot) → 角色卡完全丢失
- *   结果是同一个镜头，页面点渲染和让 AI 生成，产物不一样。
- *   generator.js 顶部注释骂过"两份实现导致漂移"，执行器修好了，入参没修。
- *
- * 另外 `pictureIndex` 的编号也在这里统一（见 resolvePictureIndices）：
- *   参考图的真实顺序由 `resolveRefImages` 决定（卡图 → 人设卡 → 手工图 → 场景图），
- *   而编译器曾经用"这是第几张卡"当编号。有卡没图 / 有手工图时编号就整体错位，
- *   提示词里的 <Picture N> 指向错误的图 —— 表现为"角色串脸"且不报错。
- *   这里从**真实的参考图清单**反推每张卡占哪些编号，保证两边永远一致。
+ * 职责：
+ *   1) `withVaultCards`   解析镜头绑定的角色卡 + 参考视频/音频（含探测结果回写）
+ *   2) `resolveMediaRefs` 视频/音频解析与编号（> /render/plan、/render/compile、/generate 共用）
+ *   3) `resolvePictureIndices` 角色卡 → `<Picture N>` 的**唯一**换算入口，
+ *      与真实提交同源（`planImageSlots` 的 `pictureIndexMap`）。
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from '../config.js';
 import { safeJoin } from '../security.js';
 import { readProjectCards } from './character-vault.js';
-import { resolveRefImages } from './ref-images.js';
+import { resolveRefImages, resolvePrevizArtifacts, planImageSlots } from './ref-images.js';
 import { probeMedia } from './media-probe.js';
 
 /**
  * 解析请求体里的视频/音频引用（probe 补全 hasAudio / 时长）。
  *
- * ⚠️ `/render/plan`、`/render/compile`、`/generate` 三处都必须用这一份逻辑。
- *    之前 plan/compile 各自直接读 body.videos，没做探测，导致：
- *      - 预览说"有音轨"，实际生成时按探测结果又变成"无音轨"；
- *      - 两个入口对同一份输入给出不同的编号。
+ * `/render/plan`、`/render/compile`、`/generate` 三处共用这一份，
+ * 否则三个入口会对同一输入给出不同编号与不同 hasAudio。
  *
  * @param {object} ctx  插件运行时（需要 ctx.assets 做探测结果回写）
  * @param {object} cfg
@@ -52,19 +41,14 @@ export async function resolveMediaRefs(ctx, cfg, rawVideos = [], rawAudios = [])
     const rel = typeof v === 'string' ? v : (v.rel ?? '');
     const explicit = typeof v === 'object' && typeof v.hasAudio === 'boolean' ? v.hasAudio : null;
 
-    // 无论调用方有没有给 hasAudio，都要探测 —— 时长、分辨率这些信息总要拿到，
-    // 而且探测结果要回写素材库（见 writeBackProbe）。
     const probe = await probeMedia(abs, cfg).catch(() => null);
 
-    // ⚠️ hasAudio 必须**探测**，不能默认 true。
-    //    给无音轨的视频硬接一个空 ref_video_audios，模型会收到"有音轨但是空的"，
-    //    效果比不接更差，而且不会报错（静默降级）。
-    //    调用方显式指定时以调用方为准（比如用户手动关掉"带上音轨"）。
+    // hasAudio 必须靠探测：给无音轨的视频硬接一个空 ref_video_audios，
+    // 模型收到的是「有音轨但为空」，比不接更差且不报错。调用方显式指定时以它为准。
     const hasAudio = explicit === null
       ? Boolean(probe?.ok && probe.hasAudio)
       : explicit;
 
-    // 外部放进来/归档的素材可能没有探测信息，顺手补上
     if (probe?.ok) await writeBackProbe(ctx, cfg, rel, probe);
 
     videos.push({
@@ -97,13 +81,8 @@ export async function resolveMediaRefs(ctx, cfg, rawVideos = [], rawAudios = [])
 }
 
 /**
- * 探测结果回写素材库记录。
- *
- * 场景：素材是外部放进来 / 从画布产物归档的，上传时没探测过。
- * 生成时探测到了真实信息，顺手写回，下次读素材库就能直接看到。
- *
- * 只在**有变化**时写，避免每次生成都刷一遍 assets-index.json。
- * 失败静默 —— 探测信息是增强，不是必需。
+ * 探测结果回写素材库记录（外部放入 / 画布归档的素材上传时没探测过）。
+ * 只在真有变化时写，失败静默 —— 探测信息是增强，不是生成的前置条件。
  */
 export async function writeBackProbe(ctx, cfg, rel, probe) {
   if (!probe?.ok || !rel) return;
@@ -119,7 +98,6 @@ export async function writeBackProbe(ctx, cfg, rel, probe) {
       mediaHeight: probe.height,
       fps: probe.fps,
     };
-    // 没有实质变化就不写
     const same = hit.hasAudio === next.hasAudio
       && hit.durationSec === next.durationSec
       && hit.mediaWidth === next.mediaWidth
@@ -133,19 +111,17 @@ export async function writeBackProbe(ctx, cfg, rel, probe) {
 /**
  * 把镜头要用的素材解析完整：角色卡 + 参考视频 + 参考音频。
  *
- * 为什么放在一处：这三类都来自「素材库/角色卡仓库」，且**编号互相耦合**
- * （视频自带音轨会占用 <Audio> 序号，见 docs/H3参考输入契约.md）。
- * 由同一处解析，保证编号一致。
+ * 三类素材编号互相耦合（视频自带音轨会占用 `<Audio>` 序号），
+ * 必须由同一处解析，否则提示词里的 `<Video N>`/`<Audio J>` 与实物错位。
  *
  * 输入形态（shot 上的字段，均为 rel 或资产 id）：
- *   cardIds   → 角色卡 id
+ *   cardIds     → 角色卡 id
  *   refs.videos → [{ rel|assetId, name, hasAudio }]
  *   refs.audios → [{ rel|assetId, name }]
  */
 export async function withVaultCards(shot, projectId, ctx, cfg = loadConfig()) {
   const out = { ...shot, characterCards: [] };
   try {
-    // ---- 角色卡 ----
     const projectCards = readProjectCards(projectId, cfg);
     const shotCards = Array.isArray(shot.cardIds) ? shot.cardIds : [];
     const ids = [...new Set([...shotCards, ...projectCards])];
@@ -155,21 +131,11 @@ export async function withVaultCards(shot, projectId, ctx, cfg = loadConfig()) {
         const c = await ctx.vault.get(id).catch(() => null);
         if (c) cards.push(c);
       }
-      /**
-       * ⚠️ 必须按 createdAt 正序排，与 `vault.list()` 的展示顺序对齐。
-       *
-       * 不排的话这里是"镜头级卡在前、项目级卡在后"，而仓库页/项目页是
-       * "创建早的在前"。两张卡时，用户在**页面上看到的名次**与
-       * **实际编译出来的 <Subject N> / <Picture N> 归属**会互换 ——
-       * 编号内部是自洽的（refList 与 Picture 同源），但人读的顺序对不上，
-       * 排障时极易误判成"编号错位"。
-       */
+      // 按 createdAt 正序，与 vault.list() 的展示顺序一致 ——
+      // 页面看到的名次与 <Subject N>/<Picture N> 的归属必须对得上，否则排障会误判成编号错位。
       cards.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
       out.characterCards = cards;
     }
-    // ---- 视频 / 音频 ----
-    // 与 /render/plan、/render/compile 共用**同一份**解析逻辑，
-    // 否则三个入口会对同一输入给出不同编号（踩过）。
     const media = await resolveMediaRefs(ctx, cfg, shot?.refs?.videos ?? [], shot?.refs?.audios ?? []);
     out.videos = media.videos;
     out.audios = media.audios;
@@ -180,34 +146,58 @@ export async function withVaultCards(shot, projectId, ctx, cfg = loadConfig()) {
 }
 
 /**
- * 从**真实的参考图清单**反推每张角色卡占用的 <Picture N>。
+ * 角色卡 → `<Picture N>` 的**唯一**换算入口。
  *
- * 为什么必须这样做：
- *   编号的正确依据是「图片在最终提交顺序里的位置」，而提交顺序由
- *   `resolveRefImages()` 决定：
- *      0. 角色卡（按卡序，每卡按其 refPolicy 出图）
- *      1. characterRefs（人设卡）
- *      2. 手工参考图
- *      3. 场景 / 道具
- *   只要某张卡没图、或有手工图插进来，"第几张卡"就不再等于"第几张图"。
+ * 编号来自 `planImageSlots` 的 `pictureIndexMap`（与真实提交用的是同一次调用、
+ * 同一份参考图清单、同一组首尾帧），因此与
+ * `generator.runH3Nanfeng`、`render-plan.buildRenderPlan` 三处永远一致。
  *
- * @param {object} shot   已含 characterCards 的镜头
- * @param {object} cfg
+ * 参考图清单顺序（`resolveRefImages`）：角色卡 → 人设卡 → 手工图 → 场景/道具；
+ * 首尾帧**不在清单里**，它们由 `planImageSlots` 单独占用 `图片1`/`图片2`。
+ * 因此绝不能拿"参考图数组下标 +1"当编号 —— i2va/fl2va 下会整体差 1–2，
+ * 表现为模型把首帧当角色（串脸，且不报错）。
+ *
+ * @param {object} shot   已含 characterCards 的镜头（`withVaultCards` 的产物）
+ * @param {object} [cfg]
  * @returns {Array<{id,name,pictureIndex,allPictures,traits,personality,voiceDesc,description,hasImage}>}
  */
 export function resolvePictureIndices(shot, cfg = loadConfig()) {
   const cards = Array.isArray(shot?.characterCards) ? shot.characterCards : [];
   if (!cards.length) return [];
 
-  // 用与生成时**完全相同**的函数取图，保证顺序一致
   let refs = [];
-  try { refs = resolveRefImages({ ...shot, characterRefs: [], sceneRefs: [], itemRefs: [] }, cfg); } catch { refs = []; }
+  try { refs = resolveRefImages(shot ?? {}, cfg); } catch { refs = []; }
+  if (!refs.length) {
+    return cards.map((c) => ({
+      id: c.id,
+      name: c.name ?? '角色',
+      pictureIndex: null,
+      allPictures: [],
+      traits: Array.isArray(c.traits) ? c.traits.join('、') : (c.traits ?? ''),
+      personality: c.personality ?? '',
+      voiceDesc: c.voiceDesc ?? '',
+      description: c.description ?? '',
+      hasImage: false,
+    }));
+  }
+
+  let previz = {};
+  try { previz = resolvePrevizArtifacts(shot ?? {}, cfg); } catch { previz = {}; }
+  /** 与提交端同一次槽位规划：首尾帧会占用 图片1/图片2 */
+  const slots = planImageSlots(
+    shot?.mode,
+    refs.map((r) => r.abs),
+    previz['{{FIRST_FRAME}}'] ?? '',
+    previz['{{LAST_FRAME}}'] ?? '',
+  );
 
   const byCard = new Map();
   refs.forEach((r, i) => {
     if (!r.cardId) return;
+    const n = slots.pictureIndexMap.get(i);
+    if (n == null) return;                    // 槽位不足被丢弃的图不算编号
     if (!byCard.has(r.cardId)) byCard.set(r.cardId, []);
-    byCard.get(r.cardId).push(i + 1);   // 1-based
+    byCard.get(r.cardId).push(n);
   });
 
   return cards.map((c) => {

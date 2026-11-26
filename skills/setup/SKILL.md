@@ -144,7 +144,15 @@ pwsh -File vendor/nanfeng/deploy-vendor.ps1 -ComfyDir "<工作区>\ai-runtime\Co
 pwsh -File vendor/nanfeng/deploy-vendor.ps1 -ComfyDir "..." -Force
 ```
 
-脚本只复制 `.py` 和 `dlss_schema.json`，**跳过 `_removed/`**（历史参考，不被加载）。
+脚本只复制 `.py` 和 `dlss_schema.json`。
+
+局部重绘（crop&stitch 模式）另需 `vendor/inpaint-nodes`：
+
+```powershell
+pwsh -File vendor/inpaint-nodes/deploy-vendor.ps1 -ComfyDir "<工作区>\ai-runtime\ComfyUI"
+```
+
+未部署时 `/image/inpaint` 会在提交前报 `INPAINT_NODES_MISSING`（不会等到图展开时才崩）。
 
 还需要这些第三方节点包（各自独立安装到 `custom_nodes/`）：
 

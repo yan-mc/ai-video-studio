@@ -47,9 +47,11 @@ GPU 出片 → output/ → 插件下载归档
 
 ## 目录内容
 
+### `vendor/nanfeng/` —— 视频生成节点（南风 V15）
+
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `__init__.py` | 44 | 包入口。只 import `h3_generator`，**不加载** `_removed/` |
+| `__init__.py` | 44 | 包入口。只 import `h3_generator` |
 | `h3_generator.py` | 2590 | 主节点 `NanFengH3MultiReferenceGeneratorV15`：221 参数 → GraphBuilder 展开 ~40 节点 |
 | `nodes.py` | 287 | 提示词节点（中文提示词 + `@` 素材引用） |
 | `latent_continuation.py` | 74 | 续写 latent 落盘：`clip_1`、`clip_2`… 按 `(workflow,node,group,run)` 哈希分目录 |
@@ -59,7 +61,22 @@ GPU 出片 → output/ → 插件下载归档
 | `trt_options.py` | 31 | TensorRT 引擎文件枚举（`vae/` 目录下扫 `.engine`） |
 | `dlss_output.py` + `dlss_schema.json` | 45 + 426 | DLSS 超分/补帧输出节点；**无插件时自动降级** |
 | `retired_mode_guard.py` | 11 | 旧模式参数守卫：收到已废弃字段就明确报错，不静默转换 |
-| `_removed/` | — | 已移除模块，**不被加载**，仅作"当初删了什么"的依据 |
+
+### `vendor/inpaint-nodes/` —— 局部重绘节点
+
+| 文件 | 职责 |
+|---|---|
+| `__init__.py` | 两个节点：`JZImageCropByMaskAndResize`（mask→bbox→裁剪缩放）+ `JZImageUncropByMask`（按 bbox 贴回） |
+| `deploy-vendor.ps1` | 部署到 `custom_nodes/jiuzhang_inpaint_nodes/` |
+| `VENDOR.md` | 与上游 KJNodes 的 4 处差异（32 对齐 / bbox 格式 / 空 mask 报错 / 去 kornia 依赖） |
+| `LICENSE-KJNodes.txt` | GPL-3.0 全文（本目录源自 KJNodes，同样受 GPL-3.0 约束） |
+
+**与 nanfeng 的关键区别**：这个包**自包含**，只依赖 ComfyUI 自带模块（`torch` / `numpy` /
+`comfy.utils.common_upscale`），不需要装第三方节点包。
+图像 inpaint 链路因此**完全与外部 KJNodes 解耦**。
+
+> ⚠️ 视频链路（`vendor/nanfeng/`）仍然需要 KJNodes（Sage Patch 等），
+> 那是视频侧的历史依赖，本次没有动。
 
 ## 依赖（都在 ComfyUI 进程侧，不在插件侧）
 
@@ -89,9 +106,11 @@ GPU 出片 → output/ → 插件下载归档
 ```powershell
 # 在项目根目录执行
 pwsh -File vendor/nanfeng/deploy-vendor.ps1 -ComfyDir "F:\AI视频\ai-runtime\ComfyUI"
+pwsh -File vendor/inpaint-nodes/deploy-vendor.ps1 -ComfyDir "F:\AI视频\ai-runtime\ComfyUI"
 
 # 目标已存在时需要 -Force（ComfyUI 在跑的话，覆盖后要重启它）
 pwsh -File vendor/nanfeng/deploy-vendor.ps1 -ComfyDir "..." -Force
+pwsh -File vendor/inpaint-nodes/deploy-vendor.ps1 -ComfyDir "..." -Force -Clean
 ```
 
 验证：

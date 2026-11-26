@@ -88,7 +88,7 @@ export function createPostService({ getCfg = loadConfig } = {}) {
     return result(out);
   }
 
-  /** 缩放：图片保持图片格式，视频保持视频格式（旧实现一律输出 .mp4） */
+  /** 缩放：图片保持图片格式，视频保持视频格式 */
   async function scale({ input, width = 1280, height = -2 }) {
     const abs = resolveInput(input);
     const kind = kindOf(abs);
@@ -110,7 +110,7 @@ export function createPostService({ getCfg = loadConfig } = {}) {
     const abs = resolveInput(input);
     const kind = kindOf(abs);
     if (kind !== 'video') {
-      // 旧实现直接扔给 ffmpeg，会冒出内部路径的 ENOENT，用户完全看不懂
+      // 先在落地前判存在性，否则 ffmpeg 只回内部路径的 ENOENT，用户看不懂
       throw new Error(
         `NOT_A_VIDEO: 抽帧需要视频输入，当前是 ${kind === 'image' ? '图片' : path.extname(abs)}`,
       );
@@ -298,10 +298,9 @@ export function createPostService({ getCfg = loadConfig } = {}) {
   /**
    * 解析后处理输入路径。
    *
-   * ⚠️ 历史缺陷：绝对路径**直接放行**（`if (path.isAbsolute(s)) return s`），
-   *    于是 /post/qc 可以对任意文件返回 size/format（信息泄露），
-   *    transcode / annotate 可以对任意文件跑 ffmpeg。
-   *    现在统一走 resolveUserPath，绝对路径也必须在 dataDir 内。
+   * ⚠️ 绝对路径**不能直接放行**：那样 /post/qc 会对任意文件返回 size/format
+   *    （信息泄露），transcode / annotate 会对任意文件跑 ffmpeg。
+   *    统一走 resolveUserPath，绝对路径也必须在 dataDir 内。
    */
   function resolveInput(input) {
     try {

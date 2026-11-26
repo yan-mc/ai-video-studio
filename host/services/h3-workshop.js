@@ -136,15 +136,14 @@ export function extractAssets(segments) {
 /**
  * 创建 H3 工坊服务。
  *
- * 注意：`root` 参数**已不再需要**（历史上用来拼 workflows 路径，现在统一走
- * services/workflow-paths.js）。保留参数是为了不破坏既有调用点，但不再读取它。
+ * 工作流模板路径统一走 services/workflow-paths.js，本服务不碰 dataDir。
  */
 export function createH3Workshop({ getCfg = loadConfig } = {}) {
   /**
-   * 读配置：优先用 getCfg（每次现取），退回启动快照。
+   * 读配置：必须用 getCfg 每次现取。
    *
-   * ⚠️ 历史缺陷：这里以前只用闭包 `cfg` —— 启动快照。用户在设置页改了
-   * dataDir 之后，本模块仍然读写旧目录（"项目还在、内容空了"那类现象）。
+   * 闭包捕获启动快照会导致：用户在设置页改了 dataDir 之后，本模块仍然
+   * 读写旧目录（"项目还在、内容空了"）。
    */
   const config = configReader(getCfg);
 
@@ -462,11 +461,9 @@ export function createH3Workshop({ getCfg = loadConfig } = {}) {
   /**
    * 工作流模板路径。
    *
-   * ⚠️ 曾经写成 `path.join(cfg.dataDir, 'workflows', 'h3.json')`：
-   *    dataDir 是用户可改的**运行时数据**目录，而 workflows 是随插件分发的
-   *    **模板**。用户一改数据目录，这里就找不到文件，生成报
-   *    `WORKFLOW_MISSING: 缺少 data/workflows/h3.json` —— 指向一个插件里
-   *    明明存在的文件。现在统一走 resolveWorkflowFile（见 services/workflow-paths.js）。
+   * 不要用 `path.join(cfg.dataDir, 'workflows', 'h3.json')`：dataDir 是用户可改的
+   * 运行时数据目录，而 workflows 是随插件分发的模板。用户一改数据目录就会报
+   * `WORKFLOW_MISSING` —— 指向一个插件里明明存在的文件。
    */
   function workflowFile() {
     return resolveWorkflowFile('h3', config());

@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-jiuzhang-studio",
-  "version": "3.2.0",
+  "version": "4.0.0",
   "private": true,
   "type": "module",
   "license": "UNLICENSED",
@@ -19,6 +19,7 @@
     "vendor/**/*.ps1",
     "host/**/*.js",
     "host/blender/**/*.py",
+    "host/python/**/*.py",
     "client.js",
     "cordis.patch.yml",
     "locale/*.json",
@@ -41,11 +42,6 @@
   },
   "scripts": {
     "build": "vite build --config app-src/vite.config.ts",
-    "test": "node tools/smoke-api.mjs",
-    "typecheck": "tsc -p app-src/tsconfig.json --noEmit",
-    "check:routes": "node tools/check-routes.mjs",
-    "preview": "node tools/preview-server.mjs",
-    "audit:params": "node tools/audit-params.mjs"
+    "typecheck": "tsc -p app-src/tsconfig.json --noEmit"
   }
 }
-

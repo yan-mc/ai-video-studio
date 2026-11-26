@@ -5,6 +5,499 @@
 
 ---
 
+## 4.0.0 — 全量审计与结构重构（2026-11-26）
+
+> 彻底重审并重构。四层架构不变，但**模块边界、代码归属、数据管线全部重划**。
+> 修复 11 个 P0、52 个 P1；拆分三个千行单体；清空全部运行时数据；
+> 删除全部测试脚本与 12 份失效文档。
+>
+> 完整报告见 **[docs/audit-v4/](docs/audit-v4/)**（框架 + 4 份分模块审查/修复记录 + 总结）。
+
+### 结构重构（模块不再混在一起）
+
+- **REST 层**：`host/api/index.js` 从 **2819 行巨型 if 链**拆成 84 行分发器 + `routes/` 下
+  11 个域 router（meta / nanfeng / generate / projects / prompt / image / vault /
+  media / blender / replace / toolbox）。路由清单拆分前后逐条 diff，**141 = 141 零差异**。
+- **提示词编译器**：`h3-prompt.js` 从 **2021 行**拆成 9 个文件（门面 / spec / route /
+  styles / ref2va / base / shot-adapter / lint / text-utils）。
+  用 6 份真实镜头卡验证：**5 份逐字符 IDENTICAL**，导出符号 LOST = 0。
+- **局部重绘**：`h3-inpaint.js` 从 **1002 行**拆成 params / graph / run / 门面 4 个文件，
+  23 个导出名全保留。重绘节点图与普通出图彻底分离。
+- 新增 `host/api/errors.js`（128 个错误码全覆盖）、`host/api/backend.js`、
+  `host/api/image-task.js`（REST 与工具共用的提交编排）。
+- `host/python/`：本地翻译服务从 `tools/` 迁入（它是运行时依赖，不是测试）。
+
+### P0 修复（静默错误结果 / 数据丢失 / 崩溃 / 安全）
+
+1. **串脸**：`resolvePictureIndices` 用 `i+1` 冒充槽位号，`fl2va` 下 `<Picture 1>` 指向首帧
+   而角色卡实际在 3/4 号槽。改为统一取 `planImageSlots` 的 `pictureIndexMap`，
+   并把 previz 首尾帧一起传入。**三套编号实现合一。**
+2. **seed 不生效**：南风链路所有任务用同一个种子。`job.params.seed` 现在真正透传到
+   `extraParams['随机种子']`，并写入参数快照可见。
+3. **批次数据丢失**：`continuation.js` 沿用「先删目标再 rename」，失败时批次 JSON 整份消失。
+   改为不删目标的原子写策略。
+4. **参考图静默丢失**：上传名只哈希 basename + `overwrite=true`，同 job 内同名互相覆盖。
+   改为含内容哈希、取消强制覆盖。
+5. **陈旧编号压过权威值**：镜头卡残留的 `subjects[].pictureIndex` 现在会被丢弃并写 warning。
+6. **Agent 局部重绘必崩**：130 行手抄编排调用了 5 个未导入的函数。改为共用
+   `prepareInpaint` / `inpaintSubmitSummary`。
+7. **选区内涂区不重绘**（vendor）：`max_crop_resolution` 把 bbox 当裁剪窗口上限，只平移不缩小，
+   超出部分永不重绘且文案谎称"被缩小"。改为保留完整 bbox，maxCrop 只封顶采样分辨率。
+8. **full 模式 mask 错位**：非 32 倍数源图被 VAE 静默居中裁剪。现在直接 400
+   `SOURCE_NOT_ALIGNED`（显式 `fullCanvasTrim:true` 可放行并写 warning）。
+9. **SVG 同源存储型 XSS**：`/jiuzhang/assets/*.svg` 以 `image/svg+xml` 内联返回，
+   而该源挂着全部写接口。现在强制 `attachment` + `text/plain` + `nosniff`。
+10. **归档白名单可绕过**：Windows 尾随点 / ADS / 大小写。改为逐段规范化比较。
+11. **图像功能整机不可用**：显存探测失败返回 `{ok:false, freeBytes:0}`，被当成真的 0 GB。
+   改为先判 `vram.ok`，探测失败则跳过闸门。
+
+### P1 修复（功能失效 / 违反契约）
+
+续写 `contextLength` 不透传、`runBatch` 无租约/CAS 导致永久卡 running、批次超时 1h/2h 冲突、
+`queued` 僵尸任务、取消与完成竞态丢产物、inpaint 不走 LoRA 求解器、
+`meta` 回报基准常量而非生效值、`GrowMask` expand 误随分辨率缩放、
+`ImagePage` 切 tab 卸载面板丢状态、`qc`/`reencode`/`timeoutMs` 双入口偏差、
+`backends` 同名不同型、Agent 出图不归档、Agent 生成丢 lint 警告、
+66 个错误码落 500、续写批次可被双 POST 双跑、tmp 名含 pid 并发冲突、
+`edit.js` 裸写盘、`lora` signed 强度不夹、`writeShots` 零校验、
+`monitor` 最坏 10s、SSE 死连接残留、9 处 `.catch(()=>{})` 吞失败。
+
+### 清理
+
+- 删除**全部测试脚本**：`smoke-api.mjs`(3608 行) / `check-routes.mjs` / `audit-params.mjs` /
+  `preview-server.mjs` / `verify-edit.mjs`，`tools/` 目录整个移除；
+  `package.json` 的 4 个测试 script 同步删除。
+- 删除工作区垃圾：两个 shell 事故残留文件、`_audit_run/`（224 文件 / 11 MB）、
+  `vendor/nanfeng/_removed/`（5 个历史模块）、全部 `__pycache__/`。
+- 删除 **12 份失效文档**（含主张 denoise=0.85 与实现相反的 `INPAINT-RESEARCH.md`、
+  仍写"代码未开始实现"的 `INPAINT-PLAN.md`、6 份旧审计、阶段性交付报告等），
+  docs/ 从 24 份精简到 10 份。
+- **清空全部运行时数据**：`data/` 从 416 文件 / 775.3 MB → 只留 2 个工作流模板
+  （素材库、任务列表、项目列表、输出、中间产物全部删除）。
+- 清理全部**重构叙事注释**（"历史缺陷/旧实现/曾经…"），全仓归零；
+  注释密度：h3-prompt 家族 41.5% → 14.6%。
+
+### 验证
+
+全量语法 91/91 · `tsc --noEmit` 通过 · `vite build` 成功 ·
+`apply()` 冒烟 14 工具全注册 · 真实 HTTP 冒烟 12 条路由全 200 + 404 正确 ·
+写令牌闸 403/200 正确 · 串脸 P0 端到端复验通过 · SVG 不再内联 · inpaint 端到端建 job 成功。
+
+> ⚠️ 需**重启 DSH** 生效（改了 `inject` 相关路径与 `app-dist` 全量重建）。
+
+---
+
+## 3.4.0 — 局部重绘 Phase 1–4 完成 + 全量代码审查修复（2026-11-25）
+
+> 本版新增 H3-Image 局部重绘（画笔涂抹 + crop&stitch），并对「图像生成 + 局部重绘」
+> 全部代码做了一次独立审查（backend / frontend / vendor 三处），修掉 3 个 P0、8 个 P1，
+> 补 10 条冒烟断言。冒烟从 208 项增至 **255 项**。
+>
+> 关键设计约束（都由真机实测确立，不是猜测）：
+> 1. **denoise 必须锁 1.0** —— PDD 只有 6 个预测头，`denoise<1` 会让
+>    `BasicScheduler` 的 `int(6/denoise)` 错配网格，实测 0.5 时只剩 3 个头工作，
+>    表现是"选区被抹平、不按提示词生成"。
+> 2. **改动强度用 `SplitSigmas` 切片**（full/strong/medium/light），实测 121/86/50/28 单调递减。
+> 3. **mask 尺寸必须与源图一致** —— ComfyUI 会静默 bilinear 拉伸，区域整体偏移。
+> 4. **宽高必须 32 的倍数**（latent 16× × patch 2×）。
+
+### P0 修复（会产生错误结果且不报错）
+
+**1. mask 回灌污染 alpha 通道 → auto 分辨率静默失效**
+[`MaskEditor.tsx`](dsh-jiuzhang-studio/app-src/src/components/MaskEditor.tsx)
+`exportMask()` 导出的是**黑底白区的不透明 PNG**（这对后端 `ImageToMask(red)` 是正确的），
+但 `value` 变化时又把它 `drawImage` 回 mask 画布 —— 画布 alpha 从"白笔迹+透明底"变成全 255。
+后果链条：`refreshOverlay` 的红层盖满整幅图 → 覆盖率永远 100% →
+bbox 变成整幅图 → 传给后端的 `bboxW/bboxH` 是整幅图 →
+auto 分辨率被顶到 `maxCrop`，**小选区自动放大 1.5× 的设计彻底失效**，
+还会显示一条莫名的"笔画会被缩小"警告。提交出去的 mask 本身仍正确，所以**不报错、只出坏质量**。
+> 验证：模拟同一条链路，旧实现覆盖率 3.05% → **100%**、bbox 50×40 → **256×256**；
+> 新实现完全一致且**幂等**（多笔操作不累积漂移）。
+修法：回灌时按亮度重建 alpha（`d[i+3] = d[i]`），保持画布"白+透明底"的干净状态。
+
+**2. 显存闸把"探测失败"当成"空闲 0 GB" → 图像功能整体不可用**
+[`h3-image.js`](dsh-jiuzhang-studio/host/services/h3-image.js)
+`vramStatus` 在任何失败（ComfyUI 没起 / 老版本无 `devices` / 非 NVIDIA / 超时）都返回
+`{ ok:false, freeBytes:0 }`，而判断只有 `Number.isFinite(freeGb) && freeGb >= 0 && freeGb < floorGb`
+—— `0` 是有限数且 `0 < 1.44`，**三个条件全真** → 每次出图都报「空闲显存仅 0.00 GB」并 400 拒绝。
+Fallback 还缓存 10 秒，用户连点都失败。这与该段注释"宁可放过，不要误伤"完全相反。
+修法：先用 `if (vram?.ok)` 判探测成功，失败则**跳过闸门**，让 ComfyUI 报真正的 OOM。
+
+**3. `studio_image action=inpaint` 完全没有 mask 尺寸校验**
+[`tools.js`](dsh-jiuzhang-studio/host/tools.js)
+校验只写在 REST 路由里，Agent 入口没有 —— 而 Agent 恰恰最容易传错尺寸。
+传一张 1024² mask 配 2048² 源图时，ComfyUI 静默拉伸、区域偏移、不报错。
+修法：抽出 [`services/image-dims.js`](dsh-jiuzhang-studio/host/services/image-dims.js)
+（`probeImageDims` / `resolveInpaintSizes` / `maskMismatchMessage`），两个入口共用；
+尺寸读不出来时（AVIF/HEIC）**明确告警**而不是静默放行。
+
+### P1 修复
+
+| # | 问题 | 修法 |
+|---|---|---|
+| 4 | LoRA 强度不夹紧：传 5 实际是 2，但 `loraStack` 报 5、无警告 | 求解器里按分类范围 + [-2,2] 夹紧并 push `degraded` |
+| 5 | inpaint 写死 `LoraLoaderBypassModelOnly`（老版本 ComfyUI 没这个节点 → 必失败） | 抽 `probeBypassLora` / `bypassLoraFallbackWarning` 共用，探测后决定并回退 |
+| 6 | inpaint 的 LoRA 缺省强度变 `NaN` → 落到 1.0（普通出图是分类默认 0.8/0.85）；超量静默切片 | 保留 `undefined` 交给求解器；超量 push warning |
+| 7 | 只传 `baseResolution` 被静默当 auto | `baseResolution` 存在时 `resolutionId` 默认 `'manual'` |
+| 8 | `padding:"abc"` → `Math.max(0, NaN)` = **NaN** → JSON `null` → ComfyUI 报无关错误 | `Number.isFinite` 兜底 + 夹到 `MAX_CROP_PADDING=4096` |
+| 9 | `strength:"lightt"` 实际跑 medium，但 `strengthId` 回原串 | 统一取规范化后的 `strength.id` |
+| 10 | `/image/inpaint/meta` 的 `maxMP` 硬编码 4.3（用户调到 8 后仍报 4.3） | 改用 `effectiveMaxMP(cfg)` |
+| 14 | `/image/progress` 每 1.5 秒**全量读 jobs.json**；且不回 warnings | 改为逐个 `store.get`；回传 `warnings` 与 `cropResolution` |
+
+### vendor 节点修复
+
+**16. 32 对齐会把 bbox 夹到比 mask 更小 → 贴边笔画被裁掉**
+源图宽 250（非 32 倍数）、mask 横跨全宽时：`min(align32(250), 250-(250%32))` = `min(256, 224)` = 224，
+于是**整图 mask 也只截到 224×224，边缘 12 像素被排除**，不报错。
+根因是把"采样画布要对齐"错误套用到"裁剪块"上 —— 真正必须 32 对齐的是喂给 VAE 的 `tw/th`（已对齐）。
+修法：裁剪块只受画布边界约束，对齐交给 `tw/th`。验证：250×250 全图 mask 现在 bbox = `(0,0,250,250)`。
+
+**17. bbox 类型协商**：空 bbox 会走 Python 负索引（`boxes[-1]`）静默取错位；文件内文档三处互相矛盾。
+修法：空 bbox 显式抛 `INPAINT_BAD_BBOX`；`source` 与 `mask` 尺寸不符抛 `INPAINT_STITCH_SIZE`（原来是静默用 mask 尺寸）。
+
+### Phase 4 多场景验收（8 场景 / 真实图片 / 全部通过）
+
+| 场景 | 源图 | 产物尺寸 | crop 分辨率 | 耗时 | mask 外差异 | 外>2% |
+|---|---|---|---|---|---|---|
+| A 小方块 400×300 | 2368×1776 | 2368×1776 ✅ | 608 | 57.6s | 0.025 | 0.28% |
+| B S形水流 | 2368×1776 | 2368×1776 ✅ | 1024 | 77.7s | 0.055 | 0.51% |
+| C 贴边 300×300 | 2368×1776 | 2368×1776 ✅ | 448 | 70.1s | 0.006 | 0.05% |
+| D 极小 50×50 | 2368×1776 | 2368×1776 ✅ | 256 | 57.6s | 0.016 | 0.14% |
+| E full 模式对照 | 2368×1776 | 2368×1776 ✅ | — | 95.1s | 4.167 | 59.30% |
+| F 横图椭圆 | 2560×1440 | 2560×1440 ✅ | 896 | 72.7s | 0.023 | 0.22% |
+| G 竖图 400×500 | 1600×2816 | 1600×2816 ✅ | 736 | 57.6s | 0.022 | 0.22% |
+| H 大选区 55% | 2368×1776 | 2368×1776 ✅ | 1024 | 50.1s | 0.000 | 0.00% |
+
+**关键结论**：
+- **所有场景尺寸都保持**，包括非 32 倍数的 2368×1776（ComfyUI 的 pad/unpad 对称）
+- `crop` 模式的 mask 外差异 **0.006–0.055**，>2 像素占比 **0.05–0.51%**（逐像素保真）
+- `full` 模式同 mask 下 **59.30%** 的选区外像素被改动 —— 这是该模式固有特性，不是 bug
+- 大选区（H）正确触发 warning 且**实际改动仍严格限制在选区内**（0.000 / 0.00%）
+
+### 新增冒烟断言（10 条）
+
+denoise 锁 1.0、强度档是 SplitSigmas、`strength` 非法值规范化、缺参报明确码、
+32 倍数与面积上限、mode 枚举、latent 必须来自 VAEEncode（不能用 zeros）、
+crop 注入 vendor 节点 + 羽化链、vendor 节点可探测、无未替换占位符、
+画笔算法契约（Catmull-Rom alpha=0.5 + remainder 续接）、
+MaskEditor 三层 canvas + 尺寸锁定 + 撤销栈按**内存预算**（不是固定步数）、
+InpaintPanel 不给 denoise 滑块、auto 分辨率按 bbox 长边（不缩小笔画）、
+大选区缩小有 warning、显式档位不被覆盖、
+**显存闸必须先判 `vram.ok`**、**REST 与工具层共用 mask 尺寸校验**、
+**padding 非法值兜底**、**只传 baseResolution 视为手动档**、
+**LoRA 节点类型探测**、**LoRA 缺省强度保留 undefined**、**超量 LoRA 有 warning**、
+**meta.maxMP 用生效值**、**progress 回传 warnings 且不全量读盘**。
+
+### 性能修复
+
+- `MaskEditor` 的 `refreshOverlay` 原来在**每个 pointermove** 都 `getImageData(0,0,W,H)`
+  （2048² = 16MB × 60Hz），实测拖动卡顿 → 覆盖率统计移出高频路径，
+  与 bbox/strokePixels 复用**同一次** `getImageData`。
+- 撤销栈从「固定 10 步」改为「**96MB 内存预算**」：
+  1024² 存 24 步、2048² 存 6 步、4096² 存 1 步（固定 10 步在 4096² 是 671MB，会拖死标签页）。
+
+---
+
+## 3.3.0 — 图像生成从「只有文本框」补齐到可用（2026-11-24）
+
+> 背景：H3-Image 的底层节点其实支持「文生图 + 最多 100 张参考图的编辑/融合 + 自动继承参考图尺寸」，
+> 但插件只用了其中一小部分 —— 前端只有「一个文本框 + 一个尺寸下拉 + 一个种子」，
+> 参考图、批量、LoRA、风格、进度全部丢在地上。本轮把这层接口补齐，同时修掉 3 个静默错误。
+
+### 修复：静默错误（P0）
+
+- **尺寸表里有 3 个档位不是 32 的倍数，实际出图与请求不符**（`services/h3-image.js`）。
+  节点按 `height//16` 取 latent、再按 `patch_size=(1,2,2)` 打块，非 32 倍数会被
+  `pad_to_patch_size` 补边 —— 实测请求 `2368×1776` 产出 **2368×1792**。
+  现在 `p-4x3`→`1792×2368`、`l-4x3`→`2368×1792`、`ecom-45`→`1824×2304`、`comic-page`→`1792×2368`，
+  并新增 `assertImageSizes()` 在启动/测试期自检（`mp` 与几何不符也报）。
+- **超长提示词被静默 `slice(0, 4096)`**（`normalizeImagePrompt` + `/image/generate`）。
+  这是"改了提示词却没生效"最隐蔽的形态：末尾那句"换成红色礼裙"被切掉，出图没变化且无报错。
+  现在路由层先校验，超长 → **400 `PROMPT_TOO_LONG`**（带 `chars`/`maxChars`），
+  `normalizeImagePrompt` 只断言不截断。前端也不再显示"会被截断"这种已知会撒谎的文案。
+- **`/image/meta` 回的步数与实际提交不符**。原先 `sampling.steps` 是常量 6，
+  而实跑读 `cfg.imageSteps`（夹 4–12）。现在新增 `effective` 段回真实生效值 +
+  `stepsOverridden`（配置是否覆盖了默认）。
+
+### 新增：参考图 / 编辑模式（此前前端完全没有入口）
+
+- 后端 `services/ref-images.js` 新增 `resolveImageEditRefs()` —— **保序、上限 16、
+  `image_1` = 被编辑的原图**。它与视频的 `resolveRefImages`/`planImageSlots`（9 槽 + 首尾帧保留）
+  **并列而不合并**：图像编辑的次序本身就是语义，按视频那套"角色卡优先"重排会把编辑对象换成别的图。
+- `MAX_IMAGE_EDIT_REFS = 16` 与 `MAX_REF_IMAGES = 9` 在同处声明并注明为何不是同一个概念。
+- 解析失败的参考图**不静默丢**：返回 `bad[]`（含失败原因），路由在请求期回 400/警告。
+- 前端新增参考图区：**拖拽 / 粘贴上传**（走 `/assets/upload`，不用 dataURL 撑爆 jobs.json）、
+  **缩略图 + 序号 + 上下移动 + 删除**，第 1 张打「编辑目标」角标，并提示可用 `<Picture N>` 引用。
+- 产物可「继续编辑这张」一键填回参考图第 1 位，形成迭代环。
+
+### 新增：批量出图
+
+- `count: 1..4`。**不是一次采样出 N 张** —— `comfy/ldm/minimax/model.py` 的
+  `MiniMaxH3ImageModel._forward` 硬性 `raise ValueError("MiniMax H3 supports batch size 1")`。
+  所以拆成 N 个独立任务，种子按 `seed+1` 递增（`splitBatchSeeds`），并回报 `jobIds[]` / `batchId`。
+- 新增 `GET /image/progress?ids=` 轻量轮询端点（只回 status / progress / 产物 rel，
+  比 `/jobs/:id` 小一个数量级 —— 后者含 prompt 全文与 221 参数快照）。
+
+### 新增：出图进度
+
+- `services/comfy-client.js` 新增 `queueStatus()`，`runWorkflow` 支持 `onProgress`。
+  单张 4.2MP 实测约 **148 秒**，此前这两分半里 UI 只有"进行中"三个字（history 只在跑完才出条目）。
+  现在分三态：排队（含前面还有几个）→ GPU 生成中 → 正在取回产物，写进 `job.params.progress`。
+  进度是尽力而为，写失败不影响出图。
+
+### 新增：图像 LoRA（独立于视频那套）
+
+- 新的 `services/h3-image-lora.js`：只保留图像真的有的 **5 个轴**
+  （画风 / 画质细节 / 角色 / 滑块 / 概念），**刻意不复用**视频的 11 类目 ——
+  视频那套里加速蒸馏 / 运镜 / 动作 / 音色在图像上都不存在
+  （H3-Image 的 DiT 是 H3 视频去掉 audio stream 的子类；且 Civitai 上图像加速 LoRA 数量为 0）。
+- 目录约定 `models/loras/h3img/<分类>/`：**只有这个前缀下的文件才会出现在图像页**。
+  这是唯一可靠的隔离手段 —— 图像与视频 LoRA 的 safetensors **键集完全相同**
+  （实测 416 键逐一相同，只有 rank 不同），光看文件名分不出来。
+- 求解器 `solveImageLoraStack`：画风/角色单选（回报"替换了谁"）、多挂类按 `stackDecay` 递减、
+  总强度 >1.5 警告 / >1.8 剔除最弱，外加两条图像特有冲突
+  （**画风 × 角色**、**角色 × 参考图**）。文件不在 ComfyUI 的 loras 列表里 → 组装期拒掉。
+- workflow **模板不加节点**：运行时注入 `LoraLoaderModelOnly`（节点号 40..45），
+  并把 `BasicScheduler.model` 与 `BasicGuider.model` **两处都改指向** ——
+  只改一处会变成"sigma 网格来自裸模型、去噪来自打了 LoRA 的模型"，不报错但画质悄悄变差。
+- 前端 `components/ImageLoraPicker.tsx`：分类分组 + 单选/多选 + 强度滑块 + 触发词提示；
+  约束规则**只走后端**（前端不重复实现衰减，避免漂移）。
+- 新增 `GET /image/lora/catalog`、`POST /image/lora/solve`。
+
+### 新增：自定义尺寸与参数面板
+
+- 宽高自定义（**必须成对 + 32 倍数 + 边长 ≥256**），前端实时校验，后端 `validateImageRequest` 再校验一次。
+- **不提供步数/guidance 滑块**，并在 UI 说明原因：`pdd_steps: 6` + `pdd_sigmas` 写死在
+  checkpoint 元数据里，6 步正好每步用一个 PDD 预测头；4/12 步属于分布外。`effective.samplingLocked` 表达这条约束。
+- 种子 + 复制上次参数；`sizeForPurpose()` 从死代码接上用途参数。
+
+### 实测验收（真机，w4a8 / RTX 4080 Laptop 12GB / ComfyUI 0.45.0）
+
+本轮改造在**真实 ComfyUI 上跑通了三组出图**（不是只跑单测）：
+
+| 场景 | 结果 | 耗时 | 关键验证 |
+|---|---|---|---|
+| 文生图 1024×1024 | ✅ PASS | 66.3s | 产物实测 **1024×1024**（32 倍数对齐后请求==产物）|
+| 编辑模式（1 张参考图）| ✅ PASS | 84.2s | `images.image_1` 真的接进去了，`refCount=1` |
+| 文生图 + 1 条 LoRA | ✅ PASS | 542.4s | 运行时注入的 `LoraLoaderModelOnly`（节点 40）被 ComfyUI 接受，`loraStack` 正确 |
+
+进度序列实测：`10% 已提交 → (15% 排队中) → 35% GPU 生成中 → 85% 正在取回产物`（排队那级在有两单时出现）。
+
+**验收带来的两个新发现（已写进代码与 UI）**：
+
+1. **量化底座上应当用 bypass 模式挂 LoRA**（本轮最重要的修正，依据是真机对照实测）。
+   改权重式 `LoraLoaderModelOnly` 在 w4a8 上每层都要
+   `dequantize → 加 LoRA → requantize_from_float`（`comfy/ops.py` 的
+   `convert_weight`/`set_weight` + `quant_ops`），416 个目标张量 × 50 层 × 6 步。
+   而且**随机重量化本身会给权重引入噪声** —— 这是画质问题，比速度更值得在意
+   （Civitai 上 `Artistic Solo Anatomy` 的作者对 NVFP4 底座给过同样警告：脸、头发、线稿会糊）。
+   → 改用 `LoraLoaderBypassModelOnly`（`comfy_extras/nodes_lora_debug.py`）：
+   `output = base_forward(x) + lora_path(x)`，**不碰基座权重**，
+   把 LoRA 作为前向钩子注入（`comfy/sd.py` 的 `load_bypass_lora_for_models` →
+   `BypassInjectionManager`），量化权重完全不需要反量化再重量化。
+   - 运行时探测节点是否可用；可用走 bypass，不可用**回退**改权重模式并在 `warnings` 说明代价；
+   - `meta.loraMode` 回报 `bypass` / `patch` / `none`，排障一眼看出走了哪条路；
+   - 新增冒烟守卫「量化底座必须走 bypass 注入」+「bypass 节点在 ComfyUI 里真的存在」，
+     防止以后为省事又改回 `LoraLoaderModelOnly`。
+
+**对照实测（w4a8 / 768×768 / 6 步 / 1 条 LoRA / 队列独占，三组各一次）**：
+
+| 模式 | 耗时 | 相对基准 |
+|---|---|---|
+| 无 LoRA | 69.2s | 基准 |
+| `LoraLoaderModelOnly`（改权重）| 123.8s | **×1.79** |
+| `LoraLoaderBypassModelOnly`（前向注入）| 87.8s | **×1.27** |
+
+> ⚠️ **修正一处早期数字**：首轮验收时我报过"w4a8 挂 LoRA 慢 8 倍（66s → 542s）"，
+> 那个 542s 是**受队列竞争污染**的测量（当时 ComfyUI 里还有另一个 5 图编辑任务在跑）。
+> 独占队列后的干净对照是 **×1.79 / ×1.27**。bypass 比改权重快 29%，但**不是免费**（×1.27 而非 ×1.0），
+> 代码与文档都已按实测值改写，不再声称"不影响速度"。
+
+2. **`auto` 尺寸在编辑模式下不一定是 2048**。传 256×256 参考图时节点用缩放后尺寸（短边 1024）当画布，
+   产物是 1024×1024，而 `meta.width/height` 会回 2048。现在加了 `sizeResolvedFrom: 'explicit'|'ref'|'default'`
+   让调用方知道该不该信这个数，UI 文案也改成"自动 + 参考图 = 继承第 1 张缩放后尺寸，想锁定请选具体档位"。
+
+### 内置 LoRA 实测（三个 H3-Image 画风 LoRA）
+
+安装到 `models/loras/h3img/30_style/` 并逐个实测（1024² / seed 7777 / 6 步）：
+
+| LoRA | 触发词 | 推荐强度 | 实测耗时 | 风格特征 |
+|---|---|---|---|---|
+| ningenmame | `@ningen_mame` | 0.8–1.2 | 233.7s | 线条细腻、平涂+柔渐变、绘师手绘感 |
+| Sweet Butter Cookie | 整句触发词（编辑型）| 1.0 | 246.3s | 极简粉彩、细节平化、可爱插画感 |
+| Anime Flat Style | 无 | 0.8–1.0 | 193.5s | 硬 cel-shading、大色块、无渐变 |
+
+基线（无 LoRA）同参数 80.3s。三个首次运行的额外耗时主要是 LoRA 冷加载，
+复跑降到 95–110s 量级。
+
+**两个必须记住的实测结论**：
+
+1. **Sweet Butter Cookie 是「编辑型」LoRA，不是纯画风**：必须给参考图当 `<Picture 1>`，
+   prompt 直接用作者给的那整句触发词。不给参考图基本失效。
+2. **它在源图背景是纯白/透明时会输出纯黑背景**。已做三组对照
+   （strength 0.7 / 1.0、显式尺寸 / auto）全部复现，
+   换成"舞台+幕布+木地板"的场景源图后背景**完整保留** ——
+   所以这是"源图是空背景"导致的，不是 LoRA 缺陷。要保留背景，源图必须有真实场景。
+
+**技术备注**：`Anime Flat Style` 用的是 kohya 键名（`lora_unet_blocks_*`，600 键），
+与另两个的 diffusers 格式（`diffusion_model.blocks.*`，416 键）不同；
+ComfyUI 的 `lora.py` 通用映射能正确转换，实测生效。
+但它**没有 token_refiner 的 16 个键**（另两个有），风格作用集中在主干 blocks。
+
+完整接口与 LoRA 使用手册见 `docs/H3-IMAGE-接口与LoRA使用手册.txt`（864 行）。
+
+### 追加 LoRA 实测（Artistic Solo Anatomy v0.2 + 3D Animations NSFW Helper）
+
+| LoRA | 底座 | 分类 | 触发词 | 强度 | 实测结论 |
+|---|---|---|---|---|---|
+| Artistic Solo Anatomy v0.2 | MiniMax H3 Image | img_quality | 无（自然描述）| 0.90 | ✅ **强烈推荐**，修好下体解剖且面部/手零退化 |
+| 3D Animations NSFW Helper | **MiniMax H3（视频）** | img_inbox | 无 | — | ⚠️ 能加载有效果，但**破坏画面**，不推荐 |
+
+**Artistic Solo Anatomy v0.2 是本轮最有价值的发现**：它解决 H3-Image 的一个真实缺陷 ——
+原生模型会把女性下体画成"平滑化的丘状团块"，没有解剖结构。同 seed 同提示词对照：
+
+- 无 LoRA：下体是不成形团块，无阴唇轮廓（82.9s）
+- Artistic @0.90：清晰、自然、对称的解剖结构；面部更精致、五指完整、painterly 质感提升（82.8s）
+- **耗时几乎相同** → 属"精修"而非"重绘"，开销可忽略
+
+它是 img_quality（画质）分类，**可与画风 LoRA 叠加**。
+推荐组合：画风 @0.8 + Artistic @0.9 = 总强度 1.7（安全，未踩 2.0 红线）。
+
+**3D Animations NSFW Helper 的结论需要特别说明**：它的底座是 `minimax_h3`（视频模型），
+作者自述"trained video and audio"、只覆盖 `blocks 24–49`（跳过前 24 层语义层）、
+无 token_refiner。严格对照实测（同 seed 55555）：
+
+| 对比 | 平均像素差 | 可见差异 |
+|---|---|---|
+| 无 LoRA vs @0.80 | 28.3 | 66.1% |
+| 无 LoRA vs @1.00 | 35.1 | 76.1% |
+| **@0.80 vs @1.00** | **15.4** | **55.8%** |
+
+→ **它确实被加载并生效**（强度 0.8↔1.0 有 55.8% 差异是铁证）。
+→ **但效果是破坏性的**：@1.00 时礼服被改成简化吊带短裙、手臂出现解剖畸变。
+→ 它跑得更快（92.9s vs 175.9s）是因为只覆盖后 26 层 + bypass 不改前段权重，
+  **不是**"被跳过所以快"。
+
+**同时更正一处早期错误结论**：之前采纳的"H3-Image 与 H3 视频 LoRA 键集 416/416 完全一致、
+可通用"不准确 —— 那是比对"两个 LoRA 文件之间"，没有比对**底座 checkpoint**。
+实测底座维度：图像 qkv `[21504, 2688]` / 视频 qkv `[21504, 5376]`，
+图像 DiT 的 in_features 只有视频的一半。**能加载 ≠ 语义正确**。
+
+### 前端页面
+
+`ImagePage.tsx` 重写：模型状态（真实生效值）→ 参考图（拖拽/排序/编辑目标角标）→ 提示词（超长拦截）→
+输出设置（尺寸/自定义宽高/种子/批量）→ LoRA 面板 → 本次任务（进度条 + 九宫格 + 下载全部）→ 预览（继续编辑）。
+
+### 新增：局部重绘（Inpainting，Phase 1 后端 + Phase 2 前端画笔）
+
+完整调研与方案见 `docs/INPAINT-RESEARCH.md` / `docs/INPAINT-PLAN.md`。
+
+**核心发现（与主流 inpaint 经验相反）**：H3-Image 上**不能用 denoise 控制改动强度**。
+checkpoint 的 PDD 只有 6 个预测头、对应 7 点 sigma 网格；`BasicScheduler` 在 `denoise<1` 时
+`total_steps = int(6/denoise)`，实测 denoise=0.5 → 只剩 3 个头工作（跳过 3,4,5），
+出图表现为"区域被抹平、不按提示词生成"——不是"改得更少"。
+→ **denoise 锁定 1.0，不可配置**；改动强弱改用 `SplitSigmas` 切片（4 档：full/strong/medium/light），
+实测 mask 内差异 121.2 / 86.0 / 50.4 / 28.1，单调递减且每档都在网格上。
+
+**两条链路**：
+
+| 模式 | mask 外保真（实测差异） | 适用 |
+|---|---|---|
+| `crop`（crop & stitch，默认） | **0.005（>2 像素占比 0.00%）** | 精细局部，逐像素保真 |
+| `full`（全图 latent 混合） | 3.4（4.5%） | 大范围改，兜底 |
+
+**新增 vendor 包** `vendor/inpaint-nodes/`（GPL-3.0，源自 KJNodes，**随插件分发**）：
+`JZImageCropByMaskAndResize`（mask→bbox→裁剪缩放）+ `JZImageUncropByMask`（按 bbox 贴回）。
+与上游的 4 处差异：**尺寸对齐 16→32**（H3-Image 硬要求）、bbox 收敛为 xyxy、
+空 mask 明确报错、**去掉 kornia/scipy 依赖**。
+→ 图像 inpaint 链路**不再依赖外部 KJNodes**。
+
+**羽化**用纯核心节点（不引入新依赖）：
+`GrowMask(expand=16) → MaskToImage → ImageBlur(radius=31, sigma=10) → ImageToMask`。
+实测接缝梯度：blur=8 → 22.22（可见硬边）、blur=31 → 5.48（视觉无接缝）。
+
+**前端**（Phase 2）：
+- `lib/brush.ts` —— 从 ComfyUI 官方 mask editor **移植核心算法**：
+  Catmull-Rom 中心化样条（alpha=0.5，防快速甩笔打结）+ 按间距重采样 + `remainder` 跨段续接
+  （这是连续笔画不断点的关键）+ 径向渐变笔刷 + LRU 纹理缓存。
+  官方是 Vue + GPU shader，这里改成纯 Canvas 2D + TypeScript。
+- `components/MaskEditor.tsx` —— **三层 canvas**：底图 / mask（数据层，透明）/ 红覆盖（视觉层）。
+  拆三层是因为 mask 必须是干净的灰度图（白=重绘），红色只是给人看的，
+  画进 mask 就不是合法 mask 了。含撤销栈（上限 10 步防内存爆）、笔刷大小/硬度、涂抹/擦除。
+- `components/InpaintPanel.tsx` —— 源图选择 → 涂抹 → 提示词/模式/强度 → LoRA → 结果。
+  显式不提供 denoise 滑块并说明原因；crop 不可用时禁用并给部署提示。
+- `ImagePage` 改为 **Tabs 双链路**（文生图/参考图编辑 | 局部重绘）——
+  状态完全隔离，避免"把 mask 误当参考图提交"。
+
+**新增路由**：`GET /image/inpaint/meta`、`POST /image/inpaint`
+**新增工具**：`studio_image { action: 'inpaint' }`（meta 里也带 `inpaint` 能力段）
+
+**验收中抓到的真实 bug**：inpaint 走 `runWorkflow({ map: {} })` 而模板有 `{{VAE_NAME}}` 等占位符，
+普通出图有 map 所以不报，只有 inpaint 报 `value_not_in_list`。已改为把模型名内联进节点，
+并补冒烟断言「workflow 不含未替换的 {{占位符}}」防回归。
+
+### 新增：局部重绘 Phase 3（crop 分辨率档位 + auto 算法）
+
+**crop 模式暴露出一个隐藏参数：`baseResolution`（重绘分辨率）。**
+裁剪块会被缩放到这个尺寸再送进模型，所以它直接决定细节保留程度。
+自由滑块会让用户不知道填多少，所以做成 5 档：`auto` / 512 / 768 / 1024 / 1280。
+
+**auto 档的算法修正过一次（有实测依据）**：
+
+第一版按「笔画总面积」反推：`base_res = sqrt(笔画像素) × 2`。**这是错的。**
+
+以 S 形笔画为例（71,679 px，bbox 1024×469，笔画宽约 70px）：
+
+| 配置 | 笔画核心改动 | 笔画边缘差异 | 笔画外溢出 |
+|---|---|---|---|
+| 旧 auto 544² | 26.46 | **11.43** | **3.82%** |
+| 固定 1024² | 24.34 | **5.53** | **0.36%** |
+
+旧公式给 544²，意味着 bbox 长边要**缩小 0.53 倍**，70px 宽的笔画降到 37px，
+再经 latent 16× 下采样只剩 2.3 latent px → **细线被糊掉**。
+核心改动只强 8%，但边缘差异差 2 倍、外溢差 10 倍。根因：只看总面积，**没看笔画宽度**。
+
+**修正后的语义**：`base_res = max(bbox_w, bbox_h) × 1.5`，保证**缩放比 ≥ 1（笔画不被缩小）**。
+
+实测验证修正后的行为：
+
+| 场景 | bbox | auto 结果 | 判定 |
+|---|---|---|---|
+| S 形（大 bbox） | 1024×469 | **1024**（与固定档一致） | ✅ 不再缩小 |
+| 小选区 | 300×200 | **448**（1.49× 放大） | ✅ 正确放大 |
+| 小选区耗时 | — | auto 70.3s vs 固定 85.1s | ✅ 更快 14.8s |
+
+**小选区的实际效果对比（决定性证据）**：同样画「一块蓝色水晶」，
+- `1024²`（放大 3.4×）：水晶**盖在**裙子上，把裙摆结构遮掉，边缘生硬
+- `448²`（放大 1.49×）：水晶**嵌在**裙摆褶皱里，有层次、自然融合
+
+→ 「改动强度」指标（1024 是 104.99，auto 是 91.78）反而误导：**数值高 ≠ 画质好**，
+过度放大让模型倾向"画个大东西填满"。
+
+**大选区的硬限制也要告知**：bbox 2000×1500 时，即使顶到 maxCrop 1024，
+缩放比仍是 0.51×，细节必然损失。这不是 bug 是面积上限的必然结果 ——
+所以 `resolveCropResolution` 会写 warning 进 job，前端能看到，不静默。
+
+**新增**：`GET /image/inpaint/meta` 增加 `resolutions` / `autoScale` / `resolutionHint`；
+`POST /image/inpaint` 接受 `bboxW`/`bboxH`/`strokePixels`/`crop.resolutionId`，返回 `cropResolution`/`warnings`。
+前端 MaskEditor 导出 mask 时**全量扫 alpha 算精确 bbox**（不采样，避免漏掉单像素宽的笔画端点）。
+
+### 测试
+
+`tools/smoke-api.mjs` 从 208 项增到 **245 项**，新增 37 条钉住本轮契约：
+尺寸表 32 倍数自检（含"自检本身有效"的反向用例）、超长 400、`normalizeImagePrompt` 不截断、
+自定义宽高校验、批量拆 seed、参考图 16 上限 + 保序 + bad 回报、
+图像 LoRA 目录隔离（视频 LoRA 不混入）/ 画风单选 / 衰减 / 过曝剔除 / 画风×角色告警 / 文件缺失组装期拒掉、
+`/image/meta` 回真实生效值、图像页必须有参考图入口、LoRA 面板约束只走后端；
+**局部重绘 15 条**：denoise 锁 1.0、强度档是 SplitSigmas、缺参报明确码、32 倍数与面积上限、
+mode 枚举、latent 必须来自 VAEEncode（不能用 zeros）、crop 注入 vendor 节点 + 羽化链、
+vendor 节点可探测、无未替换占位符、画笔算法契约、MaskEditor 三层 canvas + 尺寸锁定、
+InpaintPanel 不给 denoise 滑块、**auto 分辨率按 bbox 长边算（不缩小笔画）**、
+**大选区被缩小时有 warning**、**显式档位不被 auto 覆盖**。
+另有 gitignore 白名单兜底断言（防 data/ 新目录漏项）。
+
+---
+
 ## 3.2.0 — 全量审计：安全与静默失败缺陷全修 + 重构补丁清理 + 运行时数据清空（2026-11-23）
 
 > 一次性彻底审计：按模块逐文件审阅 6 个分区（入口/REST、桥接层、服务与存储、前端、vendor 与

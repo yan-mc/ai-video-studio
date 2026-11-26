@@ -1,11 +1,12 @@
 /**
- * H3 生成执行器 —— **单一实现**，被 REST 与 Agent 工具共用。
+ * H3 生成执行器 —— 单一实现，REST 与 Agent 工具共用。
  *
- * 之前 tools.js 与 api/index.js 各写了一份，tools.js 那份漏了 6 个模型/LoRA 占位符
- * 导致 Agent 调用必失败（审查 G7）。现在统一到这里，杜绝再次漂移。
+ * 三条路径：
+ *   `runH3Nanfeng`     南风 V15（默认视频后端）
+ *   `runH3ImageLocal`  H3-Image（文生图 / 参考图编辑 / LoRA）
+ *   `runH3Local`       原生节点模板（`workflows/h3.json`），canvas 的 h3-local 后端
  */
 import path from 'node:path';
-import fs from 'node:fs';
 import { loadConfig } from '../config.js';
 import { PROFILES, resolutionFor, h3Length } from '../store/models.js';
 import {
@@ -13,6 +14,7 @@ import {
   resolveMediaEntries as resolveMediaEntriesCore,
   resolvePrevizArtifacts as resolvePrevizArtifactsCore,
   planImageSlots as planImageSlotsCore,
+  resolveImageEditRefs,
   MAX_REF_VIDEOS,
   MAX_REF_AUDIOS,
 } from './ref-images.js';
@@ -20,7 +22,7 @@ import * as comfy from './comfy-client.js';
 import { decideRefImageSize } from './render-plan.js';
 import { NodeGraph } from './h3-graph.js';
 import { planForShot, resolveAccelForFiles, checkSteps, DEFAULT_ACCEL_PLAN } from './accel-plan.js';
-import { solveLoraStack, baseNameOf } from './lora-catalog.js';
+import { solveLoraStack, baseNameOf, clampSignedStrength } from './lora-catalog.js';
 
 /**
  * H3 模型文件名。
@@ -38,8 +40,8 @@ const MODEL_DEFAULTS = Object.freeze({
   UNET_FL2V: 'minimax_h3_fl2va_pruned_fp8_scaled.safetensors',
   CLIP: 'qwen3vl_32b_minimax_h3_int8_convrot.safetensors',
   VAE: 'minimax_h3_video_vae_fp16.safetensors',
-  // H3 是音画同步模型：采样器输出的是 AV latent，音轨要从 audio VAE 解出来。
-  // 早先工作流只接了视频 VAEDecode，音轨被整个丢弃（产物没有音轨）。
+  // H3 是音画同步模型：采样器输出的是 AV latent，音轨必须从 audio VAE 解出来，
+// 只接视频 VAEDecode 会把音轨整个丢掉。
   AUDIO_VAE: 'minimax_h3_audio_vae_fp32.safetensors',
   // LoRA 由加速方案（accel-plan.js）给出，这里只是 ComfyUI 列表探测用的默认名。
   // 实际用哪个见 planForShot() 的返回；这两项保留是为了 resolveModelNames 的键完整。
@@ -78,8 +80,7 @@ export function pickModelName(want, available) {
 /**
  * 解析一组模型名（原始常量 → 实际可用名）。
  *
- * 可用列表由调用方给（通常来自 ComfyUI 的 object_info）；
- * 拿不到列表时原样返回默认值，行为与旧实现一致。
+ * 可用列表由调用方给（通常来自 ComfyUI 的 `object_info`）；拿不到时原样返回默认值。
  */
 export function resolveModelNames(cfg = loadConfig(), available = {}) {
   const override = cfg?.modelNames && typeof cfg.modelNames === 'object' ? cfg.modelNames : {};
@@ -94,8 +95,8 @@ export function resolveModelNames(cfg = loadConfig(), available = {}) {
 /**
  * 参考视频 / 音频解析失败时写一条 job 警告（不静默）。
  *
- * 静默丢素材是这个仓库历史上最顽固的失败模式：用户看到镜头上"已挂上"、
- * 提示词里也有 `<Video 1>`，出片却完全不受它约束，且任何日志都不说。
+ * 静默丢素材是最顽固的失败模式：镜头上"已挂上"、提示词里也有 `<Video 1>`，
+ * 出片却完全不受它约束，任何日志都不说。
  */
 function warnMissingMedia(job, shot, cfg = loadConfig()) {
   const miss = [
@@ -109,39 +110,17 @@ function warnMissingMedia(job, shot, cfg = loadConfig()) {
 
 
 /**
- * 把角色卡的文字设定注入提示词。
+ * 把角色卡的文字设定注入提示词（参考图只说"长什么样"，不说"这是谁"）。
  *
- * 为什么需要：参考图只告诉模型"长什么样"，不告诉它"这是谁、叫什么"。
- * 多角色同框时更容易串脸。
+ * 编号：`refList` 就是提交顺序，但首/尾帧占用槽位，所以第 i 张的 `<Picture N>`
+ * 必须经 `pictureIndexMap` 换算，**不能**用 `i + 1`。
  *
- * 编号规则（必须与 ComfyUI 的呈现一致）：
- *   Ref2VA 里参考图按 ref_images 的顺序编号为 <Picture 1>..<Picture N>，
- *   我们的 refList 就是提交顺序，所以第 i 张（1-based）对应 <Picture i>。
- *   但首/尾帧会占用一部分槽位（见 planImageSlots），所以最终编号要用
- *   `pictureIndexMap` 换算，不能直接用 i+1。
+ * 铁律：**绝不覆写**已有的 `subject_definitions`。
+ *   已有该字段 → 一个字都不动，只在末尾追加英文 `Additional reference bindings`；
+ *   完全没有 → 前置一段**英文**定义。所有新增文本一律英文，与 h3-prompt 一致。
  *
- * ============================================================================
- * 铁律：绝不覆写模型已经写好的 subject_definitions
- * ============================================================================
- *
- * 历史实现（P0）只要"卡名没出现在提示词里"就整段替换 `subject_definitions:`，
- * 而智能分镜用英文名（`Chika`）、角色卡用中文名（`三角初华`）——
- * 判据几乎恒 false，于是**每一次生成都会**：
- *
- *   · 把官方英文 `<Subject N> is the visual content referenced from <Picture N>...`
- *     整段替换成中文「三角初华：外观以 <Picture 1> 为准」
- *   · 顺带吃掉同一段里的 `<Video N>` / `<Audio N>` 定义句
- *   · 净删数百字符已校验过的官方内容，产出中文正文
- *     （违反 h3-prompt.js 的第 1 条铁律：正文必须英文）
- *
- * 而 `lintCompiledPrompt` 跑在**编译期**，注入发生在**提交期**，
- * 中文没人检查得到 —— 这是"提示词明明写得很好、出片却不像"的一个直接来源。
- *
- * 现在的规则：
- *   1. 提示词里**已有** `subject_definitions:` → 一个字都不动，只在缺失卡时
- *      追加一行英文 `Additional reference:`。
- *   2. 完全没有这个字段 → 前置一段**英文**定义。
- *   3. 所有新增文本一律英文，与 h3-prompt 的输出语言保持一致。
+ * 覆写会吃掉 `<Video N>` / `<Audio N>` 定义句并产出中文正文；而
+ * `lintCompiledPrompt` 跑在编译期、注入在提交期，中文没人检查得到。
  */
 function injectCardDefinitions(prompt, refList, shot, pictureIndexMap = null) {
   const text = String(prompt ?? '');
@@ -214,29 +193,18 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
   const refList = resolveRefImagesCore(shot, cfg);
   const previz = resolvePrevizArtifactsCore(shot, cfg);
 
-  // 角色卡的文字设定注入提示词。
-  // 关键：把"这张卡是第几张参考图"算准，模型才知道该看哪张。
+  // 角色卡的文字设定注入提示词 —— 必须把"这张卡是第几张参考图"算准
   const finalPrompt = injectCardDefinitions(prompt, refList, shot);
 
-  // 参考图 + 首尾帧 + 视频 + 音频统一 staging（文件名带 jobId，多镜头不互相覆盖）
-  //
-  // ⚠️ ComfyUI 的 LoadVideo / LoadAudio 和 LoadImage 一样，**只认 input 目录内的文件名**，
-  //    传绝对路径会报 Invalid file。所以视频/音频也必须先 stage。
-  //
-  // ⚠️ 必须读 `shot.refs.videos` / `shot.refs.audios`。
-  //    历史上这里写的是 `shot.videos`，而镜头卡上从来没有这个顶层字段 ——
-  //    于是视频/音频恒为空，`视频1..3` 永远是「未选择」，
-  //    3D 预演的白模参考视频整条链路在提交阶段被静默丢弃。
   /**
-   * 参考视频/音频：编号 = **挂载顺序的槽位号**（下标 + 1）。
+   * 参考图 + 首尾帧 + 视频 + 音频统一 staging（文件名带 jobId，多镜头不互相覆盖）。
    *
-   * 两个必须同时满足的约束：
+   * ComfyUI 的 LoadVideo / LoadAudio 和 LoadImage 一样只认 input 目录内的文件名。
+   * 视频/音频编号 = **挂载顺序的槽位号**（下标 + 1），两条约束：
    *   1) `index` 必须显式赋值 —— 下游按 `ref_videos.ref_video_${v.index}` 拼输入名，
-   *      漏赋值会让所有素材塌缩成 `ref_video_undefined`（ComfyUI 的 AUTOGROW
-   *      输入允许多余/缺失键，因此不会报错，只会静默失效）。
-   *   2) 不能先 `.filter(v => v.abs)` 再重排 index —— 提示词里的 `<Video N>` 是
-   *      按挂载顺序写的，压缩数组会让第 3 段前移成第 2 位，指令与实物错位。
-   *      缺失项保留（abs=''），下游 `staged[v.key]` 为空即表示"该槽位留空"。
+   *      漏赋值会让所有素材塌缩成 `ref_video_undefined`（AUTOGROW 不报错，只静默失效）。
+   *   2) 不能先 filter 缺失项再重排 index —— 压缩数组会让第 3 段前移成第 2 位，
+   *      而提示词里写的还是 `<Video 3>`。缺失项保留（abs=''）即表示该槽位留空。
    */
   const videoEntries = resolveMediaEntriesCore(shot.refs?.videos, cfg)
     .slice(0, MAX_REF_VIDEOS)
@@ -549,12 +517,38 @@ export async function runH3Local({ workflow, job, shot, prompt, cfg = loadConfig
 /* ============================================================ 图像生成 */
 
 /**
- * 执行一次 H3-Image 生成（文生图 / 参考图编辑）。
- * 与视频共用 Qwen3-VL 编码器，只换扩散模型 + 图像 VAE。
+ * 执行一次 H3-Image 生成（文生图 / 参考图编辑 / LoRA）。与视频共用 Qwen3-VL 编码器，
+ * 只换扩散模型 + 图像 VAE。
+ *
+ * 参考图来源只有两条，**都走图像语义**（保序、≤16、不去重合并）：
+ *   `job.params.imageRefs`（路由层已用 `resolveImageEditRefs` 解析）
+ *   `shot.refs.images`（立绘拆解 / 画布 Agent 这类"参考图集合"调用方）
+ *
+ * 绝不能回退到 `resolveRefImages`：那是视频语义（角色卡优先、≤9），
+ * 会把 `image_1`（被编辑原图）换成角色卡立绘，且超过 9 张的部分静默丢失。
  */
-export async function runH3ImageLocal({ workflow, job, prompt, shot, cfg = loadConfig(), onSubmitted }) {
+export async function runH3ImageLocal({ workflow, job, prompt, shot, cfg = loadConfig(), onSubmitted, onProgress }) {
   const { runH3Image } = await import('./h3-image.js');
   const params = job.params ?? {};
+
+  let refImages = Array.isArray(params.imageRefs) ? params.imageRefs : [];
+  if (!refImages.length) {
+    const fromShot = Array.isArray(shot?.refs?.images) ? shot.refs.images : [];
+    if (fromShot.length) {
+      const parsed = resolveImageEditRefs(fromShot, cfg);
+      refImages = parsed.ok.map((r) => r.abs);
+      if (parsed.bad.length) {
+        job.warnings = [...(job.warnings ?? []),
+          `有 ${parsed.bad.length} 张参考图解析失败（已跳过，实际使用 ${refImages.length} 张）：`
+          + parsed.bad.map((b) => `${b.input}（${b.reason}）`).join('、')];
+      }
+      if (parsed.dropped > 0) {
+        job.warnings = [...(job.warnings ?? []),
+          `参考图超出图像编辑上限 ${parsed.max} 张，已丢弃 ${parsed.dropped} 张。`];
+      }
+    }
+  }
+
   return runH3Image({
     workflow,
     job,
@@ -563,8 +557,11 @@ export async function runH3ImageLocal({ workflow, job, prompt, shot, cfg = loadC
     sizeId: params.imageSizeId ?? shot?.imageSizeId ?? 'auto',
     width: params.width,
     height: params.height,
-    refImages: resolveRefImagesCore(shot ?? {}, cfg).map((r) => r.abs),
+    refImages,
+    count: params.count ?? 1,
+    loras: Array.isArray(params.imageLoras) ? params.imageLoras : [],
     onSubmitted,
+    onProgress,
   });
 }
 
@@ -578,22 +575,13 @@ export function jobKind(job) {
 /**
  * 用南风 V15 节点执行一次 H3 视频生成。
  *
- * ============================================================================
- * 与 runH3Local 的区别
- * ============================================================================
+ * 与 `runH3Local` 的分工：后者加载 `workflows/h3.json` 模板做占位符替换；
+ * 这里把镜头卡翻译成 221 个参数，由南风节点的 GraphBuilder 展开成图。
+ * 模型加载、条件编码、采样、放大、解码全封在节点内部，后端只管
+ * 选预设 / 传参 / 接输出 / 轮询。
  *
- *   runH3Local（旧）  ：加载 data/workflows/h3.json 模板 → {{占位符}} 替换 → 提交
- *   runH3Nanfeng（新）：镜头卡 → 221 参数 → 南风节点内部 GraphBuilder 展开 → 提交
- *
- * 南风节点把所有模型加载、条件编码、采样、放大、解码都封在节点内部，
- * 我们的后端只负责：① 选预设 ② 传参 ③ 接输出节点 ④ 轮询结果。
- *
- * ============================================================================
- * 必须先 stage 素材
- * ============================================================================
- *
- * 南风的素材槽位（图片1-9 / 视频1-3 / 音频1-3）接受的是 **ComfyUI input 目录
- * 内的文件名**，不是绝对路径。所以和旧实现一样，先把文件复制进 input。
+ * 素材槽位（图片1-9 / 视频1-3 / 音频1-3）只认 **ComfyUI input 目录内的文件名**，
+ * 所以必须先 stage。
  *
  * @param {object} opts
  * @param {object} opts.job
@@ -624,23 +612,12 @@ export async function runH3Nanfeng({
    * 1) 加速方案（DMAD）—— 映射到南风参数
    * ==================================================================
    *
-   * ⚠️ 历史缺陷：这一段**完全缺失**。
-   *    `runH3Local` 有完整的 accel-plan 接线，但 `runH3Nanfeng` 是从它复制来的，
-   *    复制时漏了这一段（连同 previz 消费端 —— 同一处漏了两个）。
+   * 优先级：job 显式 > 镜头卡 > 配置默认 > 内置默认。
    *
-   * 后果很严重但不报错：所有预设都是 `采样器: lcm` + 4-10 步，
-   * 却**不挂 DMAD LoRA** —— 等于用 LCM 采样器跑未蒸馏的 50 步原模型再硬压到 4 步。
-   * 这正是 accel-plan.js 注释反复警告的「分布外」，也是出片质量差的主因。
-   * 实测佐证：历史请求 _baseline-request.json / _final.json / _e2e-seg1.json
-   * 全部是 `启用LoRA=False, LoRA1=未选择, 采样器=lcm`。
-   *
-   * ⚠️ 南风 V15 的 LoRA 是**独立槽位**语义（h3_generator.py:1438-1439
-   *    `individual_lora_slots=True, strict_lora_opt_in=True`）：
-   *      · `启用LoRA` 总开关**无效**（:2063 的早退只对 individual=False 生效）
-   *      · 真正生效的是 `LoRA{n}启用` + `LoRA{n}` + `LoRA{n}强度`
-   *    所以必须同时写 `启用LoRA`（语义一致，便于排查）和 `LoRA1启用=true`（真正生效）。
-   *
-   * 优先级与 runH3Local 一致：job 显式 > 镜头卡 > 配置默认 > 内置默认。
+   * 南风 V15 的 LoRA 是**独立槽位**语义（`individual_lora_slots=True`）：
+   *   · `启用LoRA` 总开关对 V15 无效（早退只对 individual=False 生效）
+   *   · 真正生效的是 `LoRA{n}启用` + `LoRA{n}` + `LoRA{n}强度`
+   * 所以两套都要写：`启用LoRA` 保持语义一致便于排查，`LoRA1启用` 才是生效的那个。
    */
   const accelId = job.params?.accelPlan
     ?? shot.accelPlan
@@ -650,14 +627,11 @@ export async function runH3Nanfeng({
   /**
    * 先问 ComfyUI 真实装了哪些 LoRA，再决定加速方案用哪个文件。
    *
-   * ⚠️ 为什么要探测而不是直接用写死的文件名：
-   *    方案里的 `lora` 是**导出那一刻的目录快照**。用户换机、重命名、
-   *    或只装了一个学生时，写死的名字在 ComfyUI 里不存在 ——
-   *    轻则 `/prompt` 阶段 value_not_in_list（错误信息只有一个文件名），
-   *    重则 sanitize 把它回退成「未选择」→ 蒸馏栈变空 →
-   *    4/8 步跑在未蒸馏原模型上，**能出片但质量悄悄崩**（最坏的失败模式）。
-   *
-   *    探测失败（ComfyUI 不可达）时返回 null，退回按声明名提交并告警。
+   * 方案里的 `lora` 只是导出那一刻的目录快照。用户换机、重命名或只装了一个学生时，
+   * 写死的名字在 ComfyUI 里不存在：轻则 `/prompt` 阶段 value_not_in_list
+   * （错误信息只有一个文件名），重则 sanitize 把它回退成「未选择」→ 蒸馏栈变空 →
+   * 4/8 步跑在未蒸馏原模型上，能出片但质量悄悄崩。
+   * 探测失败（不可达）时返回 null，退回按声明名提交并告警。
    */
   let loraFiles = null;
   try {
@@ -695,10 +669,8 @@ export async function runH3Nanfeng({
   /**
    * 把加速方案翻译成南风参数覆盖。
    *
-   * 注意 `shiftVideo/shiftAudio` **没有对应参数** —— 南风 V15 的
-   * `视频西格玛偏移` / `音频西格玛偏移` 全部挂在 `sigma_requested` 恒 False
-   * 的分支下（h3_generator.py:1687/1706），改了没反应。
-   * 这是上游限制，不是本插件能修的；在这里记录一条警告让用户知道。
+   * `shiftVideo/shiftAudio` 通过 `视频西格玛偏移` / `音频西格玛偏移` 生效，
+   * 必须同时置 `启用西格玛调节` 并显式选「原生轨迹」策略。
    */
   function accelOverrides() {
     const out = {};
@@ -706,18 +678,17 @@ export async function runH3Nanfeng({
     out['调度器'] = accel.scheduler;
     out['采样步数'] = steps;
     /**
-     * ⚠️ shift 必须真的传下去。
+     * shift 必须真的传下去。
      *
-     * DMAD 4step / 8step 都是在 **video shift 12 / audio shift 2** 上训练的
-     * （两个 .safetensors 的 `__metadata__.sampling` 里写着原文，可直接读文件核对）。
+     * DMAD 4step / 8step 都是在 video shift 12 / audio shift 2 上训练的
+     * （两个 .safetensors 的 `__metadata__.sampling` 里写着原文，可直接读文件核对），
      * 而 ComfyUI 的 `MiniMaxH3` 模型自带 12 比 3 —— 那是未蒸馏原模型的标定值。
      *
-     * 用错 shift 不会报错，只是整条采样轨迹落在学生没见过的分布外：
-     * 画面能出，但质感与动态会悄悄变差。这是"看起来成功了其实不对"的典型。
+     * 用错 shift 不报错，只是整条采样轨迹落在学生没见过的分布外：
+     * 画面能出，但质感与动态会悄悄变差。
      *
-     * 以前这里没传，因为 vendor 把 sigma 分支写死 False（SigmaShift 节点根本不插）。
-     * 本轮改了 vendor：`启用西格玛调节` 现在真的会插入 MiniMaxH3SigmaShift，
-     * 且 `Sigma策略=原生轨迹` 时**只设 shift、不改步网格** —— 正是蒸馏学生要的形态。
+     * vendor 的 `启用西格玛调节` 会真的插入 MiniMaxH3SigmaShift，
+     * 且 `Sigma策略=原生轨迹` 时只设 shift、不改步网格 —— 正是蒸馏学生要的形态。
      */
     if (accel.shiftVideo != null || accel.shiftAudio != null) {
       out['启用西格玛调节'] = true;
@@ -735,61 +706,58 @@ export async function runH3Nanfeng({
   const accelParams = accelOverrides();
 
   /**
-   * ============================================================================
-   * LoRA 栈装配 —— 加速学生占 1 号槽，其余槽位留给语义 LoRA
-   * ============================================================================
+   * 种子 —— 必须真正透传到 `随机种子`。
    *
-   * 南风 V15 有 8 个 LoRA 槽（`LoRA1..LoRA8`），每个有独立的
-   * `LoRA{n}` 文件 + `LoRA{n}启用` 布尔 + `LoRA{n}强度`。
-   * 注意：`启用LoRA` **总开关在 V15 上是死的**
-   * （h3_generator.py:2063 的早退只对 individual=False 生效，V15 恒 individual）。
+   * 优先级：`job.params.seed`（路由层写入，用户填的）> 镜头卡 `shot.seed`。
+   * 都不存在时不写这个键，交给南风 schema 默认值（`470115107471061`）。
    *
-   * 业界做法（已核实）：
-   *   · 加速 LoRA（DMAD/Turbo/PDMD）= **学生本体**，强度恒 1.0，**永不衰减**
-   *     （官方原话 "the LoRA is the distilled student, not a style"）
-   *   · 语义 LoRA（风格/动作/画质/角色）才需要压强度：
-   *       - 单独挂：0.6–1.0（Comfy-Org 官方建议从 0.7 起调）
-   *       - 两个同向（都是锐化/写实）：各 ~0.50
-   *       - 两个正交（一个风格一个动作）：各 ~0.71
-   *     ComfyUI 链式叠加是**加法**，两个 1.0 叠起来会 >1 过曝。
-   *   · 链序：LoRA 全部串完后才进 shift / sampler。
-   *     南风的 GraphBuilder 已经是这个顺序（h3_generator.py:1440-1446 在
-   *     SigmaShift 之前串 LoRA），我们只要保证槽位填对。
-   *
-   * ⚠️ 加速学生必须放 **LoRA1**：
-   *    `_enabled_lora_stack()` 按 1→8 顺序串，而加速学生要对全部后续
-   *    语义 LoRA 的权重偏移都生效（它是新的基座）。放后面会让语义 LoRA
-   *    叠加在"未蒸馏权重"上，再被学生覆盖 —— 语义效果被冲掉。
+   * 写进 `extraParams` 是唯一生效路径：`buildShotWorkflow` 的 `extraParams` 是
+   * 最高优先级层，而 `buildShotOverrides` 只读 `shot.seed`（镜头卡模型里没有这个字段）。
    */
+  const seedFromJob = Number(job.params?.seed);
+  const seedFromShot = Number(shot?.seed);
+  const seedValue = Number.isFinite(seedFromJob) && job.params?.seed !== null
+    ? seedFromJob
+    : (Number.isFinite(seedFromShot) && shot?.seed !== null ? seedFromShot : null);
+  if (seedValue != null) {
+    accelParams['随机种子'] = seedValue;
+    job.params = { ...(job.params ?? {}), seed: seedValue, seedSubmitted: seedValue };
+  }
+
   /**
-   * LoRA 栈：先由 `solveLoraStack` 做**分类 + 互斥 + 衰减 + 总强度看门狗**，
-   * 再把结果摊进 8 个槽位。
+   * LoRA 栈装配 —— 加速学生占 1 号槽，其余槽位留给语义 LoRA。
    *
-   * 与旧 `planLoraStack` 的区别：旧版只会"加速学生 + 一串语义 LoRA 按数量衰减"，
-   * 不知道"两个运镜不能同挂""两个画风会互相拉扯"。新版按 `lora-catalog.js`
-   * 的 11 类目建模，单选类后来的替换先来的，多选类按 stackDecay 递减，
-   * 总强度 >1.5 警告、>1.8 剔除。
+   * 南风 V15 有 8 个槽（`LoRA{n}` + `LoRA{n}启用` + `LoRA{n}强度`）；
+   * `启用LoRA` 总开关对 V15 无效（早退只对 individual=False 生效）。
+   *
+   * 强度：加速 LoRA 是**学生本体**，恒 1.0、永不衰减；语义 LoRA 才压强度
+   * （链式叠加是加法，两个 1.0 会 >1 过曝），由 stackDecay 与总强度看门狗控制。
+   *
+   * 加速学生必须放 **LoRA1**：`_enabled_lora_stack()` 按 1→8 顺序串，学生是新的基座，
+   * 要对后续所有语义偏移生效；放后面会让语义 LoRA 叠加在未蒸馏权重上再被覆盖。
    */
   const requestedLoras = [
-    ...(accel.lora ? [{ name: accel.lora, strength: 1.0, forceRole: 'accelerator' }] : []),
+    ...(accel.lora ? [{ name: accel.lora, strength: 1.0 }] : []),
     ...(Array.isArray(shot.nanfeng?.loras) ? shot.nanfeng.loras : []),
   ];
   const solved = solveLoraStack(requestedLoras, { maxSlots: 8, availableFiles });
 
-  // 加速学生必须钉死在槽 1（它是新的基座，要覆盖后续所有语义偏移）
+  // 加速学生钉死在槽 1：它是新的基座，要覆盖后续所有语义 LoRA 的权重偏移
   const ordered = [
     ...solved.accepted.filter((a) => a.role === 'accelerator'),
     ...solved.accepted.filter((a) => a.role !== 'accelerator'),
   ];
 
+  const LORA_STRENGTH_FLOOR = 2;
   for (let i = 1; i <= 8; i += 1) {
     const entry = ordered[i - 1];
     const on = Boolean(entry);
     accelParams[`LoRA${i}`] = on ? entry.name : '未选择';
     accelParams[`LoRA${i}启用`] = on;
-    accelParams[`LoRA${i}强度`] = on ? entry.appliedStrength : 1.0;
+    // 视频侧兜底：求解器已按分类夹过，这里再按 [-2,2] 兜一次，
+    // 与图像侧（h3-image.js / h3-inpaint.js）的语义对齐。
+    accelParams[`LoRA${i}强度`] = on ? clampSignedStrength(entry.appliedStrength, LORA_STRENGTH_FLOOR) : 1.0;
   }
-  // 总开关（对 V15 无效，但保持语义一致便于排查）
   accelParams['启用LoRA'] = ordered.length > 0;
 
   // 把求解过程写进 warnings —— 用户必须知道"我填的限制被改了"
@@ -806,13 +774,7 @@ export async function runH3Nanfeng({
       `LoRA「${baseNameOf(dg.name)}」强度 ${dg.from} → ${dg.to}（${dg.reason}）。`];
   }
 
-  /**
-   * shift 现在**真的会生效**（vendor 的 sigma 分支已放开）。
-   *
-   * 这里不再写"设不了"的警告 —— 那条警告在改 vendor 之后就是假的了。
-   * 但如果 shift 值与学生的训练设定不一致（用户手改了参数），仍要提醒，
-   * 因为偏离训练 shift 属于分布外采样，不报错只是画质变差。
-   */
+  // shift 与学生的训练设定不一致 = 分布外采样：不报错，但画质与动态会变差
   if (accel.needShiftNode && accel.loraMeta?.steps) {
     const drift = Number(accel.shiftVideo) !== 12 || Number(accel.shiftAudio) !== 2;
     if (drift) {
@@ -845,12 +807,8 @@ export async function runH3Nanfeng({
   const refList = resolveRefImagesCore(shot, cfg);
   const previz = resolvePrevizArtifactsCore(shot, cfg);
 
-  // ⚠️ 必须读 `shot.refs.videos` / `shot.refs.audios`。
-  //    历史上这里写的是 `shot.videos`，而镜头卡上从来没有这个顶层字段 ——
-  //    于是视频/音频恒为空，`视频1..3` 永远是「未选择」，整条参考视频链路被静默丢弃。
-  //
-  // 编号 = **挂载顺序的槽位号**（下标 + 1），不能先 filter 缺失项再重排；
-  // 理由见 runH3Local 里同一段代码的注释（`<Video N>` 与实物必须同号）。
+  // 编号 = **挂载顺序的槽位号**（下标 + 1），不能先 filter 缺失项再重排 ——
+  // 提示词里的 `<Video N>` 按挂载顺序写，压缩数组会让指令与实物错位。
   const videoEntries = resolveMediaEntriesCore(shot.refs?.videos, cfg)
     .slice(0, MAX_REF_VIDEOS)
     .map((v, i) => ({ ...v, index: i + 1, key: `{{REF_VIDEO_${i + 1}}}` }));
@@ -895,38 +853,26 @@ export async function runH3Nanfeng({
   /**
    * 首尾帧在**南风路径**上的接线。
    *
-   * ⚠️ 这是一个必须单独处理的坑：
-   *    南风节点 `NanFengH3MultiReferenceGeneratorV15` **没有** first_frame /
-   *    last_frame 输入口 —— 它的首尾帧就是 `图片1` 和 `图片2` 本身。
-   *    见 vendor/nanfeng/h3_generator.py:1378-1381 的硬校验：
-   *      图生视频：image_count 必须 == 1
-   *      首尾帧  ：image_count 必须 == 2（图片1=首帧，图片2=尾帧）
+   * 南风节点 `NanFengH3MultiReferenceGeneratorV15` **没有** first_frame / last_frame
+   * 输入口 —— 它的首尾帧就是 `图片1` 和 `图片2` 本身。vendor 的硬校验
+   * （h3_generator.py:1378-1381）：图生视频 image_count 必须 == 1，
+   * 首尾帧必须 == 2（图片1=首帧，图片2=尾帧）。
    *
-   *    旧实现从 runH3Local 复制而来，把 previz 首尾帧 stage 进了
-   *    `{{FIRST_FRAME}}` / `{{LAST_FRAME}}` 两个占位符，但**没有任何消费者**
-   *    （那套消费逻辑只在 runH3Local 里）。结果是：
-   *      · 文件白传一趟 ComfyUI input
-   *      · 图片1/图片2 被角色卡/参考图占满
-   *      · 南风报"图生视频模式必须上传1张图片"或"首尾帧模式必须上传2张图片"
-   *
-   *    正确做法：按 mode 把 staged 的首尾帧直接塞进 图片1 / 图片2，
-   *    并且**参考图不得占用这两个槽位** —— 见下方 planImageSlots。
+   * 所以 `{{FIRST_FRAME}}` / `{{LAST_FRAME}}` 这两个占位符在本路径没有消费者，
+   * 必须按 mode 直接把 staged 的首尾帧塞进 图片1 / 图片2，
+   * 并且参考图不得占用这两个槽位 —— 见下方 planImageSlots。
    */
 
   /**
    * 参考图槽位要**避开**被首尾帧占用的编号。
    *
-   * ⚠️ 历史缺陷（P0）：`frameSlotOverrides` 直接写 `图片1`，而
-   *    `buildShotOverrides(shot)` 已经把 `refs.images` 填进 `图片1..9`。
-   *    extraParams 优先级最高 → 角色卡图被 previz 首帧顶掉，
-   *    但提示词里 `<Picture 1>` 仍然写着"这是角色外观" ——
-   *    模型拿到的指令与实物完全对不上，表现为串脸 / 丢角色，且全程不报错。
+   * `buildShotOverrides` 会把 `refs.images` 按下标填进 `图片1..9`，
+   * 而 extraParams 优先级最高 —— 若首尾帧直接写 `图片1`，角色卡图会被顶掉，
+   * 但提示词里 `<Picture 1>` 仍写着"这是角色外观"：指令与实物完全对不上，
+   * 表现为串脸/丢角色且不报错。南风的 `i2va-needs-one-image` 只检查总数 == 1，
+   * 覆盖后仍是 1 张，所以约束也拦不住。
    *
-   *    南风的 `i2va-needs-one-image` 约束只检查**总数 == 1**，
-   *    覆盖后仍是 1 张，所以约束也拦不住。
-   *
-   * 现在的做法：首/尾帧占用的编号从参考图里剔除，其余按原顺序补位，
-   * 并把最终槽位安排写进 job.params 供排查。
+   * 正确做法：首/尾帧占用的编号从参考图里剔除，其余按原顺序补位。
    */
   const slotPlan = planImageSlotsCore(mode ?? shot.mode, stagedImages, staged['{{FIRST_FRAME}}'] ?? '', staged['{{LAST_FRAME}}'] ?? '');
   if (slotPlan.dropped.length) {
@@ -942,17 +888,9 @@ export async function runH3Nanfeng({
     refs: {
       ...(shot.refs ?? {}),
       images: slotPlan.images,
-      /**
-       * ⚠️ 视频/音频必须**保位**，不能 `.filter(Boolean)` 压缩。
-       *
-       *    buildShotOverrides 的写法是 `视频${i+1} = videos[i]` ——
-       *    **数组下标就是槽位号**（与图片同一机制）。
-       *    压缩数组会让"第 2 段上传失败"变成"第 3 段前移到第 2 位"，
-       *    而提示词里写的还是 `<Video 3>` —— 指令与实物错位且不报错。
-       *
-       *    空串占位由 buildShotOverrides 内部的 toComfyFileName 转成「未选择」，
-       *    所以留空串是安全且正确的。
-       */
+      // 视频/音频必须**保位**，不能 filter(Boolean) 压缩：
+      // buildShotOverrides 的写法是 `视频${i+1} = videos[i]`，数组下标就是槽位号。
+      // 空串占位由 toComfyFileName 转成「未选择」，是安全且正确的。
       videos: stagedVideos,
       audios: stagedAudios,
     },
@@ -963,7 +901,6 @@ export async function runH3Nanfeng({
   // 能力探测：先问 ComfyUI 实际注册了哪些节点，再据此关闭缺依赖的加速项。
   // 没有这一步时，用户勾上「启用H3 SLA」会在 GraphBuilder 展开阶段抛
   // "node H3SLAAttention not found"，整单失败且错误信息极难懂。
-  // 探测失败（ComfyUI 不可达）时返回 null，退回纯静态修正。
   let availableNodes = null;
   try {
     const comfyMod = await import('./comfy-client.js');
@@ -980,13 +917,8 @@ export async function runH3Nanfeng({
       ...(prompt ? { 提示词: injectCardDefinitions(prompt, refList, shot, slotPlan.pictureIndexMap) } : {}),
       // 首/尾帧占用 图片1/图片2（见 planImageSlots），优先级最高
       ...slotPlan.frameSlots,
-      /**
-       * ⚠️ 加速方案必须放在**最后**。
-       *
-       * buildShotWorkflow 的 extraParams 是最高优先级层，而预设里写着
-       * `采样器: lcm` —— 如果加速方案先合并，就会被预设覆盖回 lcm + 步数错配。
-       * LoRA 槽位同理：镜头上可能残留旧值。
-       */
+      // 加速方案必须放**最后**：extraParams 是最高优先级层，而预设里写着
+      // `采样器: lcm` —— 先合并会被预设覆盖回 lcm + 步数错配。LoRA 槽位同理。
       ...accelParams,
     },
     jobId: job.id,
@@ -1009,10 +941,8 @@ export async function runH3Nanfeng({
 
   // ---------- 5) 提交并轮询 ----------
   //
-  // ⚠️ 归档目录必须给真实路径。传 null 时 comfy.runWorkflow 里的
-  //    `fs.mkdirSync(outputsDir)` 会抛
-  //    "The \"path\" argument must be of type string or ... Received null"
-  //    —— 视频其实已经生成好了，但归档阶段崩溃，整单被标记 failed。
+  // 归档目录必须是真实路径：传 null 时 comfy.runWorkflow 里的
+  // `fs.mkdirSync(outputsDir)` 会抛类型错误 —— 视频其实已生成，整单却被标 failed。
   const destDir = outputsDir ?? path.join(cfg.dataDir, 'outputs');
 
   return comfy.runWorkflow({
@@ -1026,7 +956,10 @@ export async function runH3Nanfeng({
 }
 
 /**
- * 只保留「非默认值」的参数，避免把 221 个字段全塞进 job.params。
+ * 把 221 个参数收敛成可排障的快照：关键项 + 所有非空素材槽位。
+ *
+ * 不是"只保留非默认值"——这里没有默认值可比，只是**挑选**。
+ * 必须包含 `随机种子`，否则任务记录里看不到实际提交的种子，无法复现。
  *
  * @param {Record<string, unknown>} params
  * @returns {Record<string, unknown>}
@@ -1034,9 +967,9 @@ export async function runH3Nanfeng({
 function summariseParams(params) {
   const schema = params; // 已是完整快照
   const out = {};
-  // 动态导入太啰嗦，这里直接内联几个关键项 + 所有非空素材
+  // 关键项 —— `随机种子` 必须在列：不记的话任务记录里看不到实际提交值，无法复现
   for (const key of [
-    '百万像素', '采样步数', '采样器', '调度器', '降噪强度',
+    '随机种子', '百万像素', '采样步数', '采样器', '调度器', '降噪强度',
     '启用H3潜空间放大二采', 'H3一采步数', 'H3二采步数',
     'H3潜空间目标百万像素', '启用潜空间续写', 'context_length',
     '启用锁音频', '启用实时预览',

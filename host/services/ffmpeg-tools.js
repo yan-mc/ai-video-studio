@@ -19,7 +19,7 @@ import { loadConfig } from '../config.js';
  * 解析内置 ffmpeg 工具目录的候选位置。
  *
  * 为什么需要：`cfg.ffmpegDir` 可能为空（比如测试传入 `{}`、或用户没配），
- * 这时旧实现直接回退到裸名 `'ffmpeg'`，而 PATH 里通常没有 → 全部失败。
+ * 不能回退到裸名 `'ffmpeg'`：PATH 里通常没有，会全部失败。
  * 从插件自身位置向上找 `tools/ffmpeg`，配置缺失时也能用。
  */
 function bundledFfmpegDirs() {

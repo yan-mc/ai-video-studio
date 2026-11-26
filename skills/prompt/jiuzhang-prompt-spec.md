@@ -519,7 +519,7 @@ both allowed to clip to pure white. [人物] stay clean, with no glow bleeding o
 | 文字**没有提到** | 严格照参考图还原 |
 
 这样"不动 = 精准还原"和"改了 = 真的改"同时成立，两者不打架。
-**删掉这句，换装类改动必然失效** —— `tools/smoke-api.mjs` 有回归断言盯着它。
+**删掉这句，换装类改动必然失效。**
 
 ### 细节锁
 

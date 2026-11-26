@@ -353,7 +353,7 @@ export function createExtrasService({ getCfg = loadConfig } = {}) {
   /**
    * 找出 `<dataDir>/assets` 里没有被 assets-index 引用的文件。
    *
-   * ⚠️ 两个历史缺陷：
+   * ⚠️ 两个必须避开的坑：
    *  ① 只 readdirSync 一层，`assets/3d/xxx.fbx` 这类子目录**永远不参与**统计；
    *  ② 反过来，用户手工放进 assets/ 的文件（不在 index 里）会被判成孤儿，
    *     clean 一次就删 —— 而这恰恰是 3D 预演资产最常见的入口。
@@ -472,9 +472,8 @@ export function createExtrasService({ getCfg = loadConfig } = {}) {
   /**
    * 追加一条运行日志。
    *
-   * ⚠️ 历史缺陷：这个函数是"读全量 500 条 → unshift → 写全量"，
-   *    两次并发写必然丢日志（A 读完 B 读完，A 写 B 写，B 覆盖 A），
-   *    而且永远返回 `{ok:true}` —— 用户看不到任何异常。
+   * ⚠️ 不能"读全量 500 条 → unshift → 写全量"：
+   *    两次并发写必然丢日志（A 读完 B 读完，A 写 B 写，B 覆盖 A）。
    *    画布每操作一次都会写日志，所以并发是常态不是边角。
    *
    * 现在改用 json-store 的 updateJson：每文件一条 Promise 队列串行读-改-写。

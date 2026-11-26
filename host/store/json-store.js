@@ -1,46 +1,22 @@
 /**
  * 原子 JSON 存储 —— 全仓唯一的 JSON 落盘实现。
  *
- * ============================================================================
- * 设计约束（每条都来自一次真实事故）
- * ============================================================================
+ * 设计约束（每条都来自一次真实事故）：
  *
- * 1) **并发写不能 last-write-wins**
- *    jobs.json 全量读-改-写无串行化 → 并发 runJob 互相覆盖丢字段。
- *    → 每个文件一条 Promise 队列，读-改-写整体串行。
+ * 1) 并发写不能 last-write-wins → 每个文件一条 Promise 队列，读-改-写整体串行。
+ * 2) 解析失败不能静默清空 → 保留 .corrupt 副本并抛 CORRUPT_JSON；
+ *    主文件损坏时自动回退 .bak（每写一次前都会留一份上一版）。
+ * 3) 写盘失败不能连旧数据一起丢 → 重试只针对同一个 tmp 的 rename，
+ *    全程绝不删除目标文件；rename 始终失败时退回非原子覆盖写（最坏只写一半，
+ *    绝不会出现"两份都没了"）。
+ * 4) 重试等待不能阻塞事件循环 → 同步 API 用 Atomics.wait，异步用 setTimeout。
+ * 5) 读盘有 TOCTOU → 直接 readFileSync + catch，不先 existsSync。
  *
- * 2) **解析失败不能静默清空**
- *    损坏文件被当作空继续，下次写入即覆盖 → 数据永久消失。
- *    → 保留 .corrupt 副本并抛出 CORRUPT_JSON。
- *
- * 3) **写盘失败不能连旧数据一起丢**（历史 P0，本次重写）
- *    旧实现在 Windows EPERM 重试里**先 `fs.rmSync(file)` 删掉目标文件**再 rename。
- *    若 8 次重试全部失败，目标已被删、随后 tmp 也被删 → **新旧两份数据同时消失**，
- *    jobs.json / projects.json / shots.json 整份归零，且没有任何备份。
- *
- *    现在：
- *      · 重试只针对**同一个 tmp 的 rename**，全程**绝不删除目标文件**；
- *      · rename 始终失败时，退回**直接覆盖写**（非原子，但只可能写到一半，
- *        绝不会出现"两份都没了"）；
- *      · 任何写之前先把原文件复制成 `.bak`（保留上一版，供人工恢复）。
- *
- * 4) **重试等待不能让事件循环停摆**
- *    旧实现用 `while (Date.now() < until) {}` 同步自旋，最长阻塞 0.7s ——
- *    这期间 SSE、HTTP 轮询、生成进度全部停住。
- *    → 同步 API 用 `Atomics.wait` 真正睡眠（不占 CPU、不阻塞其它线程的 IO）；
- *      异步 API 用 `setTimeout`。
- *
- * 5) **读盘有 TOCTOU**
- *    `existsSync` 与 `readFileSync` 之间文件被删 → 抛 ENOENT，且旧实现没 catch。
- *    → 直接 `try { readFileSync } catch`，ENOENT 走 fallback。
- *
- * ============================================================================
- * API
- * ============================================================================
+ * API：
  *
  *   readJson(file, fallback)                同步读
  *   writeJson(file, value)                  同步原子写（单写者场景）
- *   updateJson(file, fallback, mutator)     串行读-改-写（mutator 可 async）
+ *   updateJson(file, fallback, mutator)     串行读-改-写（mutator 返回 undefined = 不写）
  *   replaceJson(file, value)                串行整体替换
  *   collectionStore(file, opts)             数组集合的 list/get/upsert/remove
  *   flushJsonStore()                        等待所有在途写完成（测试/退出用）
@@ -58,11 +34,10 @@ const queues = new Map();   // file -> Promise（队尾）
 const SLEEPER = new Int32Array(new SharedArrayBuffer(4));
 
 /**
- * 同步睡眠（不烧 CPU）。
+ * 同步睡眠。
  *
- * `Atomics.wait` 在**主线程**上会被 Node 直接抛错（只能在 worker 里等），
- * 所以这里先用 `Atomics.wait` 尝试，失败则退回一个极短的忙等 —— 但把
- * 总时长限制在 2ms 以内，确保不会像旧实现那样阻塞 0.7 秒。
+ * `Atomics.wait` 在**主线程**上会被 Node 抛错（只能在 worker 里等），
+ * 所以先尝试它，失败退回极短忙等 —— 总时长限制在 2ms 以内，不会阻塞事件循环。
  */
 function sleepSync(ms) {
   if (ms <= 0) return;
@@ -80,13 +55,7 @@ const RETRYABLE = new Set(['EPERM', 'EBUSY', 'EACCES']);
 
 let tmpSeq = 0;
 
-/**
- * 生成唯一 tmp 名。
- *
- * 必须是"同进程内绝不重名" —— 旧实现用 `Date.now()+4位随机`，
- * 同一毫秒内两次写有约 1/1.6M 概率撞名，撞上就是两次写互相踩。
- * 这里用进程内自增序号，零碰撞。
- */
+/** 生成唯一 tmp 名：进程内自增序号，同进程内绝不重名（零碰撞）。 */
 function tmpNameFor(file) {
   tmpSeq += 1;
   return `${file}.${process.pid}.${tmpSeq}.tmp`;
@@ -107,15 +76,10 @@ function backupSync(file) {
  * ========================================================================== */
 
 /**
- * 同步读。不存在 → fallback；空文件 → fallback；解析失败 → 备份 .corrupt 并回退 .bak。
+ * 同步读。不存在 / 空文件 → fallback；解析失败 → 备份 .corrupt 并自动回退 .bak。
  *
- * ⚠️ 不用 `existsSync` 先判断：那是 TOCTOU（检查与读取之间文件可能被删）。
- *    直接读、按错误码分支。
- *
- * 恢复路径：主文件损坏时先尝试 `${file}.bak`（每次写之前都会留一份上一版）。
- *   `.corrupt` 与 `.bak` 原先只写不读 —— 事故现场保留下来了，但只有人工介入才能恢复，
- *   而 `overwriteFallback` 的非原子覆盖使"截断的 JSON"是一个可达状态。
- *   自动回退 + 显式告警，才能把"人工恢复"变成"自动降级"。
+ * 不用 `existsSync` 先判断（TOCTOU：检查与读取之间文件可能被删），直接读、按错误码分支。
+ * 主文件损坏时回退上一版 `.bak` 并把恢复结果写回，让"人工恢复"变成"自动降级"。
  *
  * @returns {any}
  */
@@ -162,9 +126,8 @@ function readSync(file, fallback) {
 /**
  * rename 失败时的兜底：直接覆盖写。
  *
- * 这一步**不是原子的**（写到一半崩溃会留下截断文件），
- * 但它保证了"旧数据要么被完整替换、要么原样保留 + 留下 .bak"，
- * 绝不会出现旧实现那种"目标被删、tmp 也被删、两份都没了"。
+ * 不是原子的（写到一半崩溃会留下截断文件），但它保证"旧数据要么被完整替换、
+ * 要么原样保留 + 留下 .bak"，绝不会出现"目标被删、tmp 也被删、两份都没了"。
  */
 function overwriteFallback(file, data) {
   const tmp = tmpNameFor(file);
@@ -256,17 +219,19 @@ function queueFor(file) {
 }
 
 /**
- * 串行化的读-改-写。
+ * 串行化的读-改-写。mutator 返回 `undefined` 表示「本次不需要写盘」——
+ * 跳过整份重写并返回当前值（jobs.json 这类 500KB+ 文件靠这个避免无意义重写）。
  *
  * @param {string} file
  * @param {any} fallback 文件不存在时的初值
- * @param {(current:any)=>any|Promise<any>} mutator 收到当前值，返回新值
- * @returns {Promise<any>} 写入后的新值（= mutator 的返回值）
+ * @param {(current:any)=>any|Promise<any>} mutator 返回新值；返回 undefined = 不写
+ * @returns {Promise<any>} 写入后的新值（= mutator 的返回值；未写时为当前值）
  */
 export function updateJson(file, fallback, mutator) {
   const run = async () => {
     const current = readSync(file, fallback);
     const next = await mutator(current);
+    if (next === undefined) return current;
     await writeAsyncAtomic(file, next);
     return next;
   };
@@ -303,13 +268,31 @@ export function replaceJson(file, value) {
 
 /**
  * 通用集合存储：一个 JSON 数组文件，提供 list/get/upsert/remove。
- * 所有写操作走同一队列，天然串行。
+ * 所有写操作走同一队列，天然串行；`upsert` 返回**落盘后的合并结果**（不是入参回显）。
  *
- * ⚠️ `upsert` 返回**落盘后的合并结果**（不是入参回显）。
- *    旧实现返回 `withId`，调用方拿到的字段不完整，前端直接用会丢字段。
+ * `get(id)` 不触发全量读盘：内部维护 `{mtimeMs,size}` 指纹 + id→记录 索引，
+ * 文件没变就命中缓存。jobs.json 500KB+、批次段每 2 秒 get 一次，全量 JSON.parse
+ * 是数量级的浪费。
  */
 export function collectionStore(file, { idField = 'id', prefix = 'item' } = {}) {
   const empty = () => [];
+
+  /** { stamp, byId: Map } —— 指纹变化即失效 */
+  let indexCache = null;
+  const stampOf = () => {
+    try {
+      const st = fs.statSync(file);
+      return `${st.mtimeMs}:${st.size}`;
+    } catch { return ''; }
+  };
+  const indexOf = (arr) => {
+    const byId = new Map();
+    for (const x of arr) {
+      if (x && x[idField] != null) byId.set(x[idField], x);
+    }
+    return byId;
+  };
+  const dropIndexCache = () => { indexCache = null; };
 
   function newId() {
     return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
@@ -323,14 +306,15 @@ export function collectionStore(file, { idField = 'id', prefix = 'item' } = {}) 
       return Array.isArray(arr) ? arr : [];
     },
 
-    listSync() {
-      const arr = readSync(file, empty());
-      return Array.isArray(arr) ? arr : [];
-    },
-
     async get(id) {
+      if (id == null) return null;
+      const stamp = stampOf();
+      if (indexCache && stamp && indexCache.stamp === stamp) {
+        return indexCache.byId.get(id) ?? null;
+      }
       const arr = await this.list();
-      return arr.find((x) => x && x[idField] === id) ?? null;
+      indexCache = { stamp: stampOf(), byId: indexOf(arr) };
+      return indexCache.byId.get(id) ?? null;
     },
 
     async upsert(item) {
@@ -348,18 +332,17 @@ export function collectionStore(file, { idField = 'id', prefix = 'item' } = {}) 
         }
         return list;
       });
+      dropIndexCache();
       return merged;
     },
 
     async remove(id) {
-      return updateJson(file, empty(), (arr) => {
+      const out = await updateJson(file, empty(), (arr) => {
         const list = Array.isArray(arr) ? arr : [];
         return list.filter((x) => !x || x[idField] !== id);
       });
-    },
-
-    async replaceAll(value) {
-      return replaceJson(file, value);
+      dropIndexCache();
+      return out;
     },
 
     newId,

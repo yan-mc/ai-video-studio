@@ -1,36 +1,17 @@
 /**
  * ComfyUI 进程管理 —— 启动 / 停止 / 重启。
  *
- * ============================================================================
- * 为什么要重启
- * ============================================================================
+ * 为什么需要「重启」：本地「取消」只对正在跑的那一单发 `/interrupt`，
+ * 已排进 ComfyUI 队列、还没开始的段不会被清掉 —— 用户看到界面停了，
+ * ComfyUI 侧仍会依次跑完，下一单提交后看起来就是"前面的续写还在"。
+ * 重启能一次性清掉队列、显存碎片与节点缓存。
  *
- * 续写链的 latent 存在 ComfyUI 的 output/nanfeng_v15_context/<hash>/ 下，
- * 每个批次一个独立 hash，**folder 本身不会跨任务串味**（这点已经核对过：
- * 换人任务的 createBatch 每次都生成新 UUID，hash 因此必不同）。
- *
- * 真正会残留的是**队列**：本地「取消」只对正在跑的那一单发 `/interrupt`，
- * 已经排进 ComfyUI 队列、还没开始的任务不会被清掉。于是用户点了取消、
- * 界面上显示停了，但 ComfyUI 侧后面还挂着上一单的段 —— 下一单提交后，
- * 那些段仍会依次执行，看起来就是"前面的续写还在"。
- *
- * 另外每段都要冷加载 11GB 模型（日志：`loaded_models 2→0`），进程跑久了
- * 还有显存碎片。重启进程能一次性清掉队列、显存碎片和所有节点缓存。
- *
- * ============================================================================
- * 实现约束
- * ============================================================================
- *
- *  · 只认 ai-runtime 目录下的 start-h3.ps1 —— **不自己拼命令行**。
- *    端口选择（避开 Hyper-V 保留段）、`--lowvram --disable-pinned-memory
- *    --use-ck-attention` 这些参数、端口文件落盘，全在脚本里，重复一份必然走样。
- *
- *  · 停止用 `/interrupt` + 进程终止的组合：
- *    先请 ComfyUI 中断当前任务（尽力而为），再杀进程。
- *    只杀进程会让正在写盘的 mp4/safetensors 留下半截文件。
- *
- *  · 状态以"端口是否在监听"为准，不用进程名猜
- *    （可能有多个 python，也可能用户在别的终端起了一个）。
+ * 实现约束：
+ *  · 只认 ai-runtime 下的 start-h3.ps1，不自己拼命令行（端口避让、--lowvram 等
+ *    参数、端口文件落盘都在脚本里，重复一份必然走样）。
+ *  · 停止是 `/interrupt` + 终止进程的组合：只杀进程会让正在写盘的产物留半截。
+ *  · 状态以「端口是否在监听」为准，不靠进程名猜（可能同时有多个 python）。
+ *  · 停止/重启有**归属判定**（`startedByUs`）：只停本进程拉起的实例。
  *
  * @module comfy-control
  */
@@ -45,28 +26,36 @@ const STOP_TIMEOUT_MS = 30000;
 const START_TIMEOUT_MS = 180000;
 
 /**
+ * 本进程是否**自己拉起**了这个 ComfyUI 实例。
+ *
+ * 只有 `startComfy()` 成功后才置 true；`stopComfy`/`restartComfy` 在没有
+ * `force` 时以此判定归属，避免误杀用户手动起的 ComfyUI（以及它名下别人的任务）。
+ *
+ * 与 `comfy-lifecycle.js` 的 `startedByUs` 是同一语义的两个作用域：
+ * lifecycle 管"批次结束要不要关"，这里管"用户点停止敢不敢杀"。
+ * 两边都必须只看自己拉起的实例。
+ */
+let startedByUs = false;
+
+/** 当前实例是否由本进程拉起（供 API 层做二次确认） */
+export function isStartedByUs() { return startedByUs; }
+
+/** 进程内重置归属标记（配置变更 / 测试用） */
+export function resetOwnership() { startedByUs = false; }
+
+/**
  * 找 PowerShell 可执行文件。
  *
- * ⚠️ **不能用 `powershell.exe`（Windows PowerShell 5.1）**。
- *    `start-h3.ps1` 是 UTF-8 无 BOM 的中文脚本，5.1 会按系统 ANSI
- *    代码页（简体中文机器上是 GBK）去读，于是脚本里的中文全部变成乱码，
- *    连引号都被吞掉 —— 报错是
- *      `Unexpected token '鉁?ComfyUI' in expression or statement`
- *      `The string is missing the terminator: ".`
- *    看起来像脚本语法坏了，实际是编码问题。实测踩到过。
- *
- *     PowerShell 7（`pwsh`）默认按 UTF-8 读脚本，所以必须用它。
- *     找不到 pwsh 时明确报错，不要退回 5.1 制造一个看不懂的语法错误。
+ * 必须用 PowerShell 7（`pwsh`），不能用 `powershell.exe`：`start-h3.ps1` 是
+ * UTF-8 无 BOM 的中文脚本，5.1 会按系统 ANSI 代码页解码，中文全变乱码、
+ * 引号被吞，报出看不懂的语法错误。找不到 pwsh 时明确报错，不退回 5.1。
  */
 export function findPwsh() {
   const candidates = [];
   if (process.env.DSH_PWSH) candidates.push(process.env.DSH_PWSH);
 
-  // ① 用 where.exe 从 PATH 解析出**真实**路径。
-  //    Windows Store 版的 `WindowsApps\pwsh.exe` 是重解析点，
-  //    stat 它本身 EACCES；但 where 同时会给出
-  //    `WindowsApps\Microsoft.PowerShell_<ver>\pwsh.exe`，那个能 stat 到。
-  //    另外 `Program Files\WindowsApps` 整个目录 EPERM，扫不了，只能靠 where。
+  // where.exe 能解析出真实路径：Windows Store 版的 WindowsApps\pwsh.exe 是重解析点，
+  // stat 它本身 EACCES，而 where 会同时给出可 stat 的 Microsoft.PowerShell_<ver>\pwsh.exe。
   try {
     const out = execFileSync('where.exe', ['pwsh'], { encoding: 'utf8', timeout: 5000 });
     for (const line of out.split(/\r?\n/)) {
@@ -201,13 +190,11 @@ function pidOnPort(port) {
 }
 
 /**
- * 找出 ComfyUI **实际可达**的端口。
+ * 找出 ComfyUI **实际可达**的端口：端口文件 → 探测到的可达地址 → 0。
  *
- * ⚠️ 不能只用 `.comfy-port`：端口文件可能缺失/写坏/目录被搬走（readPort 返回 0），
- *    而 ComfyUI 完全可能仍在运行（用户的 DSH_COMFY_URL、或脚本挑了个别的端口）。
- *    只认端口文件会让「停止」误报 "本来就没在运行"，把 10–14GB 显存留在卡上。
- *
- * 顺序：端口文件 → 探测得到的可达地址 → 0
+ * 不能只用 `.comfy-port`：文件可能缺失/写坏/目录被搬走（`readPort` 返回 0），
+ * 而 ComfyUI 完全可能仍在运行（用户的 DSH_COMFY_URL、或脚本挑了个别的端口）。
+ * 只认端口文件会让「停止」误报"本来就没在运行"，把 10–14GB 显存留在卡上。
  */
 async function resolveLivePort() {
   const declared = readPort();
@@ -226,23 +213,35 @@ async function resolveLivePort() {
 /**
  * 停止 ComfyUI。
  *
- * 顺序很重要：先让 ComfyUI **自己把队列/历史清干净、把模型卸掉**，
- * 再终止进程。直接杀进程有两个后果：
- *   · 正在写的 mp4 / safetensors 会变成半截文件；
- *   · 内存里的队列状态随进程消失，但**磁盘上的续写 latent 不会**，
- *     下次起来那些半截批次仍在（"前面的续写还在"就是这么来的）。
+ * 顺序：先让 ComfyUI 自己清队列/历史、卸模型，再终止进程 ——
+ * 直接杀进程会留下半截 mp4/safetensors，且磁盘上的续写 latent 仍会被新进程使用。
  *
- * @param {{purge?: boolean}} [opts]
- *   purge=true 时执行"清场"序列（清队列 → 清历史 → 卸载模型释放显存）；
- *   缺省 false 保持原来的轻量行为（只 interrupt + 清队列），供内部重启路径复用。
- * @returns {Promise<{ok:boolean, detail:string, purged?:object}>}
+ * **归属判定**：除非 `force: true`，否则只停本进程拉起的实例。用户手动起的 ComfyUI
+ * 可能在跑别人的任务，点一下「停止」就 SIGTERM + 清空队列是破坏性操作 ——
+ * 那种情况返回 `notOwned: true` 让上层做二次确认。
+ *
+ * @param {{purge?: boolean, force?: boolean}} [opts]
+ *   purge=true 执行清场序列；force=true 跳过归属判定（用户已二次确认）
+ * @returns {Promise<{ok:boolean, detail:string, purged?:object, notOwned?:boolean}>}
  */
 export async function stopComfy(opts = {}) {
   const purge = opts.purge === true;
+  const force = opts.force === true;
   const port = await resolveLivePort();
   if (!port) {
     resetComfyProbe();
+    startedByUs = false;
     return { ok: true, alreadyStopped: true, detail: '本来就没在运行' };
+  }
+
+  if (!startedByUs && !force) {
+    return {
+      ok: false,
+      notOwned: true,
+      port,
+      detail: `端口 ${port} 上的 ComfyUI 不是本插件拉起的，已拒绝停止。`
+        + '若确认要停（会中断正在跑的任务、清空排队项），请带 force 再试一次。',
+    };
   }
 
   const purged = purge ? await purgeComfyState(port) : null;
@@ -290,6 +289,7 @@ export async function stopComfy(opts = {}) {
 
   resetComfyProbe();
   const stopped = !(await portListening(port));
+  if (stopped) startedByUs = false;
   return stopped
     ? { ok: true, pid, port, detail: `已停止（pid ${pid}）`, ...(purged ? { purged } : {}) }
     : { ok: false, detail: `pid ${pid} 仍在监听端口 ${port}，未能停止`, ...(purged ? { purged } : {}) };
@@ -343,23 +343,17 @@ async function vramUsedBytes(port) {
 }
 
 /**
- * 把 ComfyUI 恢复到"刚启动"的干净状态。
+ * 把 ComfyUI 恢复到"刚启动"的干净状态。顺序不可换：
  *
- * 为什么这个顺序（每一步都有实测依据）：
- *
- *  1) **interrupt 当前任务** —— `main.py` 的 worker 只有在一单跑完后才会
- *     `q.get_flags()`；不先让它停，后面两件事都不会被处理。
- *  2) **清队列** `/queue {clear:true}` → `wipe_queue()`，pending 全没。
- *  3) **清历史** `/history {clear:true}` → `wipe_history()`。
- *     不清的话 `/history/<id>` 仍能查到上次任务的 outputs，
- *     调度侧"以为还在跑"的判断会出错。
- *  4) **卸载模型 + 释放显存** `/free {unload_models:true, free_memory:true}`。
- *     ⚠️ 这两个参数**只是设 flag**（`execution.py` 的 `set_flag`），
- *     真正执行在 worker 下一轮循环里：`unload_all_models()` +
- *     `e.reset()`（清所有节点缓存）+ `gc.collect()` + `soft_empty_cache()`。
- *     所以要**轮询等它生效**，不能发完就返回。
- *  5) **等显存真的掉下来** —— 只看 flag 没用，读 `/system_stats` 的
- *     `vram_free` 比较才知道 H3 的 11GB 是否真的归还。
+ *  1) interrupt 当前任务 —— worker 只有在一单跑完后才处理 `/queue` 与 `/free`
+ *     的 flag；不先让它停，后面两件事都不会被处理。
+ *  2) 清队列 `/queue {clear:true}`：pending 全没。
+ *  3) 清历史 `/history {clear:true}`：不清的话 `/history/<id>` 仍能查到上次任务的
+ *     outputs，调度侧"以为还在跑"的判断会出错。
+ *  4) 卸载模型 + 释放显存 `/free {unload_models, free_memory}`。这两个参数**只是设 flag**，
+ *     真正执行在 worker 下一轮循环（unload_all_models + reset 节点缓存 + gc），
+ *     所以必须轮询等它生效，不能发完就返回。
+ *  5) 等显存真的掉下来 —— 只看 flag 没用，读 `vram_free` 比较才知道 11GB 是否归还。
  *
  * @param {number} port
  * @returns {Promise<{
@@ -411,16 +405,9 @@ export async function purgeComfyState(port) {
     await new Promise((r) => setTimeout(r, PURGE_POLL_MS));
   }
 
-  /**
-   * ⚠️ 队列空之后**再清一次历史**。
-   *
-   * 实测发现：被 interrupt 打断的任务会在收尾时**把自己写进 history**
-   * （`/history` 从 0 条变成 1 条）。如果清历史在 interrupt 之前做，
-   * 那条"跑一半被掐掉"的记录就会留在历史里 —— 而用户的诉求正是
-   * "把跑一半的删了"，留着它既误导又让下一次 `/history/<id>` 查得到幽灵任务。
-   *
-   * 所以顺序必须是：interrupt → 等队列空 → **清历史**（第二次，覆盖收尾写入）。
-   */
+  // 队列空之后**再清一次历史**：被 interrupt 打断的任务会在收尾时把自己写进
+  // history（0 条变 1 条）。清历史若在 interrupt 之前做，那条"跑一半被掐掉"的
+  // 记录会留下 —— 而用户诉求正是"把跑一半的删了"。
   try {
     await fetch(`http://127.0.0.1:${port}/history`, {
       method: 'POST',
@@ -492,17 +479,13 @@ export async function startComfy() {
   if (fs.existsSync(path.join(runtimeDir, '.comfy-port'))) {
     const p = readPort();
     if (await portListening(p)) {
+      // 已经在跑：**不**认领归属（不是我们拉起的，停止时不该杀）
       return { ok: true, alreadyRunning: true, port: p, detail: `已在运行（端口 ${p}）` };
     }
   }
 
-  // 脱离父进程：ComfyUI 要比本次请求活得久。
-  //
-  // ⚠️ Windows 上 `detached: true` + `stdio:'ignore'` 会让 powershell 进程
-  //    立刻以 code 0 退出（实测：spawn 后 4.6 秒报 "脚本已退出"，
-  //    而同一脚本在交互终端里跑得好好的）。改成不 detached，
-  //    只 unref() 释放事件循环引用 —— ComfyUI 是由脚本内部用
-  //    Start-Process 起的独立 python 进程，本进程退出不影响它。
+  // 不 detached，只 unref()：Windows 上 detached + stdio:'ignore' 会让 powershell
+  // 立刻以 code 0 退出；ComfyUI 是脚本内部 Start-Process 起的独立 python 进程。
   const shell = findPwsh();
   const child = spawn(shell, [
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
@@ -533,6 +516,7 @@ export async function startComfy() {
     const p = readPort();
     if (p && (await portListening(p))) {
       resetComfyProbe();
+      startedByUs = true;                 // 这次是我们拉起的 → 允许我们停
       return { ok: true, port: p, detail: `已启动（端口 ${p}）` };
     }
     // 脚本自己挑端口，端口文件出现得比端口就绪早，所以只按"能连上"判断。
@@ -543,6 +527,7 @@ export async function startComfy() {
       const p2 = readPort();
       if (p2 && (await portListening(p2))) {
         resetComfyProbe();
+        startedByUs = true;
         return { ok: true, port: p2, detail: `已启动（端口 ${p2}）` };
       }
       // 启动失败必须清掉探测缓存：否则旧端口会被缓存 5 秒，
@@ -564,30 +549,24 @@ export async function startComfy() {
 }
 
 /**
- * 重启 ComfyUI —— **彻底初始化**。
+ * 重启 ComfyUI —— 彻底初始化：停掉跑一半的东西并清干净，再给一个刚启动的 H3。
  *
- * 语义（用户点顶栏「重启」时期望的就是这个）：
- *   "把跑一半的东西停掉并清干净，然后给我一个刚启动的 H3。"
+ * 与单纯 kill + 拉起的差别是**先清场再杀**（purge 序列见 `purgeComfyState`），
+ * 并等到显存真的归还才杀进程。
  *
- * 与单纯 kill + 拉起的关键差别是**先清场再杀**：
- *   1. `stopComfy({purge:true})` 会 interrupt → wipe_queue → wipe_history →
- *      unload_all_models → free_memory，并**等到显存真的归还**才杀进程；
- *   2. 进程重启后节点缓存、显存碎片、历史产物引用全部是干净的。
+ * 不删 `output/nanfeng_v15_context/`（续写 latent）：那是断点续跑依赖的状态，
+ * 删掉会让"跑了 3 段、第 4 段失败想续跑"必须从头再来。
  *
- * ⚠️ 为什么不删 `output/nanfeng_v15_context/`（续写 latent）：
- *    那是**断点续跑**所依赖的状态。用户明确只要求"清掉跑一半的任务"，
- *    而续写批次的中间段正是靠这些 latent 接着跑的 —— 删掉会让
- *    "跑了 3 段、第 4 段失败想续跑"变成必须从头再来。
- *    确实要连 latent 一起清，用 `/comfy/purge` 的 `deep:true`（见 api 层）。
+ * 重启本身即用户确认过的操作意图，所以停止阶段跳过归属判定（`force: true`）。
  *
- * @param {{purge?: boolean}} [opts]
+ * @param {{purge?: boolean, force?: boolean}} [opts]
  * @returns {Promise<object>}
  */
 export async function restartComfy(opts = {}) {
   const purge = opts.purge !== false;      // 默认执行清场
   const t0 = Date.now();
 
-  const stopped = await stopComfy({ purge });
+  const stopped = await stopComfy({ purge, force: true });
   if (!stopped.ok) return { ...stopped, phase: 'stop' };
 
   const started = await startComfy();

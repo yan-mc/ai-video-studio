@@ -1,9 +1,8 @@
 /**
  * HTTP 工具层 —— 纯技术，无业务。
  *
- * 从 api/index.js 逐字迁出（原 46-254 行里的 HTTP 部分）。只放"和 HTTP 报文
- * 打交道"的东西：读 body、写 json、解析 Range / multipart / RFC2047、把文件流
- * 灌进响应。不认识 shot / project / job —— 任何业务概念都不该出现在这里。
+ * 只放和 HTTP 报文打交道的东西：读 body、写 json、解析 Range / multipart /
+ * RFC2047、把文件流灌进响应。不认识 shot / project / job。
  */
 import fs from 'node:fs';
 
@@ -20,14 +19,12 @@ export async function readJsonBody(req, limit = 4 * 1024 * 1024) {
       if (size > limit) {
         stopped = true;
         /**
-         * ⚠️ 不能先 destroy 再让上层 sendJson。
+         * 不能先 destroy 再让上层 sendJson。
          *
-         * 历史缺陷：`reject(...); req.destroy();` —— socket 被销毁后，
-         * 上层 `catch → sendJson(res, 400, ...)` 往一个已销毁的连接写，
-         * 客户端看到的是 ECONNRESET，**永远收不到那个 400**。
-         * "报错但用户看不到报错"是最伤支持成本的一类。
+         * socket 被销毁后，上层 `catch → sendJson(res, 400, ...)` 会往一个已销毁
+         * 的连接写，客户端看到 ECONNRESET 而**永远收不到那个 400**。
          *
-         * 现在：暂停读取（不再消耗 body），让上层正常回 413。
+         * 正确做法：暂停读取（不再消耗 body），让上层正常回 413。
          */
         try { req.pause(); } catch { /* ignore */ }
         reject(new Error('BODY_TOO_LARGE'));

@@ -8,13 +8,9 @@
  *  - 端口是 --port 0 随机的，客户端拿不到 location.port；
  *  - 所以 origin 必须由 Host 注入：GET /jiuzhang/api/token 的响应里带 origin 字段。
  *
- * ⚠️ 历史坑（已修）：entries 里曾经留着 `script` / `comic` / `mw` 三个路由，
- *    它们对应的页面在 2.0.0 已整体删除。点进去 SPA 的 parseHash() 认不出，
- *    会静默回退到 #/render —— 用户看到"点剧本打开了渲染页"，以为坏了。
- *    现在这张表与 app-src/src/router.tsx 的 ROUTES **逐项对齐**，
- *    并由 `pnpm run check:routes`（tools/check-routes.mjs）做静态校验。
- *    注意：host 的 /jiuzhang/api/meta **不**做这个校验（旧注释曾这么写，是假的）——
- *    真正跑校验的是工具脚本，它比对 SPA ROUTES / App.tsx NAV / 本文件的 entries 三方。
+ * ⚠️ 下面的 entries 必须与 app-src/src/router.tsx 的 ROUTES、App.tsx 的 NAV
+ *    三方逐项一致。任何一方多一条少一条，用户点进去就会被 parseHash() 静默
+ *    回退到 #/render（表现为"点剧本打开了渲染页"）。改路由时三处一起改。
  */
 window.__ModuleLoader__.load({
   id: '@local/dsh-jiuzhang-studio',

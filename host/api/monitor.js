@@ -1,7 +1,6 @@
 /**
  * 监控快照 —— /monitor 路由的数据源。
  *
- * 从 api/index.js 逐字迁出（原 3021-3044 行）。
  */
 import fs from 'node:fs';
 import { loadConfig } from '../config.js';

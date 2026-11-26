@@ -508,6 +508,255 @@ export interface LoraSolveResult {
   warnings: string[];
 }
 
+/* --------------------------- H3-Image（图像生成） --------------------------- */
+
+/** 一个图像尺寸档（`auto` 的 w/h 为 0 表示"继承原图 / 否则 2048²"） */
+export interface ImageSizeOption {
+  id: string;
+  name: string;
+  w: number;
+  h: number;
+  mp: number;
+  vramGb?: number;
+}
+
+export interface ImageModelStatus {
+  ready: boolean;
+  unet: string | null;
+  vae: string | null;
+  clip: string | null;
+  missing: string[];
+  root: string;
+}
+
+/** 一条图像 LoRA（来自 `models/loras/h3img/<分类>/`） */
+export interface ImageLoraItem {
+  name: string;
+  base: string;
+  folder: string;
+  categoryId: string;
+  categoryLabel: string;
+  mode: 'single' | 'multi';
+  categorySource: 'folder' | 'name' | 'fallback';
+  strength: { def: number; min: number; max: number; step: number };
+  signed?: boolean;
+  defaultOnSelect?: number;
+  why: string;
+}
+
+export interface ImageMetaPayload {
+  models: Record<string, string>;
+  vae: string;
+  clip: string;
+  /** `steps` 已是**真实生效值**（不是声明值） */
+  sampling: { steps: number; guidance: number; sampler: string; scheduler: string };
+  effective: {
+    steps: number;
+    declaredSteps: number;
+    stepsOverridden: boolean;
+    maxMP: number;
+    promptMaxChars: number;
+    maxRefImages: number;
+    maxBatch: number;
+    maxLoras: number;
+    /** 采样参数由 checkpoint 的 PDD 头网格决定，不可调 */
+    samplingLocked: boolean;
+  };
+  sizes: ImageSizeOption[];
+  status: ImageModelStatus;
+  loraCategories: LoraCategory[];
+}
+
+export interface ImageLoraCatalogPayload {
+  ok: boolean;
+  /** null 表示"没探测到"（ComfyUI 不可达），不是"一个都没装" */
+  probed: boolean;
+  probeError?: string;
+  root: string;
+  categories: LoraCategory[];
+  limits: { warn: number; block: number };
+  items: ImageLoraItem[];
+  byCategory: Record<string, number>;
+  total: number;
+  hint?: string;
+}
+
+export interface ImageLoraSolvePayload {
+  ok: boolean;
+  accepted: Array<{
+    name: string; base: string; categoryId: string; categoryLabel: string;
+    mode: 'single' | 'multi'; signed: boolean; appliedStrength: number;
+  }>;
+  rejected: Array<{ name: string; reason: string }>;
+  replaced: Array<{ name: string; by: string; category: string }>;
+  degraded: Array<{ name: string; from: number; to: number; reason: string }>;
+  totalStrength: number;
+  warnings: string[];
+}
+
+export interface ImageGenerateInput {
+  prompt: string;
+  /** ≤16；**第 1 张 = 被编辑的原图**（决定输出画布与编辑目标） */
+  refImages?: string[];
+  sizeId?: string;
+  /** 显式宽高必须同时给，且是 32 的倍数 */
+  width?: number;
+  height?: number;
+  seed?: number;
+  /** 1..4；会拆成 N 个独立任务（DiT 拒绝 batch>1） */
+  count?: number;
+  loras?: Array<{ name: string; strength?: number }>;
+  projectId?: string;
+  shotId?: string;
+}
+
+export interface ImageGenerateResult {
+  id: string;
+  status: string;
+  /** 多任务时是整组 id；单任务长度为 1 */
+  jobIds?: string[];
+  batchId?: string | null;
+  count?: number;
+  mode?: 't2i' | 'edit';
+  refCount?: number;
+  refRels?: string[];
+  loraCount?: number;
+  loraStack?: string[];
+  promptChars?: number;
+  warnings?: string[];
+}
+
+/** 出图进度（`/image/progress`，轻量） */
+export interface ImageProgressJob {
+  id: string;
+  status: string;
+  error?: string | null;
+  progress?: { pct: number; note: string; queue?: unknown } | null;
+  params?: {
+    seed?: number | null;
+    batchIndex?: number | null;
+    batchSize?: number | null;
+    /** crop 实际分辨率（auto 档由后端算出来） */
+    cropResolution?: number | null;
+  };
+  /**
+   * 后端产出的警告（LoRA 被剔除 / 选区被缩小 / 尺寸未校验 等）。
+   * 提交时的 toast 会一闪而过，这里是事后可查的证据。
+   */
+  warnings?: string[];
+  outputs?: Array<{ rel: string | null; archivedRel?: string | null; assetId?: string | null; bytes?: number | null }>;
+}
+
+export interface ImageProgressPayload {
+  ok: boolean;
+  jobs: ImageProgressJob[];
+}
+
+/* ------------------------- H3-Image 局部重绘（inpaint） ------------------------- */
+
+/** 强度档（SplitSigmas 切点，不是 denoise） */
+export interface InpaintStrength {
+  id: 'full' | 'strong' | 'medium' | 'light';
+  splitAt: number;
+  label: string;
+  hint: string;
+}
+
+/** crop 分辨率档位（auto 按笔画面积反推，避免 bbox 大而笔画细时被稀释） */
+export interface InpaintResolutionPreset {
+  id: 'auto' | '512' | '768' | '1024' | '1280';
+  label: string;
+  hint: string;
+  /** auto 档为 null */
+  value: number | null;
+}
+
+export interface InpaintMetaPayload {
+  /** 恒为 1.0 —— PDD 6 头网格的硬约束，不可配置 */
+  denoise: number;
+  denoiseLocked: boolean;
+  denoiseReason: string;
+  /** 实际生效步数（inpaint 恒为 6；配置里的 imageSteps 在重绘上不生效） */
+  steps: number;
+  stepsLocked: boolean;
+  stepsReason: string;
+  strengths: InpaintStrength[];
+  resolutions: InpaintResolutionPreset[];
+  autoScale: number;
+  resolutionHint: string;
+  /** 基准 grow（latent 网格常数，不随分辨率缩放） */
+  grow: number;
+  /** 基准羽化（1024² 档）；实际生效值按采样分辨率缩放 */
+  blur: { radius: number; sigma: number };
+  blurRefRes: number;
+  blurForDefaultRes: { radius: number; sigma: number };
+  cropDefaults: {
+    baseResolution: number;
+    padding: number;
+    minCrop: number;
+    maxCrop: number;
+  };
+  maxMP: number;
+  maxLoras: number;
+  promptMaxChars: number;
+  vendorNodes: { crop: string; uncrop: string };
+  /** crop&stitch 依赖的 vendor 节点是否就绪 */
+  cropAvailable: boolean;
+  /** 命中探测缓存（避免面板每次挂载都等 2×6s 超时） */
+  probeCached?: boolean;
+  vendorHint?: string;
+}
+
+export interface InpaintInput {
+  prompt: string;
+  /** 源图（dataDir 相对路径或 dataURL） */
+  source: string;
+  /** mask 图（白色=重绘区域），**尺寸必须与源图一致** */
+  mask: string;
+  mode?: 'crop' | 'full';
+  strength?: 'full' | 'strong' | 'medium' | 'light';
+  seed?: number;
+  loras?: Array<{ name: string; strength?: number }>;
+  /** mask 的非零像素数（auto 档用它反推分辨率） */
+  strokePixels?: number;
+  /** mask 外接框（前端 canvas 能精确算；auto 分辨率优先用它） */
+  bboxW?: number;
+  bboxH?: number;
+  /** full 模式：源图非 32 倍数时显式放行（会被 VAE 居中裁边，warning 里有说明） */
+  fullCanvasTrim?: boolean;
+  crop?: {
+    resolutionId?: 'auto' | '512' | '768' | '1024' | '1280' | string;
+    baseResolution?: number;
+    padding?: number;
+    minCrop?: number;
+    maxCrop?: number;
+  };
+  projectId?: string;
+}
+
+export interface InpaintResult {
+  id: string;
+  jobId?: string;
+  status: string;
+  jobIds?: string[];
+  mode: 'inpaint';
+  inpaintMode: 'crop' | 'full';
+  strength: string;
+  denoise: number;
+  promptChars?: number;
+  sourceRel: string;
+  maskRel: string;
+  /** crop 档的 baseResolution（= 采样画布长边，受 maxCrop 封顶） */
+  cropResolution?: number | null;
+  cropResolvedByAuto?: boolean;
+  /** auto 档实际采样画布（块被整块缩小时的唯一可信依据） */
+  cropSampleEdge?: number | null;
+  cropSampleCanvas?: { w: number; h: number } | null;
+  cropBlockDownscaled?: boolean;
+  cropBlockDownscaleRatio?: number;
+  warnings?: string[];
+}
+
 /* ------------------------------- H3 工坊 ------------------------------ */
 
 export interface H3Dialogue {

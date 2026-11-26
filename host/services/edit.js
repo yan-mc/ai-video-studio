@@ -1,31 +1,20 @@
 /**
  * 视频剪辑服务 —— 裁切 / 拼接 / 音轨。
  *
- * ============================================================================
- * 职责边界（为什么这里不做时间轴）
- * ============================================================================
- *
- * 「剪辑」在本插件里被定义为**面向成片的三件事**：
+ * 「剪辑」被定义为**面向成片的三件事**：
  *   1) 裁切：从一段视频里取出一段（掐头 / 掐尾 / 抠中间）
  *   2) 拼接：把多段按给定顺序接成一条（可带转场）
  *   3) 音轨：剥原声 / 换 BGM / 调音量 / 与原声混音
  *
- * 刻意**不做**多轨时间轴 UI 与逐帧预览。理由：
- *   · 本机已有原生 ffmpeg 9.0.2，处理 GB 级 H3 产出毫无压力；
- *     而浏览器编辑器（WebCodecs + ffmpeg.wasm）要把整个文件读进内存，
- *     H3 的 1–2 GB mp4 在里面必然 OOM。
- *   · 本插件真正的上游是 H3 生成，产出天然就是**顺序片段**，
- *     不是需要自由编排的素材堆。给顺序片段配一条时间轴是过度设计。
+ * 刻意不做多轨时间轴 UI 与逐帧预览：本机有原生 ffmpeg，处理 GB 级 H3 产出毫无压力，
+ * 而浏览器编辑器（WebCodecs + ffmpeg.wasm）要把整个文件读进内存，1–2 GB mp4 必然 OOM；
+ * 且插件真正的上游是 H3 生成，产出天然是**顺序片段**，不是需要自由编排的素材堆。
  *
  * 所以工程模型是一个**有序片段列表**（clip list），不是自由轨道。
  * 编辑操作全部落成 ffmpeg 命令，前端只负责排序、裁点、音轨选择。
  *
- * ============================================================================
- * 安全
- * ============================================================================
- * 所有输入路径走 resolveUserPath，绝对路径也必须在 dataDir 之内。
- * 这条约束是为了堵住 `POST /edit/render {"inputs":["F:/任意/文件"]}` 能让
- * ffmpeg 读机器上任意文件的口子 —— 与 film/render 同样的历史缺陷。
+ * 安全：所有输入路径走 `resolveUserPath`，绝对路径也必须在 dataDir 之内 ——
+ * 否则 `POST /edit/render {"inputs":["F:/任意/文件"]}` 能让 ffmpeg 读机器上任意文件。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -33,6 +22,7 @@ import { runProcess, resolveFfmpeg, resolveFfprobe } from './ffmpeg-tools.js';
 import { resolveUserPath, safeId } from '../security.js';
 import { loadConfig } from '../config.js';
 import { configReader } from '../config-reader.js';
+import { updateJson } from '../store/json-store.js';
 
 /** 视频扩展名 —— 只认这些，避免把任意文件塞给 ffmpeg */
 const VIDEO_EXT = new Set(['.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v']);
@@ -146,17 +136,13 @@ export function createEditService({ getCfg = loadConfig } = {}) {
   /**
    * 裁切：从一段视频取出 [start, end) 区间。
    *
-   * 关键：`-ss` 放在 `-i` **之前**（输入端 seek），比放在后面快一个数量级 ——
-   * 放在后面要解码到该时间点，放在前面直接跳到关键帧。
+   * `-ss` 放在 `-i` **之前**（输入端 seek）比放在后面快一个数量级（后者要解码到
+   * 该时间点），但会**吸附到前一个关键帧**使起点不准（可能差 1–2 秒）。
+   * 所以用「输入端粗 seek + 输出端精确 trim」的混合写法，start < 2s 时才退化为
+   * 纯输出端 seek。
    *
-   * 但输入端 seek 会**吸附到前一个关键帧**，导致起点不准（可能差 1–2 秒）。
-   * 所以这里用「输入端粗 seek + 输出端精确 trim」的混合写法：
-   *   -ss <start-2s> -i <input> -ss 2 -to <duration> ...
-   * 只有当 start < 2s 时才退化为纯输出端 seek。
-   *
-   * 用 -c copy 还是重编码：copy 快但剪辑点必然落在关键帧上，接缝会跳。
-   * 这里默认重编码（H3 产出通常只有几秒到几十秒，重编码代价可接受），
-   * 但提供 copy 选项给"只要快、不介意接缝"的场景。
+   * 默认重编码：copy 快但剪辑点必然落在关键帧上，接缝会跳；
+   * `reencode: false` 留给"只要快、不介意接缝"的场景。
    */
   async function trim({ input, startSec = 0, endSec = null, reencode = true }) {
     const abs = resolveInput(input);
@@ -212,18 +198,14 @@ export function createEditService({ getCfg = loadConfig } = {}) {
   /* ------------------------------------------------------------- 拼接 */
 
   /**
-   * 拼接：把多段按给定顺序接成一条。
+   * 拼接：把多段按给定顺序接成一条。两条路径**必须自动选**：
    *
-   * 两种实现路径，**必须自动选**，不能只给一种：
-   *
-   *  · 流复制（-c copy）：秒级完成、无画质损失。但要求所有片段的
-   *    编码/分辨率/帧率/像素格式**完全一致**，否则会出花屏或时长错乱。
-   *
+   *  · 流复制（-c copy）：秒级完成、无画质损失，但要求所有片段的编码/分辨率/帧率/
+   *    像素格式**完全一致**，否则会花屏或时长错乱。
    *  · 滤镜拼接（concat filter）：任何片段都能接，但必须重编码。
    *
-   * 判定方式：先 probe 全部片段，参数全同 → copy；只要有一项不同 → filter。
-   * 历史教训：film/render 只实现了 copy 路径，接不同来源的片段时静默产出
-   * 坏片，用户看到的是"拼完花屏"，而不是一条可读的错误。
+   * 判定：先 probe 全部片段，参数全同 → copy；一项不同 → filter。
+   * 只实现 copy 路径会在接不同来源片段时静默产出坏片（"拼完花屏"）。
    */
   async function concat({ inputs, reencode = null, transitionSec = 0 }) {
     const list = Array.isArray(inputs) ? inputs.filter(Boolean) : [];
@@ -374,16 +356,13 @@ export function createEditService({ getCfg = loadConfig } = {}) {
   /* ------------------------------------------------------------- 音轨 */
 
   /**
-   * 音轨操作 —— 剪辑里"声音"这一块的全部。
-   *
-   * op 语义：
+   * 音轨操作。op 语义：
    *   strip   剥掉原声（纯视频输出）
    *   bgm     用一段音频替换原声（或与之混音），可选淡入淡出
    *   volume  只调原声音量（不换音轨）
    *
-   * 为什么 bgm 要区分 replace / mix：
-   *   换 BGM 时用户通常**不想要**原声（原声是 H3 生成的环境音，会和 BGM 打架）；
-   *   但也常有"保留人声、压低当背景"的需求。两种都提供，默认 replace。
+   * bgm 区分 replace / mix：换 BGM 时通常**不想要**原声（H3 生成的环境音会和 BGM
+   * 打架），但也有"保留人声、压低当背景"的需求，所以两种都提供，默认 replace。
    */
   async function audio({ input, op = 'strip', bgmInput = '', replaceOriginal = true, bgmVolume = 0.5, originalVolume = 0.3, fadeInSec = 0, fadeOutSec = 0 }) {
     const abs = resolveInput(input);
@@ -469,13 +448,11 @@ export function createEditService({ getCfg = loadConfig } = {}) {
   /* ----------------------------------------------------------- 工程存储 */
 
   /**
-   * 剪辑工程 —— 一条有序片段列表 + 音轨设置。
+   * 剪辑工程 —— 一条有序片段列表 + 音轨设置，存成 `data/edit/<id>.json`。
    *
-   * 存成 data/edit/<id>.json。为什么不用 projects/shots 那套：
-   * 那是"生成镜头卡"，字段语义（prompt / 模型 / 参考图）与剪辑完全不同，
-   * 硬塞进去会让两边都变脏。
-   *
-   * 工程里只存**相对路径**，不存绝对路径 —— 换机器/换 dataDir 后仍可用。
+   * 不复用 projects/shots：那是生成镜头卡，字段语义（prompt / 模型 / 参考图）
+   * 与剪辑完全不同，硬塞进去会让两边都变脏。
+   * 工程里只存**相对路径**，换机器/换 dataDir 后仍可用。
    */
   function emptyProject(id, name) {
     const now = new Date().toISOString();
@@ -516,25 +493,33 @@ export function createEditService({ getCfg = loadConfig } = {}) {
     return JSON.parse(fs.readFileSync(f, 'utf8'));
   }
 
-  function saveProject(id, patch = {}) {
+  /**
+   * 保存工程（原子写 + 串行队列）。
+   *
+   * 必须走 `updateJson`：网页自动保存（800ms debounce）与 `/edit/render` 的回写
+   * 会并发调它，裸 writeFileSync 会互相覆盖/截断，截断后 `getProject` 直接抛错 ——
+   * 工程永久不可读，且没有备份。
+   *
+   * 注意 `updateJson` 是异步的，所以这里返回 Promise；
+   * 同步调用方（`render()` 里的回写）继续用 `await`。
+   */
+  async function saveProject(id, patch = {}) {
     const safe = safeId(id, EDIT_ID);
-    const base = fs.existsSync(projectFile(safe)) ? getProject(safe) : emptyProject(safe, patch.name);
-    const next = {
-      ...base,
-      ...('name' in patch ? { name: String(patch.name || base.name) } : {}),
-      ...(Array.isArray(patch.clips) ? { clips: normalizeClips(patch.clips) } : {}),
-      ...(patch.audio && typeof patch.audio === 'object' ? { audio: { ...base.audio, ...patch.audio } } : {}),
-      /**
-       * lastOutputRel 由 render() 内部回写，用来记住"这个工程上次出片在哪"。
-       * ⚠️ 必须显式接收：旧实现只挑 name/clips/audio 三个字段，
-       *    render 里传进来的 lastOutputRel 被静默丢弃，
-       *    于是前端永远拿不到上次成片 —— 注释说有的能力实际不存在。
-       */
-      ...(typeof patch.lastOutputRel === 'string' ? { lastOutputRel: patch.lastOutputRel } : {}),
-      id: safe,
-      updatedAt: new Date().toISOString(),
-    };
-    fs.writeFileSync(projectFile(safe), JSON.stringify(next, null, 2), 'utf8');
+    const file = projectFile(safe);
+
+    const next = await updateJson(file, null, (cur) => {
+      const base = (cur && typeof cur === 'object') ? cur : emptyProject(safe, patch.name);
+      return {
+        ...base,
+        ...('name' in patch ? { name: String(patch.name || base.name) } : {}),
+        ...(Array.isArray(patch.clips) ? { clips: normalizeClips(patch.clips) } : {}),
+        ...(patch.audio && typeof patch.audio === 'object' ? { audio: { ...base.audio, ...patch.audio } } : {}),
+        // lastOutputRel 由 render() 内部回写，用来记住"这个工程上次出片在哪"
+        ...(typeof patch.lastOutputRel === 'string' ? { lastOutputRel: patch.lastOutputRel } : {}),
+        id: safe,
+        updatedAt: new Date().toISOString(),
+      };
+    });
     return next;
   }
 
@@ -568,14 +553,11 @@ export function createEditService({ getCfg = loadConfig } = {}) {
    */
   async function render({ id, clips: clipsPatch, audio: audioPatch, transitionSec = 0, reencode = null, name }) {
     /**
-     * ⚠️ 有 id 但工程文件不存在时**不能直接抛 EDIT_NOT_FOUND**。
+     * 有 id 但工程文件不存在时**不能直接抛 EDIT_NOT_FOUND**。
      *
-     * 前端的主流程是「拼好片段 → 直接点出片」，用户可以一次都没点过保存，
-     * 此时 id 是前端刚生成的、磁盘上还没有对应 json。旧实现直接
-     * getProject(id) 抛错 —— 表现是"第一次出片必然失败，先存一次再出片才行"，
-     * 而这完全不是用户的心智模型。
-     *
-     * 现在的语义：工程存在 → 在它的基础上改；不存在 → 当成新工程就地建。
+     * 前端主流程是「拼好片段 → 直接点出片」，用户可以一次都没点过保存，
+     * 此时 id 是前端刚生成的、磁盘上还没有对应 json。
+     * 语义：工程存在 → 在它基础上改；不存在 → 当成新工程就地建。
      */
     let proj;
     if (id) {
@@ -653,7 +635,9 @@ export function createEditService({ getCfg = loadConfig } = {}) {
 
     // 有工程 id 就顺手记下最后一次产物，便于前端"打开上次成片"
     if (id) {
-      try { saveProject(id, { ...proj, lastOutputRel: path.relative(C().dataDir, target).replace(/\\/g, '/') }); } catch { /* ignore */ }
+      try {
+        await saveProject(id, { ...proj, lastOutputRel: path.relative(C().dataDir, target).replace(/\\/g, '/') });
+      } catch { /* 回写失败不该让出片失败 */ }
     }
 
     return {
@@ -752,21 +736,11 @@ function clamp(v, lo, hi, dflt) {
 /**
  * 数字或 null —— 空值一律返回 null。
  *
- * ⚠️ 必须先判空再 Number()。
- *
- * `Number(null) === 0`、`Number('') === 0`、`Number(false) === 0`，
- * 三者都是**有限数字**，所以旧实现
- *
- *     const n = Number(v); return Number.isFinite(n) ? n : null;
- *
- * 会把 null 返回成 0，而不是 null。后果非常隐蔽且致命：
- *   `const end = numOrNull(c.endSec) ?? total;`
- * 对 `endSec: null`（"整段"）得到 end = 0 —— 因为 0 不是 nullish，
- * `??` 不会回退到 total。于是"整段"被理解成"0 到 0"，
- * trim 报 EMPTY_RANGE，多段 render 直接 500。
- *
- * 这个 bug 只在"片段没设裁剪区间"时出现，而默认就是没设 ——
- * 也就是**默认路径全坏**。已由 tools/verify-edit.mjs 的 render 用例覆盖。
+ * 必须先判空再 `Number()`：`Number(null) / Number('') / Number(false)` 都等于 0
+ * 且都是有限数字，所以 `Number.isFinite(Number(v)) ? ... : null` 会把 null 返回成 0。
+ * 后果极隐蔽：`const end = numOrNull(c.endSec) ?? total` 对 `endSec: null`（"整段"）
+ * 得到 end = 0（0 不是 nullish，`??` 不回退）→ 整段被理解成 0 到 0 →
+ * trim 报 EMPTY_RANGE。而"片段没设裁剪区间"正是默认路径。
  */
 function numOrNull(v) {
   if (v === null || v === undefined || v === '') return null;

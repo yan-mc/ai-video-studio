@@ -1,35 +1,12 @@
 /**
- * 服务端事件推送（SSE）—— 让「DSH 改了参数」在网页上立即可见。
+ * 服务端事件推送（SSE）—— DSH Agent 与浏览器共享同一份状态，改动即时可见。
  *
- * ============================================================================
- * 为什么需要
- * ============================================================================
- *
- * 这是本项目的核心交互设计：**DSH Agent 和浏览器前端操作的是同一份状态**。
- *
- *   DSH Agent 调 studio_shot{action:'save', shot:{...}}
- *       ↓ 后端写 shots.json
- *       ↓ broadcast({ type:'shot-updated', projectId, shotId })
- *       ↓ SSE 推给所有连着的浏览器
- *   → 网页表单立即刷新，用户看到 Agent 改了什么
- *
- * 反过来也一样：用户在网页改参数 → 写 shots.json → Agent 下次读到新值。
- *
- * 这比轮询好在：批量续写进行中，进度需要实时反映。
- *
- * ============================================================================
- * 协议
- * ============================================================================
- *
- *   GET /jiuzhang/api/events        → text/event-stream
- *
- *   事件（JSON）：
- *     { type:'hello', clients:N }
- *     { type:'shot-updated', projectId, shotId, patch? }
- *     { type:'job-progress', jobId, status, percent?, output? }
- *     { type:'batch-progress', batchId, current, total, status }
- *     { type:'config-updated', keys:string[] }
- *     { type:'ping' }                     ← 每 25 秒，防代理超时
+ * GET /jiuzhang/api/events → text/event-stream，事件体为 JSON：
+ *   { type:'hello', clients:N }
+ *   { type:'shot-updated', projectId, shotId, patch? }
+ *   { type:'batch-progress', batchId, current, total, status }
+ *   { type:'replace-progress', replaceId, ... }
+ *   { type:'ping' }                     ← 每 25 秒，防代理超时
  *
  * @module api/events
  */
@@ -75,6 +52,10 @@ export function handleSse(req, res) {
 /**
  * 广播一条事件给所有在线客户端。
  *
+ * `res.write()` 对已关闭的响应**不抛错**（只返回 false 或触发 error 事件），
+ * 所以不能用 try/catch 判活 —— 死连接会一直留在 Set 里导致 clientCount 虚高。
+ * 必须先看可写状态再写。
+ *
  * @param {object} event
  * @returns {number} 实际推送的客户端数
  */
@@ -82,11 +63,14 @@ export function broadcast(event) {
   const payload = `data: ${JSON.stringify(event)}\n\n`;
   let n = 0;
   for (const c of clients) {
+    if (!c?.res || c.res.writableEnded || c.res.destroyed) {
+      clients.delete(c);
+      continue;
+    }
     try {
       c.res.write(payload);
-      n++;
+      n += 1;
     } catch {
-      // 写失败说明连接已断，清掉
       clients.delete(c);
     }
   }

@@ -1,16 +1,12 @@
 /**
  * H3 模式名归一 —— **全仓唯一实现**（无任何 IO 依赖）。
  *
- * 为什么必须单独一个文件：
- *   历史上「模式别名」有两份互不相干的实现：
- *     · `store/models.js`  `normalizeMode()`        —— 会剥 `h3:` 前缀
- *     · `services/ref-images.js` `normalizeImageMode()` —— 不剥前缀、少两个别名
- *   同一个镜头卡 `mode:'h3:T2V'`，提示词编译器判成文生视频，而槽位规划判成全参考，
- *   在 fl2va/i2va 下差 1–2 个槽位号 —— 正是"串脸"事故的成因。
+ * 单独成一个文件是为了让 `store/models.js` 与 `services/ref-images.js`
+ * 都能安全 import，而不会互相依赖。**任何地方都不要另写一份别名表。**
  *
- *   两份实现的分离理由是"避免 ref-images 反向依赖 store"，那个理由成立；
- *   但它推出的结论错了：正确做法是把纯函数提取到**双方都能依赖**的模块，
- *   而不是各自再写一份。本文件没有 fs / config 依赖，两边都可以安全 import。
+ * 两份实现并存时会出现：同一个镜头卡 `mode:'h3:T2V'`，提示词编译器判成
+ * 文生视频、槽位规划判成全参考，在 fl2va/i2va 下差 1–2 个槽位号 ——
+ * 表现为 <Picture N> 指错人。
  *
  * @module store/mode-aliases
  */

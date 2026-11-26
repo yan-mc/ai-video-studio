@@ -1,19 +1,18 @@
 /**
  * 角色卡仓库 —— 一个角色 = 拆解图 + 设定文字（+ 可选原立绘）。
  *
- * 解决的问题：角色一致性不该靠"每个镜头手动挂一遍图"。
- * 卡片集中管理，项目选卡，分镜生成时自动注入。
+ * 卡片集中管理，项目选卡，分镜生成时自动注入，不必每镜手动挂图。
  *
- * 设计要点见 docs/角色卡仓库-设计.md，这里只记实现约束：
- *
- *  1) **图片按槽位存**（sheet / origin / heads / extras），不是散数组 ——
- *     设定卡与原立绘用途不同，分开才能让 refPolicy 有东西可选。
- *  2) **参考图预算必须显式算**。H3 的 ref_images 上限是 9 张，
- *     且是整条提示词共享，不是每角色 9 张。超了要裁剪并**明确告知**。
+ * 实现约束：
+ *  1) 图片按槽位存（sheet / origin / heads / extras）：设定卡与原立绘用途不同，
+ *     分开才能让 refPolicy 有东西可选。
+ *  2) 参考图预算必须显式算 —— H3 的 ref_images 上限是 9 张且整条提示词共享，
+ *     不是每角色 9 张；超了要裁剪并明确告知。
  *  3) 卡片只存 `rel`（相对 dataDir），不存绝对路径。
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { collectionStore } from '../store/json-store.js';
 import { safeId, safeJoin } from '../security.js';
 import { loadConfig } from '../config.js';
@@ -322,30 +321,6 @@ export function createVaultService({ getCfg = loadConfig } = {}) {
     };
   }
 
-  /**
-   * 把角色卡的文字设定拼成提示词里的「主体定义」段。
-   *
-   * ⚠️ 与"拆解提示词不描述图片"不冲突：
-   *    拆解时图是待处理的素材，描述它会干扰；
-   *    生成时图是权威形象，用文字**指明「这是谁」「看第几张图」**是必要的。
-   *    这里只写身份与编号，不复述像素级外观（那已经由图片本身承载）。
-   *
-   * @param {Array<{card, pictureIndex}>} entries
-   */
-  function buildSubjectDefinitions(entries = []) {
-    const lines = [];
-    for (const { card, pictureIndex } of entries) {
-      if (!card) continue;
-      const bits = [];
-      if (card.description) bits.push(card.description);
-      if (card.traits?.length) bits.push(card.traits.join('、'));
-      if (card.personality) bits.push(`性格：${card.personality}`);
-      const ref = pictureIndex ? `外观以 <Picture ${pictureIndex}> 为准` : '';
-      lines.push(`${card.name}：${bits.join('；') || '角色'}${ref ? `。${ref}` : ''}`);
-    }
-    return lines.join('\n');
-  }
-
   function meta() {
     return {
       slots: CARD_IMAGE_SLOTS,
@@ -356,7 +331,7 @@ export function createVaultService({ getCfg = loadConfig } = {}) {
     };
   }
 
-  return { list, get, upsert, remove, plan, meta, buildSubjectDefinitions, cardImagesFor };
+  return { list, get, upsert, remove, plan, meta, cardImagesFor };
 }
 
 /* --------------------------------------------------------- 项目 ⇄ 角色卡 */
@@ -378,7 +353,9 @@ export function writeProjectCards(projectId, cardIds, cfg = loadConfig()) {
   const f = projectCardsFile(projectId, cfg);
   fs.mkdirSync(path.dirname(f), { recursive: true });
   const clean = [...new Set((cardIds ?? []).filter(Boolean).map(String))];
-  const tmp = `${f}.${process.pid}.tmp`;
+  // tmp 名必须唯一到"同进程内并发写不撞名"：含 pid 会让两次并发写用同一条 tmp 路径，
+  // 后写覆盖先写的 tmp，再各自 rename → 一方修改丢失。用 uuid 保证零碰撞。
+  const tmp = `${f}.${randomUUID()}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(clean, null, 2), 'utf8');
   fs.renameSync(tmp, f);
   return clean;

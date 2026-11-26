@@ -84,8 +84,8 @@ if ($Clean -and (Test-Path $DEST)) {
 
 # ---------------------------------------------------------------- 只复制运行所需
 
-# _removed/ 是历史参考（不被 __init__.py import），不进 ComfyUI
-$EXCLUDE_DIRS = @('_removed')
+# 排除目录：只跳过缓存，不复制任何非运行必需内容
+$EXCLUDE_DIRS = @('__pycache__')
 # 运行所需：Python 代码、依赖的 JSON schema，以及给部署者看的 VENDOR.md
 # （VENDOR.md 在 ComfyUI 里不参与运行，但漏掉它会让部署后的包无法自查来源，V-13）
 $COPY_EXTS = @('.py', '.json', '.md')

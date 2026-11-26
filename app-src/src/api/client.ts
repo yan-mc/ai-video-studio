@@ -46,6 +46,15 @@ import type {
   LoraCategory,
   LoraItem,
   LoraSolveResult,
+  ImageMetaPayload,
+  ImageGenerateInput,
+  ImageGenerateResult,
+  ImageLoraCatalogPayload,
+  ImageLoraSolvePayload,
+  ImageProgressPayload,
+  InpaintMetaPayload,
+  InpaintInput,
+  InpaintResult,
 } from './types';
 
 /* ------------------------------------------------------------ 基础设置 */
@@ -528,8 +537,27 @@ export const api = {
   toolboxBatchProgress: () => request<unknown>('GET', '/jobs/batch-progress'),
 
   /* 图像生成（H3-Image） */
-  imageMeta: () => request<unknown>('GET', '/image/meta'),
-  imageGenerate: (input: Record<string, unknown>) => request<unknown>('POST', '/image/generate', input),
+  imageMeta: () => request<ImageMetaPayload>('GET', '/image/meta'),
+  imageGenerate: (input: ImageGenerateInput) => request<ImageGenerateResult>('POST', '/image/generate', input),
+  /** 图像 LoRA 目录（只列 models/loras/h3img/ 下的文件） */
+  imageLoraCatalog: () => request<ImageLoraCatalogPayload>('GET', '/image/lora/catalog'),
+  /** 图像 LoRA 约束求解（单选/衰减/过曝看门狗） */
+  imageLoraSolve: (items: Array<{ name: string; strength?: number }>, opts?: { hasRefImages?: boolean }) =>
+    request<ImageLoraSolvePayload>('POST', '/image/lora/solve', { items, ...(opts ?? {}) }),
+  /** 出图进度（轻量：只回 status + progress + 产物 rel） */
+  imageProgress: (ids: string[]) =>
+    request<ImageProgressPayload>('GET', `/image/progress?ids=${encodeURIComponent(ids.join(','))}`),
+
+  /* 局部重绘（H3-Image inpaint） */
+  /** 能力元信息（含 denoiseLocked 与强度档） */
+  inpaintMeta: () => request<InpaintMetaPayload>('GET', '/image/inpaint/meta'),
+  /**
+   * 提交局部重绘。
+   *
+   * ⚠️ 没有 denoise 参数：它被锁在 1.0（PDD 6 头网格）。
+   *    改动强弱用 `strength`（SplitSigmas 切点）。
+   */
+  imageInpaint: (input: InpaintInput) => request<InpaintResult>('POST', '/image/inpaint', input),
 
   /* 立绘拆解 */
   breakdownMeta: () => request<unknown>('GET', '/breakdown/meta'),

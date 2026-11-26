@@ -126,8 +126,7 @@ dsh-jiuzhang-studio/
 │
 ├─ vendor/nanfeng/              ← ③ ComfyUI 节点（部署时复制进 custom_nodes）
 │  ├─ *.py (10 个)
-│  ├─ VENDOR.md                 改造记录
-│  └─ _removed/                 已移除模块（历史参考，不加载）
+│  └─ VENDOR.md                 改造记录
 │
 ├─ skills/                      ← Skill 根目录（唯一）
 │  ├─ README.md                 体系说明
@@ -157,15 +156,12 @@ dsh-jiuzhang-studio/
 │  ├─ runs/                     续写批次状态
 │  └─ config.json               配置（运行时生成）
 │
-├─ tools/                       ← 开发工具
-│  ├─ smoke-api.mjs             冒烟测试（207 项）
-│  ├─ check-routes.mjs          三方路由一致性
-│  ├─ audit-params.mjs          221 参数有效性审计
-│  └─ preview-server.mjs        独立预览服务器
+├─ host/python/                  ← 由 Host 拉起的 Python 子进程脚本
+│  └─ translate_server.py       本地 7B 翻译服务（stdin/stdout JSON）
 │
-├─ docs/                        审查报告与方案
+├─ docs/                        设计说明与机制文档
 ├─ cordis.patch.yml             DSH 加载补丁
-├─ package.json                 插件清单（version 2.3.0）
+├─ package.json                 插件清单（version 4.0.0）
 └─ README.md / CHANGELOG.md
 ```
 
@@ -326,8 +322,11 @@ POST /blender/render {mode, projectId, shotId}
 | GET | `/breakdown/meta` | 默认提示词 + 上限字符数 + 固定尺寸 |
 | POST | `/breakdown/preview` | 回显提交用提示词（**不拼装**）|
 | POST | `/breakdown/generate` | 出拆解图（**无参考图直接 400**；超长 400 `PROMPT_TOO_LONG`）|
-| GET | `/image/meta` | H3-Image 模型状态 + 12 种尺寸 |
-| POST | `/image/generate` | H3-Image 出图 |
+| GET | `/image/meta` | H3-Image 模型状态 + 尺寸表 + **真实生效参数** + 各项上限 + LoRA 分类 |
+| GET | `/image/lora/catalog` | 图像 LoRA 目录（只列 `models/loras/h3img/` 下的文件）|
+| POST | `/image/lora/solve` | 图像 LoRA 约束求解（单选/衰减/过曝看门狗/画风×角色冲突）|
+| POST | `/image/generate` | H3-Image 出图（文生图 / 参考图编辑 / 批量 / LoRA）|
+| GET | `/image/progress?ids=` | 出图进度（轻量：status + progress + 产物 rel）|
 
 ### 4.7 Blender 预演
 
@@ -434,7 +433,7 @@ POST /blender/render {mode, projectId, shotId}
 | `studio_post` | 图像/视频后处理 | `qc` 的入参形状与 REST 不同 |
 | `studio_edit` | 视频剪辑：probe/trim/concat/audio/render/clips/projects | 音轨子操作走 `audioOp`（顶层 `op` 已被占用）|
 | `studio_toolbox` | 模板/服化道/清理/日志 | `batchProgress` 只支持 `list` |
-| `studio_image` | H3-Image 出图 | 无负面提示词 |
+| `studio_image` | H3-Image 出图（`meta` / `lora` / `generate`；参考图编辑 / 批量 / LoRA）| 无负面提示词；步数固定 6 |
 | `studio_storyboard` | 智能分镜 | 走 DSH 内部 LLM，零凭据 |
 
 ---
@@ -455,7 +454,10 @@ POST /blender/render {mode, projectId, shotId}
 
 ③ 装 vendor 节点（**必做，否则 h3-nanfeng 后端不可用**）
    pwsh -File vendor/nanfeng/deploy-vendor.ps1 -ComfyDir "<工作区>\ai-runtime\ComfyUI"
-   （脚本只复制 .py + dlss_schema.json，跳过 _removed/；目标已存在时拒绝覆盖，加 -Force）
+   （脚本只复制 .py + dlss_schema.json；目标已存在时拒绝覆盖，加 -Force）
+④ 装局部重绘节点（**crop&stitch 模式必需**）
+   pwsh -File vendor/inpaint-nodes/deploy-vendor.ps1 -ComfyDir "<工作区>\ai-runtime\ComfyUI"
+   未部署时 /image/inpaint 会在提交前用 INPAINT_NODES_MISSING 明确报错。
    详见 skills/setup 的 §2.5 与 vendor/README.md
 ```
 
@@ -495,7 +497,12 @@ POST /blender/render {mode, projectId, shotId}
 | 提示词格式 / 画风 / 打光 | `host/bridge/prompt/h3-prompt.js` |
 | 换人提示词规则化 | `host/bridge/prompt/prompt-normalizer.js` |
 | 桥接层对外契约（**改上游先改这里**）| `host/bridge/index.js` |
-| 参考图编号 / 上限 9 张 | `host/services/ref-images.js` |
+| 参考图编号 / 上限 9 张 | `host/services/ref-images.js`（`MAX_REF_IMAGES`）|
+| 图像参考图上限 16 张 / 保序解析 | `host/services/ref-images.js`（`MAX_IMAGE_EDIT_REFS` / `resolveImageEditRefs`）|
+| 图像尺寸表 / 32 倍数自检 / 入参校验 | `host/services/h3-image.js`（`IMAGE_SIZES` / `assertImageSizes` / `validateImageRequest`）|
+| 图像 LoRA 分类 / 求解 | `host/services/h3-image-lora.js` |
+| 出图进度（队列三态）| `host/services/comfy-client.js` 的 `queueStatus` / `runWorkflow({ onProgress })` |
+| 图像页 UI / LoRA 面板 | `app-src/src/pages/ImagePage.tsx` + `app-src/src/components/ImageLoraPicker.tsx` |
 | 配置读取约定 / 分裂脑扫描 | `host/config-reader.js` |
 | 原子写 / .bak / 队列 | `host/store/json-store.js` |
 | 单任务查询 / 列表投影 | `host/api/index.js` 的 `/jobs/:id` 与 `?fields=list` |
@@ -517,22 +524,16 @@ POST /blender/render {mode, projectId, shotId}
 ## 八、开发与验证
 
 ```powershell
-npm run build          # 构建 SPA（tsc --noEmit && vite build）
-npm test               # 冒烟测试（207 项真执行，含 19 项架构守卫）
-# ↑ 架构守卫守的是「结构性约束」：桥接层边界 / 参考图编号唯一实现 /
-#   配置无快照读 / json-store 不删目标 / 前端 fetch 超时 / 相对 import 可解析。
-#   这些不是在测功能，是在防「以后又不小心退回旧形态」。
+npm run build          # 构建 SPA（vite build）
 npm run typecheck      # 仅类型检查
-npm run check:routes   # SPA/NAV/client 三方路由一致性
-node tools/verify-edit.mjs   # 剪辑功能验收（需 DSH 已重启并加载新路由）
-npm run audit:params   # 221 参数有效性审计
-npm run preview        # 独立预览服务器（不启动 DSH）
 ```
 
-### ⚠️ 改动后必须做的五件事
+> v4 起已移除全部冒烟/路由/审计测试脚本（见 `docs/audit-v4/` 的清理记录）。
+> 改完代码后按下面五步人工验证：
 
-1. `node --check` —— 只查语法，**必要但不充分**
-2. **模拟 ctx 跑 `apply()`** —— `npm test` 会做，能抓未定义变量
+1. `node --check` 每个改动文件 —— 只查语法，**必要但不充分**
+2. 起一个最小 ctx 模拟跑一次 `apply()` —— 能抓未定义变量（tools.js 曾因
+   `breakdownLevel is not a function` 让整个插件 fiber failed）
 3. 重启 DSH 后看 `plugin_manager list_plugins` 的 `fiberPhase` 是否 `active`
 4. 调一个真实工具 —— 能抓运行时字段丢失
 5. 改 `inject` 后**必须重启 DSH**（HMR 不会重新解析 inject）

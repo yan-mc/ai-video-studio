@@ -255,28 +255,40 @@ export const SIGMA_PRESETS = Object.freeze({
 /**
  * 校验一条完整 Sigma 序列是否合法。
  *
- * 规则（对照 vendor/nanfeng/h3_generator.py 的 _parse_manual_sigmas
+ * 规则（对照 vendor/nanfeng/h3_generator.py 的 `_parse_manual_sigmas`
  * 与 V8.1 的个数校验）：
  *   1. 至少 2 个值
  *   2. 全部为有限非负数
  *   3. **严格**从高到低（不能重复、不能回升）
- *   4. 末值必须是 0
- *   5. 开二采时，个数必须 = 一采步数 + 二采步数 + 1
+ *   4. 首值 ≤ 1（H3二采Sigma 与完整轨迹都要求）
+ *   5. 末值必须是 0
+ *   6. 开二采时，个数必须 = 一采步数 + 二采步数 + 1 且**步数必须是正数**
+ *
+ * ⚠️ 本函数必须由提交链路调用（buildShotWorkflow）。只在冒烟测试里跑
+ *    等于没有校验：格式错要等 vendor `_parse_manual_sigmas` 在展开图时抛错。
  *
  * @param {string} text
- * @param {{ firstSteps?: number, secondSteps?: number, latentUpscale?: boolean }} [opts]
- * @returns {{ ok: boolean, values: number[], errors: string[] }}
+ * @param {{ firstSteps?: number, secondSteps?: number, latentUpscale?: boolean,
+ *           singlePassManual?: boolean }} [opts]
+ * @returns {{ ok: boolean, values: number[], errors: string[], expectedCount: number|null }}
  */
 export function validateSigmaSequence(text, opts = {}) {
   const errors = [];
   const raw = String(text ?? '').trim();
-  if (!raw) return { ok: true, values: [], errors: [] };   // 空 = 自动
+  const latentUpscale = opts.latentUpscale === true;
+  const first = Math.round(Number(opts.firstSteps ?? 6));
+  const second = Math.round(Number(opts.secondSteps ?? 4));
+  const expectedCount = (latentUpscale || opts.singlePassManual)
+    ? (latentUpscale ? first + second + 1 : null)
+    : null;
+
+  if (!raw) return { ok: true, values: [], errors: [], expectedCount };   // 空 = 自动
 
   const values = (raw.match(/[-+]?(?:\d*\.)?\d+(?:[eE][-+]?\d+)?/g) ?? []).map(Number);
 
   if (values.length < 2) {
     errors.push('至少需要 2 个数值，例如：1, 0.8, 0');
-    return { ok: false, values, errors };
+    return { ok: false, values, errors, expectedCount };
   }
   if (values.some((v) => !Number.isFinite(v) || v < 0)) {
     errors.push('只能填有限的非负数');
@@ -287,24 +299,28 @@ export function validateSigmaSequence(text, opts = {}) {
       break;
     }
   }
+  // 首值 ≤ 1：vendor 对 H3二采Sigma 有这条校验（h3_generator.py:229-230），
+  // 完整轨迹同理 —— sigma 是噪声水平占比，超过 1 不是合法起点。
+  if (Number.isFinite(values[0]) && values[0] > 1 + 1e-8) {
+    errors.push(`首值不能超过 1（当前 ${values[0]}）`);
+  }
   if (Math.abs(values[values.length - 1]) > 1e-8) {
     errors.push('最后一个值必须是 0');
   }
 
-  // 个数校验（只在这个序列真的会被用到时才检查）
-  if (opts.latentUpscale) {
-    const first = Number(opts.firstSteps ?? 6);
-    const second = Number(opts.secondSteps ?? 4);
-    const expected = first + second + 1;
-    if (values.length !== expected) {
+  // 个数校验（只在序列真的会被用到时才检查）
+  if (expectedCount != null) {
+    if (!(first > 0) || !(second > 0)) {
+      errors.push(`一采/二采步数必须是正数（当前 ${first} / ${second}）`);
+    } else if (values.length !== expectedCount) {
       errors.push(
-        `开潜空间二采时，值的个数必须 = 一采步数 + 二采步数 + 1 = ${first} + ${second} + 1 = ${expected}，`
+        `开潜空间二采时，值的个数必须 = 一采步数 + 二采步数 + 1 = ${first} + ${second} + 1 = ${expectedCount}，`
         + `当前 ${values.length} 个`,
       );
     }
   }
 
-  return { ok: errors.length === 0, values, errors };
+  return { ok: errors.length === 0, values, errors, expectedCount };
 }
 
 /** 默认预设 id */

@@ -1,10 +1,11 @@
 /**
- * ComfyUI 客户端 —— H3 本地生成的实际执行器。
+ * ComfyUI 客户端 —— H3 生成的实际执行器。
  *
- * 与旧实现的关键差异（审查确认的缺陷）：
- *  - 取消时**真发** `/interrupt` 与 `/queue` 删除，远端不再空烧 GPU；
- *  - 首尾帧 staging 文件名带 jobId，避免多镜头互相覆盖；
- *  - 错误优先识别 ComfyUI 的 status_str=error，不再误报"没有输出文件"。
+ * 约束（每条都已实测）：
+ *  - 取消时真发 `/interrupt` 与 `/queue` 删除，远端不再空烧 GPU；
+ *  - stage 文件名带 jobId + 内容哈希，同 job 内同名文件不会互相覆盖；
+ *  - 错误优先识别 ComfyUI 的 status_str=error，不误报"没有输出文件"；
+ *  - 轮询按**截止时间**等（见 `COMFY_TIMEOUT_MIN`），不按次数。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -12,71 +13,62 @@ import { createHash } from 'node:crypto';
 import { loadConfig } from '../config.js';
 import { cancellableSleep, throwIfCancelled } from './job-runner.js';
 
-/**
- * 轮询节奏与超时。
- *
- * ============================================================================
- * 为什么不再用「固定轮询次数」
- * ============================================================================
- *
- * 早先是 `MAX_POLL = 600` × `POLL_MS = 3000` = **硬上限 30 分钟**。
- * 它的问题不是"30 分钟太短"，而是**这个上限与任务实际需要无关**：
- *
- *   · 不加速方案（原模型 50 步）单镜本来就慢 —— 5 秒片在高分辨率下
- *     跑 50 步很容易超过 30 分钟，于是被 `COMFY_TIMEOUT` 打断。
- *     而此时 ComfyUI **仍在继续跑**，GPU 白烧，产物也拿不到。
- *   · 反之，一个 4 步小图 10 秒就完了，那 30 分钟的空头额度毫无意义。
- *
- * 正确做法是「按截止时间等」而不是「按次数等」：
- *   · 默认超时 **2 小时**（足够跑完 50 步长片）
- *   · 可用配置 `comfyTimeoutMin` 或环境变量 `JZ_COMFY_TIMEOUT_MIN` 覆盖
- *   · 超时后**不谎报成功**，错误信息里带上已等待时长与建议
- *
- * ⚠️ 超时**不等于失败**：任务可能还在跑。所以错误信息明确写出
- *    「可调大超时后重试，或到 ComfyUI 队列查看」。绝不静默丢弃。
- */
 const POLL_MS = 3000;
 
-/** 默认 2 小时 —— 覆盖 50 步原模型长片的最坏情况 */
-const DEFAULT_TIMEOUT_MIN = 120;
+/**
+ * 单任务等待上限（分钟）—— **默认 2 小时**。
+ *
+ * 覆盖 50 步原模型长片（`none` 加速方案）的最坏情况：5 秒片在高分辨率下
+ * 跑满 50 步很容易超过 1 小时。
+ *
+ * 可配置：环境变量 `JZ_COMFY_TIMEOUT_MIN` > 配置 `comfyTimeoutMin` > 本默认值，
+ * 上限 24 小时（防手滑写成天文数字把进程挂死）。
+ *
+ * ⚠️ 批次段等待（续写编排）**必须**引用这里导出的 `resolveComfyTimeoutMs(cfg)`
+ *    再加余量，而不是另写一个 1 小时的硬编码 —— 段超时 < 单任务超时的后果是：
+ *    任务还在 ComfyUI 里跑、批次已把该段判 failed 并 return，而下一段因为
+ *    "前面有非 completed 段"永久卡死，只能手工 reset。
+ *    （当前 `host/api/routes/nanfeng.js` 的 `waitSegment` 仍是 1h 硬编码，不归本模块改。）
+ */
+export const COMFY_TIMEOUT_MIN = 120;
+
+/** 超时硬上限（分钟） */
+export const COMFY_TIMEOUT_MAX_MIN = 24 * 60;
 
 /**
- * 从配置 / 环境变量解析超时（分钟）。
+ * 解析本次生效的超时（毫秒）。优先级：环境变量 > 配置 > 默认。
  *
- * 优先级：环境变量 > 配置 > 默认。上限 24 小时，防止手滑写成天文数字
- * 把进程挂到天荒地老。
+ * @param {object} [cfg]
+ * @returns {number}
  */
-function resolveTimeoutMs(cfg) {
+export function resolveComfyTimeoutMs(cfg = loadConfig()) {
   const fromEnv = Number(process.env.JZ_COMFY_TIMEOUT_MIN);
   const fromCfg = Number(cfg?.comfyTimeoutMin);
   const min = Number.isFinite(fromEnv) && fromEnv > 0
     ? fromEnv
-    : (Number.isFinite(fromCfg) && fromCfg > 0 ? fromCfg : DEFAULT_TIMEOUT_MIN);
-  return Math.min(min, 24 * 60) * 60 * 1000;
+    : (Number.isFinite(fromCfg) && fromCfg > 0 ? fromCfg : COMFY_TIMEOUT_MIN);
+  return Math.min(min, COMFY_TIMEOUT_MAX_MIN) * 60 * 1000;
 }
 
 /**
  * 端口自动发现。
  *
- * 背景：Windows 的 Hyper-V / WSL / Docker 会**动态保留**大段 TCP 端口，
- * 被保留的端口绑定直接报 WinError 10013。而且保留范围每次重启都可能变，
- * 所以 ComfyUI 的端口**不能写死**，也不能假设上次那个还能用。
+ * Windows 的 Hyper-V / WSL / Docker 会**动态保留**大段 TCP 端口，被保留的端口
+ * 绑定直接报 WinError 10013，且保留范围每次重启都可能变 —— 所以 ComfyUI 的端口
+ * 不能写死，也不能假设上次那个还能用。
  *
- * 约定：`ai-runtime/start-h3.ps1` 启动成功后把实际端口写进 `ai-runtime/.comfy-port`。
- * 这里读它 → 插件自动跟随，用户不需要手改配置。
- *
- * 优先级：显式环境变量 > 端口文件 > 配置里的 comfyUrl
- * （显式指定就是显式指定，不该被文件覆盖）
+ * 约定：`ai-runtime/start-h3.ps1` 启动成功后把实际端口写进 `ai-runtime/.comfy-port`，
+ * 这里读它即可自动跟随。
+ * 优先级：显式环境变量 > 端口文件 > 配置里的 comfyUrl（显式指定不该被文件覆盖）。
  */
 const PORT_FILE_NAMES = ['.comfy-port'];
 
 /**
  * 候选的 ai-runtime 目录。
  *
- * 不精确计算层级（插件可能被 link 到任意位置），改为从插件根向上逐层找
- * 名为 `ai-runtime` 的兄弟目录：
- *   <plugin>/host/services → 逐层向上，每层都试 `<dir>/ai-runtime` 与 `<dir>/../ai-runtime`
- * 这样插件放在 `工作室/` 下、或直接放在工程根下，都能命中。
+ * 不精确计算层级（插件可能被 link 到任意位置），改为从插件根逐层向上找名为
+ * `ai-runtime` 的兄弟目录：每层都试 `<dir>/ai-runtime`，插件放在 `工作室/` 下
+ * 或直接放在工程根下都能命中。
  */
 function portFileCandidates() {
   const out = [];
@@ -121,13 +113,12 @@ export function discoverComfyUrl() {
 /**
  * 拿一个**确认可达**的 ComfyUI 地址。
  *
- * 为什么需要这一步：端口文件可能是上一次运行的残留（服务已停），
- * 直接按文件去连会得到 ECONNREFUSED，而用户只会看到"ComfyUI 不可达"，
- * 根本想不到是端口文件过期。
+ * 端口文件可能是上一次运行的残留（服务已停），直接按文件去连会 ECONNREFUSED，
+ * 而用户只会看到"ComfyUI 不可达"，想不到是端口文件过期。
  *
- * 顺序：候选地址逐个探 /system_stats，第一个通的就用。
- * 候选 = [端口文件, 配置里的 comfyUrl, 常见端口扫描]
- * 全部不通时返回首选地址（让错误信息指向最可能的那个）。
+ * 顺序：候选地址逐个探 `/system_stats`，第一个通的就用。
+ * 候选 = [端口文件, 配置里的 comfyUrl, 常见端口扫描]；全不通时返回首选地址，
+ * 让错误信息指向最可能的那个。
  */
 const PROBE_CACHE = { url: '', at: 0 };
 const PROBE_TTL_MS = 5000;
@@ -155,9 +146,8 @@ export async function resolveComfyUrl(cfg = loadConfig()) {
       }
     } catch { /* 继续试下一个 */ }
   }
-  // ⚠️ 探测失败**不写缓存**：ComfyUI 刚 bind 完、或启动脚本还在加载模型时，
-  //    一次失败如果被缓存 5 秒，接下来 5 秒内 health()/vramStatus() 全报"不可达"，
-  //    用户看到的是「启动成功但状态不可达」。失败只记 url 供报错文案用，不下结论。
+  // 探测失败**不写缓存**：ComfyUI 刚 bind 完或启动脚本还在加载模型时，一次失败
+  // 如果被缓存 5 秒，接下来 health()/vramStatus() 全报"不可达"。
   PROBE_CACHE.url = '';
   PROBE_CACHE.at = 0;
   return candidates[0] || '';
@@ -243,28 +233,23 @@ export function resetVramCache() { vramCache = { at: 0, value: null }; }
 /**
  * 拉取 ComfyUI 实际可用的模型文件名（按 ComfyUI 的文件夹分类）。
  *
- * 为什么要问 ComfyUI 而不是扫磁盘：模型目录可能通过 extra_model_paths.yaml
- * 配到别处，扫 dataDir 或猜路径都会漏。object_info 是**唯一权威**列表。
+ * 问 ComfyUI 而不是扫磁盘：模型目录可能通过 extra_model_paths.yaml 配到别处，
+ * 扫 dataDir 或猜路径都会漏。`object_info` 是唯一权威列表。
  *
- * 返回 `{ diffusion_models: [...], text_encoders: [...], vae: [...],
- *           loras: [...], model_patches: [...] }`。
- * 拿不到（ComfyUI 不可达 / 节点缺失）时返回空对象，调用方自行回退到默认名。
+ * 返回 `{ diffusion_models, text_encoders, vae, loras, model_patches }`；
+ * 拿不到（不可达 / 节点缺失）时返回空数组，调用方自行回退到默认名。
  */
 export async function listModelFiles(cfg = loadConfig()) {
   const base = await resolveComfyUrl(cfg).catch(() => '');
-  // ⚠️ 三态返回：`ok` 区分"探测成功但没有"与"压根没探到"。
-  //    历史实现统一返回 {}，把两种情况混成一个空对象，
-  //    调用方无法判断"控制模型确实没装"还是"ComfyUI 不可达"，
-  //    只能猜 —— 猜错的后果是硬提交一个不存在的模型名。
+  // 三态返回：`ok` 区分"探测成功但没有"与"压根没探到"。合并成一个空对象的话，
+  // 调用方无法判断"模型确实没装"还是"ComfyUI 不可达"，只能猜 ——
+  // 猜错的后果是硬提交一个不存在的模型名。
   if (!base) return { ok: false, reason: 'ComfyUI 地址不可达', diffusion_models: [], text_encoders: [], vae: [], loras: [], model_patches: [] };
   /**
-   * 从 node schema 里取下拉选项。
-   *
-   * ⚠️ 两种形态都存在，必须都处理：
-   *   V1 节点：[ ["a.safetensors","b.safetensors"], {tooltip} ]   ← 列表在 [0]
-   *   V3 节点：[ "COMBO", {options: [...]} ]                      ← 列表在 [1].options
-   * 只按后者写的话，所有 V1 节点都会返回空 —— 表现为"模型列表永远为空、
-   * 静默退回默认名"，而这正是我们想避免的失败模式。
+   * 从 node schema 里取下拉选项。两种形态都存在，必须都处理：
+   *   V1 节点：`[ ["a.safetensors","b.safetensors"], {tooltip} ]`  ← 列表在 [0]
+   *   V3 节点：`[ "COMBO", {options: [...]} ]`                     ← 列表在 [1].options
+   * 只按后者写的话所有 V1 节点都会返回空 —— 模型列表永远为空、静默退回默认名。
    */
   const pick = (info, nodeType, inputName) => {
     const spec = info?.[nodeType]?.input?.required?.[inputName];
@@ -302,18 +287,12 @@ export async function listModelFiles(cfg = loadConfig()) {
 
 
 /**
- * 上传名只保留安全字符 —— ComfyUI 会把它当文件名落盘。
+ * 上传名只保留安全字符 + 内容哈希。
  *
- * ⚠️ 必须带一个内容哈希后缀。
- *
- * 历史缺陷（P1，静默丢图）：纯 `[^A-Za-z0-9_-] → _` 的替换会让所有中文文件名
- * **塌缩成同一个名字**：
- *   立绘.png / 设定.png / 侧面图.png → ____.png / ____.png / _____.png
- * 于是同一批 staged 文件互相覆盖，用户传 3 张参考图实际只用上 2 张，
- * 而且完全不报错（LoadImage 找到文件就正常跑）。
- *
- * 中文名是本插件主用户群的常态，所以这里保留 ASCII 部分 + 短哈希：
- * 既安全又唯一。
+ * ComfyUI 把它当文件名落盘，所以必须 ASCII 安全；但哈希必须覆盖
+ * **完整源路径 + 文件内容**，不能只哈希 basename —— 否则同一 job 里
+ * `角色/正面.png` 与 `场景/正面.png` 会得到同一个名字，后传的覆盖先传的，
+ * 两张参考图变成同一张且不报错（LoadImage 找到文件就正常跑）。
  */
 function safeStem(text) {
   const base = String(text).replace(/[^A-Za-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '');
@@ -322,21 +301,36 @@ function safeStem(text) {
 }
 
 /**
+ * 内容指纹：源绝对路径 + 前 64KB 内容 + 文件大小。
+ *
+ * 路径进哈希是必需的（不同目录同名文件内容可能恰好相同、但语义不同，
+ * 例如同一张图挂在两个不同镜头上用不同用途）；内容进哈希是为了
+ * 同一路径的图被替换后不会复用旧的上传名。
+ *
+ * @param {string} abs
+ * @returns {string} 10 位十六进制
+ */
+function contentFingerprint(abs) {
+  const h = createHash('sha1').update(String(abs));
+  try {
+    const st = fs.statSync(abs);
+    h.update(`|${st.size}`);
+    const fd = fs.openSync(abs, 'r');
+    try {
+      const buf = Buffer.alloc(Math.min(65536, st.size));
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
+      h.update(buf.subarray(0, n));
+    } finally { fs.closeSync(fd); }
+  } catch { /* 读不到内容也至少有路径，仍然唯一 */ }
+  return h.digest('hex').slice(0, 10);
+}
+
+/**
  * 把本地图片交给 ComfyUI，返回 `{ 占位符: ComfyUI 里的文件名 }`。
  *
- * **为什么不再只靠 cfg.comfyInputDir**（曾经的严重缺陷）：
- *   LoadImage 只认 input 目录里的文件名，所以图片必须先到那里。
- *   旧实现只在 `cfg.comfyInputDir` 非空且存在时做本地复制，否则**直接返回 {}**，
- *   于是调用方拿不到名字 → 参考图接线整段被跳过 → 提交给 ComfyUI 的工作流里
- *   根本没有图（实测：`images.image_1` / `ref_images.ref_image_1` 全缺，
- *   立绘拆解与视频参考图都退化成纯文生图）。
- *   而 `comfyInputDir` 默认就是空字符串，等于开箱即坏的静默失效。
- *
- * 现在改为优先走 ComfyUI 自己的 `POST /upload/image`：
- *   - 不依赖插件与 ComfyUI 同机同路径，也不需要用户先配置 input 目录；
- *   - 上传失败才退回本地复制（保留原有可离线路径）。
- *
- * 失败一律抛出，不再静默吞掉——静默正是这个 bug 难查的原因。
+ * 优先走 `POST /upload/image`（不要求插件与 ComfyUI 同机同路径），
+ * 失败才退回本地复制到 `cfg.comfyInputDir`。失败一律抛出 ——
+ * 静默吞掉的后果是参考图整段不接线、提交给 ComfyUI 的工作流里根本没有图。
  */
 export async function stageToComfyInput(cfg, absPaths, jobId) {
   const out = {};
@@ -352,7 +346,9 @@ export async function stageToComfyInput(cfg, absPaths, jobId) {
     if (!fs.existsSync(abs)) { failures.push(`${key}: 源文件不存在 ${abs}`); continue; }
 
     const ext = path.extname(abs) || '.png';
-    const name = `${tag}_${jobId}_${safeStem(path.basename(abs, ext))}${ext}`;
+    // 名字 = 占位符键 + jobId + 源路径/basename 可读片段 + 内容指纹。
+    // 内容指纹是唯一性保证，其余部分只为排障时可读。
+    const name = `${tag}_${jobId}_${safeStem(key)}_${contentFingerprint(abs)}${ext}`;
 
     let landed = false;
     if (url) {
@@ -360,8 +356,9 @@ export async function stageToComfyInput(cfg, absPaths, jobId) {
         const buf = fs.readFileSync(abs);
         const form = new FormData();
         form.append('image', new Blob([buf]), name);
-        form.append('overwrite', 'true');
         form.append('type', 'input');
+        // 不写 overwrite：名字已含内容指纹，撞名的概率可忽略。
+        // 无条件 overwrite=true 会覆盖掉**别人**（其它 job / 用户手动上传）的同名文件。
         const res = await fetch(`${url}/upload/image`, {
           method: 'POST',
           body: form,
@@ -412,8 +409,57 @@ export function deepReplace(value, map) {
   return value;
 }
 
-/** 提交工作流并轮询，返回产物 */
-export async function runWorkflow({ cfg, workflow, map, job, outputsDir, onSubmitted }) {
+/**
+ * 读 ComfyUI 队列，返回某个 prompt 的位次信息。
+ *
+ * `/history` 只有**跑完之后**才出现条目（单张 4.2MP 实测约 148 秒），
+ * 只轮询 history 时整段时间 UI 只能显示"进行中"，用户不知道是在跑、
+ * 在排队还是卡住了。`/queue` 是唯一能回答"现在到哪了"的轻量端点：
+ *   queue_running[i][0] = 正在执行的 prompt_id
+ *   queue_pending[i][0] = 排队的 prompt_id（按顺序）
+ *
+ * 拿不到就返回 null —— 进度是锦上添花，不能成为新的失败源。
+ *
+ * @param {object} cfg
+ * @param {string} remoteId
+ * @returns {Promise<null|{state:'running'|'pending'|'unknown', ahead:number, runningTotal:number}>}
+ */
+export async function queueStatus(cfg, remoteId) {
+  if (!remoteId) return null;
+  try {
+    const url = await resolveComfyUrl(cfg);
+    if (!url) return null;
+    const res = await fetch(`${url}/queue`, { signal: AbortSignal.timeout(4000) });
+    if (!res.ok) return null;
+    const q = await res.json();
+    const runningList = Array.isArray(q?.queue_running) ? q.queue_running : [];
+    const pendingList = Array.isArray(q?.queue_pending) ? q.queue_pending : [];
+    const matches = (entry) => Array.isArray(entry) && String(entry[1]) === String(remoteId);
+    if (runningList.some(matches)) {
+      return { state: 'running', ahead: 0, runningTotal: runningList.length };
+    }
+    const idx = pendingList.findIndex(matches);
+    if (idx >= 0) {
+      return { state: 'pending', ahead: idx, runningTotal: runningList.length };
+    }
+    return { state: 'unknown', ahead: 0, runningTotal: runningList.length };
+  } catch { return null; }
+}
+
+/**
+ * 提交工作流并轮询，返回产物。
+ *
+ * @param {object} opts
+ * @param {object} opts.cfg
+ * @param {object} opts.workflow
+ * @param {object} opts.map
+ * @param {object} opts.job
+ * @param {string} opts.outputsDir
+ * @param {(remoteId:string, job:object)=>Promise<void>} [opts.onSubmitted]
+ * @param {(p:{pct:number, note:string, queue?:object|null})=>Promise<void>|void} [opts.onProgress]
+ * @param {string} [opts.progressHint] 附在进度文案后的补充（例如"2 个样本"）
+ */
+export async function runWorkflow({ cfg, workflow, map, job, outputsDir, onSubmitted, onProgress, progressHint = '' }) {
   const wf = deepReplace(workflow, map);
   const url = await resolveComfyUrl(cfg);
   const submitted = await getJson(`${url}/prompt`, {
@@ -424,30 +470,40 @@ export async function runWorkflow({ cfg, workflow, map, job, outputsDir, onSubmi
   const remoteId = submitted.prompt_id || submitted.id;
   if (!remoteId) throw new Error('COMFY_NO_PROMPT_ID');
 
-  // ⚠️ 提交成功后**立刻**把 remoteId 交给上层持久化。
+  // 提交成功后**立刻**把 remoteId 交给上层持久化。
   //
-  // 为什么必须这么做：job.remoteId 原先只在 runJob 成功收尾时才写回，
-  // 于是"已提交到 ComfyUI、但还没跑完"这一整段窗口里，job.remoteId 都是 null。
-  // 用户在这期间点取消 → cancelJob 看到 remoteId 为空 → **不会调用
-  // /interrupt** → 本地显示"已取消"，但 ComfyUI 继续把这段视频跑完，
-  // GPU 白烧 2 分多钟（实测复现：取消后队列里仍留着一个 running 任务，
-  // 且该 prompt_id 与任何 job 都对不上，无从清理）。
-  //
-  // 这里通过回调上报，让 job-runner/上层在拿到 ID 的第一时间落盘。
+  // 只在 runJob 收尾时才写回的话，"已提交到 ComfyUI、但还没跑完"这一整段窗口里
+  // job.remoteId 都是 null：用户点取消 → cancelJob 看到为空 → 不发 /interrupt →
+  // 本地显示已取消，但 ComfyUI 继续跑完，GPU 白烧且该 prompt_id 无从清理。
   if (typeof onSubmitted === 'function') {
     try { await onSubmitted(remoteId, job); } catch { /* 记录失败不阻断执行 */ }
   }
 
-  const deadline = Date.now() + resolveTimeoutMs(cfg);
+  /**
+   * 进度上报（**尽力而为，绝不阻断执行**）。
+   *
+   * 三段：queued（已提交排队中）/ running（正在执行）/ 取回产物。
+   * 不接 ComfyUI 的 websocket：那要维持长连接与重连，而我们要的信息量只有三个状态，
+   * 每 3 秒一次 `/queue` 对本地 ComfyUI 是可接受成本。
+   */
+  let lastPhase = '';
+  const reportProgress = async (pct, note, queue) => {
+    if (typeof onProgress !== 'function') return;
+    try { await onProgress({ pct, note, queue: queue ?? null }); } catch { /* 进度失败不影响主流程 */ }
+  };
+
+  const deadline = Date.now() + resolveComfyTimeoutMs(cfg);
   const startedAt = Date.now();
   /** 连续多少次"HTTP 层面的硬失败"（区分于网络抖动） */
   let histHardFailures = 0;
+
+  await reportProgress(10, `已提交到 ComfyUI${progressHint ? `（${progressHint}）` : ''}`, null);
 
   for (;;) {
     if (Date.now() >= deadline) {
       const waitedMin = Math.round((Date.now() - startedAt) / 60000);
       throw new Error(
-        `COMFY_TIMEOUT: 已等待 ${waitedMin} 分钟仍未出片（上限 ${Math.round(resolveTimeoutMs(cfg) / 60000)} 分钟）。`
+        `COMFY_TIMEOUT: 已等待 ${waitedMin} 分钟仍未出片（上限 ${Math.round(resolveComfyTimeoutMs(cfg) / 60000)} 分钟）。`
         + '任务可能仍在 ComfyUI 里运行 —— 可到 ComfyUI 队列查看，'
         + '或调大超时（配置 comfyTimeoutMin / 环境变量 JZ_COMFY_TIMEOUT_MIN，单位分钟）后重试。',
       );
@@ -455,19 +511,31 @@ export async function runWorkflow({ cfg, workflow, map, job, outputsDir, onSubmi
     await cancellableSleep(job, POLL_MS);     // 取消后最多 250ms 中断
     throwIfCancelled(job);
 
+    /**
+     * 先问队列再问 history。
+     *
+     * history 只有在**跑完**之后才有条目，单张 4.2MP 要 ~148 秒，
+     * 这段时间里只看 history 的话轮询全是 `if (!entry) continue` ——
+     * 对外表现就是"进度条一直不动"。`/queue` 能给出"排队第 N 位"与"正在执行"。
+     */
+    const qs = await queueStatus(cfg, remoteId);
+    if (qs && qs.state === 'pending' && lastPhase !== 'queued') {
+      lastPhase = 'queued';
+      await reportProgress(15, `排队中${qs.ahead > 0 ? `（前面还有 ${qs.ahead} 个）` : ''}`, qs);
+    } else if (qs && qs.state === 'running' && lastPhase !== 'running') {
+      lastPhase = 'running';
+      await reportProgress(35, `GPU 生成中${progressHint ? `（${progressHint}）` : ''}`, qs);
+    }
+
     let hist;
     try {
       hist = await getJson(`${url}/history/${encodeURIComponent(remoteId)}`);
     } catch (e) {
       /**
-       * ⚠️ 不能无条件 `continue`。
-       *
-       * ComfyUI 中途被 404/500 打挂、或 history 返回坏 JSON 时，无限重试意味着
-       * 用户要等满 2 小时才拿到错误，而且拿到的是"超时"—— 文案还会引导用户
-       * 去调大超时，方向完全相反。
-       *
-       * 只对**网络类**错误继续等（ComfyUI 可能只是忙），HTTP 层面明确失败
-       * 连续出现 5 次就抛真实错误。
+       * 不能无条件 `continue`：ComfyUI 被 404/500 打挂或 history 返回坏 JSON 时，
+       * 无限重试意味着用户要等满超时才拿到错误，而且拿到的是"超时" —— 文案还会
+       * 引导用户去调大超时，方向完全相反。
+       * 只对**网络类**错误继续等，HTTP 层面明确失败连续 5 次就抛真实错误。
        */
       const code = String(e?.message || '');
       const hard = /^COMFY_HTTP_(4\d\d|5\d\d)/.test(code) || code.startsWith('COMFY_BAD_JSON');
@@ -497,9 +565,8 @@ export async function runWorkflow({ cfg, workflow, map, job, outputsDir, onSubmi
         if (Array.isArray(node[key])) files.push(...node[key]);
       }
     }
-    // 主产物：优先视频。其余产物（二采/续写可能同时产出多份）**全部下载**，
-    // 不能只取第一个 —— 旧实现只留 media[0]，`job.outputs` 恒为 1 条，
-    // 而任务记录自称"含全部 outputs"，多出来的产物静默消失。
+    // 主产物优先视频；其余产物（二采/续写可能同时产出多份）**全部下载**，
+// 不能只取第一个 —— `job.outputs` 只留 1 条会让多出来的产物静默消失。
     const mediaLike = files.filter((f) => f && f.filename);
     if (!mediaLike.length) throw new Error(`COMFY_NO_OUTPUT (status=${st.status_str || '?'})`);
     const primary = mediaLike.find((f) => /\.(mp4|webm|mov|gif)$/i.test(f.filename))
@@ -507,6 +574,7 @@ export async function runWorkflow({ cfg, workflow, map, job, outputsDir, onSubmi
     const ordered = [primary, ...mediaLike.filter((f) => f !== primary)];
 
     fs.mkdirSync(outputsDir, { recursive: true });
+    await reportProgress(85, '正在取回产物', qs);
     const outputs = [];
     const downloadFailures = [];
     for (const item of ordered) {

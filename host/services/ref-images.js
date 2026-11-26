@@ -1,26 +1,10 @@
 /**
  * 参考图 / 参考素材解析 —— **全仓唯一实现**。
  *
- * ============================================================================
- * 为什么要单独抽成一个模块
- * ============================================================================
- *
- * 改造前，「一张镜头卡到底会提交哪些参考图、各是第几张」这件事被写了 **4 遍**：
- *
- *   1. `services/generator.js`  `resolveRefImages()`        ← 真正提交用的
- *   2. `services/render-plan.js` `buildRenderPlan()`         ← 预览用的
- *   3. `services/shot-context.js` `resolvePictureIndices()`  ← 工具用的
- *   4. `api/index.js`           `deriveSubjectsFromShot()`   ← Agent 用的
- *
- * 四份实现的顺序规则**不完全一致**（render-plan 含 previz 首尾帧，generator 不含），
- * 于是出现了一个真实的生产事故：
- *
- *   > 渲染页预览显示 `<Picture 1>` 是角色卡、`<Picture 2>` 是道具，
- *   > 实际提交时角色卡排到了第 2 位 —— 模型把道具当成了人。
- *
- * 而且 **4 份实现里只有一样东西是一致的**：`planImageSlots` 给的槽位号。
- * 所以这里把「解析顺序」和「槽位分配」合成一条流水线，返回**一份**结果，
- * 四个调用方都从这一份里取自己需要的字段。
+ * 所有需要知道"一张镜头卡会提交哪些参考图、各是第几张"的地方，都必须调用本模块：
+ * generator（真正提交）、render-plan（预览）、shot-context（Agent 工具）、
+ * prompt-compile（提示词）。任何一处自己重写排序或编号，就会重新出现
+ * "预览显示是角色卡、实际提交是道具"这类无声错位。
  *
  * ============================================================================
  * 编号规则（唯一权威）
@@ -34,7 +18,7 @@
  *   · ref2va / t2va：不占槽位，参考图从 `图片1` 开始
  *
  * → `<Picture N>` **不等于** "参考图数组里的第 N 个"，而是
- *    `planImageSlots` 分配的**最终槽位号**。这是全仓历史上最常写错的一处。
+ *    `planImageSlots` 分配的**最终槽位号**。全仓最容易写错的就是这一处。
  *
  * ============================================================================
  * 依赖方向
@@ -60,6 +44,20 @@ export const MAX_REF_IMAGES = 9;
 /** 参考视频 / 音频各自的上限（南风 V15 的 视频1..3 / 音频1..3） */
 export const MAX_REF_VIDEOS = 3;
 export const MAX_REF_AUDIOS = 3;
+
+/**
+ * H3-**Image** 编辑模式的参考图上限（16）。
+ *
+ * ⚠️ 与 `MAX_REF_IMAGES = 9` **不是同一个概念**，不要合并：
+ *   · 9   是南风视频节点的 `图片1..图片9` 槽位上限 —— **位置**有限，超过就没槽位可放；
+ *   · 16  是 H3-Image 的 `MiniMaxH3ImageConditioning.images` AUTOGROW 输入上限
+ *          （节点声明 max=100，但提示词里能写清的 `<Picture N>` 引用到 16 张就到顶了，
+ *          再多只会让每张图的注意力被稀释）。
+ *
+ * 两条通道各走各的：视频走 `resolveRefImages` + `planImageSlots`（9 槽 + 首尾帧保留），
+ * 图像走 `resolveImageEditRefs`（16 张、只保序、不占槽）。**不要复用视频那份**。
+ */
+export const MAX_IMAGE_EDIT_REFS = 16;
 
 function hashShort(text) {
   return createHash('sha1').update(String(text)).digest('hex').slice(0, 16);
@@ -284,8 +282,7 @@ export function resolvePrevizArtifacts(shot, cfg = loadConfig()) {
  * @param {string} [stagedLast]  staged 后的尾帧文件名
  */
 export function planImageSlots(mode, stagedRefs, stagedFirst, stagedLast) {
-  // ⚠️ 模式别名归一：镜头卡历史上可能存 i2v/fl2v（短名），
-  //    旧实现只认字面量 'i2va'/'fl2va' → 首尾帧不占槽位 → 静默丢失。
+  // 模式别名归一：镜头卡可能存短名 i2v/fl2v，认不出来首尾帧就不占槽位 → 静默丢失。
   const m = normalizeImageMode(mode);
   const refs = Array.isArray(stagedRefs) ? stagedRefs : [];
   const frameSlots = {};
@@ -300,26 +297,18 @@ export function planImageSlots(mode, stagedRefs, stagedFirst, stagedLast) {
   }
 
   /**
-   * ⚠️⚠️ 关键：`images` 必须是**按槽位号定位的稀疏数组**，不能是压缩后的列表。
+   * `images` 必须是**按槽位号定位的稀疏数组**，不能是压缩后的列表。
    *
-   * 为什么（历史 P0，实测两条参考图全部丢失）：
-   *   南风的槽位参数是 `图片1..图片9`，而 `buildShotOverrides` 的写法是
-   *     `images.slice(0,9).forEach((rel, i) => { out['图片' + (i+1)] = rel })`
-   *   —— **数组下标就是槽位号**。
+   * 南风的槽位参数是 `图片1..图片9`，而 `buildShotOverrides` 的写法是
+   *   `images.slice(0,9).forEach((rel, i) => { out['图片' + (i+1)] = rel })`
+   * —— **数组下标就是槽位号**。
    *
-   *   如果这里返回压缩数组 `['c1','c2','c3']`（三张参考图，首尾帧占了 1/2 槽），
-   *   buildShotOverrides 会把它们写成 图片1/图片2/图片3，
-   *   然后 `...frameSlots` 再把 图片1/图片2 覆盖成首尾帧 ——
-   *   结果是 **c1、c2 被静默丢弃**，只有 c3 落在 图片3，
-   *   而提示词里写的是 `<Picture 3>`/`<Picture 4>`/`<Picture 5>`（三张都引用）。
+   * 若这里返回压缩数组 `['c1','c2','c3']`（首尾帧占了 1/2 槽），
+   * buildShotOverrides 会写成 图片1/2/3，随后 `...frameSlots` 再把 图片1/2
+   * 覆盖成首尾帧 —— c1、c2 被静默丢弃，而提示词里写的是 <Picture 3/4/5>。
    *
-   *   修复前实测：三张参考图 → 最终提交只有 图片3=c3.png，图片4/5 为空。
-   *
-   *   返回稀疏数组后：
-   *     images = [ <空>, <空>, 'c1', 'c2', 'c3' ]   （图片1/2 留给首尾帧）
-   *   buildShotOverrides 把下标 2/3/4 写成 图片3/4/5 = c1/c2/c3 ✅
-   *
-   *   调用方如果只想拿"有效图片列表"，请用 `present` 字段。
+   * 正确形态：images = [ <空>, <空>, 'c1', 'c2', 'c3' ]。
+   * 调用方若只想拿"有效图片列表"，用 `present` 字段。
    */
   const images = new Array(MAX_REF_IMAGES).fill('');
   const present = [];
@@ -345,9 +334,8 @@ export function planImageSlots(mode, stagedRefs, stagedFirst, stagedLast) {
  * 委托给 `store/mode-aliases.js` 的**唯一实现**（该模块无 fs / config 依赖，
  * 所以不会让 ref-images 反向依赖 store 的数据层）。
  *
- * ⚠️ 这里曾经有一份本地别名表，与 `store/models.js` 的那份已经漂移：
- *    本地版不剥 `h3:` 前缀、也不认 `ref` 别名 → 同一个镜头卡在
- *    "提示词编译器"与"槽位规划"两边得出不同模式，fl2va/i2va 下差 1–2 个槽位号。
+ * 不要在这里另写一份别名表：编译器与槽位规划一旦用不同的模式判定，
+ * fl2va/i2va 下会差 1–2 个槽位号，直接表现为 <Picture N> 指错人。
  */
 export function normalizeImageMode(mode) {
   return normalizeMode(mode, { hasRefImages: true });
@@ -360,11 +348,71 @@ export function normalizeImageMode(mode) {
  *   2. `resolvePrevizArtifacts(shot,cfg)` → 首/尾帧绝对路径
  *   3. `planImageSlots(mode, refs, first, last)` → 定长 9 的槽位数组 + `pictureIndexMap`
  *
- * 这三步的**顺序规则只在这里定义**，四个消费者（generator / render-plan /
- * shot-context / prompt-compile）都直接调这三个函数，不再各自手写排序。
- *
- * ⚠️ 曾经有过一个 `buildSubmissionRefs()` 把三步打包成一次调用，但零调用者
- *    （三条路径全都绕过它手拼三步），而且它的 `stage` 参数让"传绝对路径"与
- *    "传 ComfyUI 文件名"两种语义混在一个函数里 —— 两份消费者各自取所需。
- *    包一层并不会让调用约定变统一，只会多一个会漂移的副本，所以已删除。
+ * 这三步的**顺序规则只在这里定义**。不要把它们包成第四层快捷函数：
+ * "传绝对路径"与"传 ComfyUI 文件名"两种语义混在一起只会再产生一个会漂移的副本。
  */
+
+/**
+ * H3-Image 编辑模式的参考图解析 —— **按序、上限 16、不占槽**。
+ *
+ * 与 `resolveRefImages` 的关系：**共用同一个 `resolveAssetPath`**（路径解析的
+ * 唯一实现），但**排序语义完全不同**，所以不合并成一个函数：
+ *
+ *   视频 Ref2VA  的 `图片N` 是"素材槽位号"，首尾帧会抢占 1/2 号槽，
+ *                且优先级固定为 角色卡 → 人设卡 → 手工 → 场景道具；
+ *   图像编辑     的 `image_1` 是"**被编辑的那张原图**"，次序本身就是语义，
+ *                所以必须**严格按用户给的顺序**，不做任何重排、不去重合并。
+ *
+ * ⚠️ 顺序即语义：用户传 [原图, 风格参考, 服装参考] 时，
+ *    `image_1` 决定输出画布尺寸（节点 width/height=0 时按它缩放）与编辑目标。
+ *    如果这里像视频那样按"角色卡优先"重排，编辑对象会变成角色卡里的立绘。
+ *
+ * 解析失败的条目**不静默丢弃**：返回 `{ ok: [], bad: [{ input, reason }] }`，
+ * 调用方必须把 bad 回给用户（"传了 3 张实际只用上 2 张"是这类功能最隐蔽的失败）。
+ *
+ * @param {Array<string|{rel?:string, absPath?:string}>} list 用户给的顺序
+ * @param {object} [cfg]
+ * @param {{max?:number}} [opts] 默认上限 `MAX_IMAGE_EDIT_REFS`
+ * @returns {{ok:Array<{abs:string, rel:string, index:number}>, bad:Array<{input:string, reason:string}>, dropped:number}}
+ */
+export function resolveImageEditRefs(list, cfg = loadConfig(), opts = {}) {
+  const max = Number.isFinite(opts.max) && opts.max > 0 ? Math.floor(opts.max) : MAX_IMAGE_EDIT_REFS;
+  const ok = [];
+  const bad = [];
+  let dropped = 0;
+
+  for (const item of (Array.isArray(list) ? list : [])) {
+    if (ok.length >= max) { dropped += 1; continue; }
+    const raw = typeof item === 'string' ? item : (item?.rel ?? item?.absPath ?? '');
+    const label = String(raw ?? '').slice(0, 160) || '（空）';
+    if (!raw) { bad.push({ input: label, reason: '空路径' }); continue; }
+    let abs = '';
+    try {
+      abs = resolveAssetPath(item, cfg) || '';
+    } catch (e) {
+      bad.push({ input: label, reason: String(e?.message ?? e) });
+      continue;
+    }
+    if (!abs) {
+      bad.push({
+        input: label,
+        reason: '解析不到（文件不存在、或路径不在 dataDir 内；绝对路径必须落在数据目录里）',
+      });
+      continue;
+    }
+    ok.push({ abs, rel: toDataRel(abs, cfg), index: ok.length + 1 });
+  }
+
+  return { ok, bad, dropped, max };
+}
+
+/** 绝对路径 → 相对 dataDir 的正斜杠路径（越界返回空串，不抛） */
+function toDataRel(abs, cfg) {
+  const dataDir = String(cfg?.dataDir || '');
+  if (!dataDir) return '';
+  try {
+    const rel = path.relative(path.resolve(dataDir), path.resolve(abs));
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return '';
+    return rel.split(path.sep).join('/');
+  } catch { return ''; }
+}

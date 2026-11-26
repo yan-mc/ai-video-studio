@@ -19,26 +19,35 @@
  * ⚠️ 关键结论：一批参数在 V15 里是**死参数**
  * ============================================================================
  *
- * 对照 vendor/nanfeng/h3_generator.py 逐项核实（2026-11-17，V15 源码）：
+ * 对照 vendor/nanfeng/h3_generator.py 逐项核实（V15 源码，行号按当前版本校对）：
  *
- *   1) 「启用高清二采」整条链路已废弃
- *      h3_generator.py:1689  `hd_second_pass = False` 是**硬编码**，
- *      用户传 true 会被忽略。挂在 `if hd_second_pass:` 分支下的 9 个参数
+ *   1) 「启用高清二采」整条链路已不存在
+ *      `hd_second_pass` 在 V15 已被移除（h3_generator.py:1748-1750 的注释确认），
+ *      挂在旧 `if hd_second_pass:` 分支下的 9 个参数
  *      （二采百万像素 / 二采放大方法 / 二采步数 / 二采降噪 / 二采采样器 /
  *       二采调度器 / 二采模型 / 二采起始Sigma / 一采步数）
  *      **永远不会生效**。
  *
  *   2) 「启用双采样」整条链路已废弃
- *      h3_generator.py:1796 是 `elif False:` —— 分支被写死关闭。
+ *      `elif False:` 分支被写死关闭（"已废弃分支：V15 恒不启用"）。
  *      「双采后段比例」「双采后段采样器」永远不生效。
  *
  *   3) 「分块处理（节约显存）」被上游**主动禁用**
- *      h3_generator.py:543 直接抛错：分块处理会导致花屏，
+ *      h3_generator.py 直接抛错：分块处理会导致花屏，
  *      要求用户必须设为「关闭」。选项里也只有「关闭」一项。
  *      「分块卸载层数」属于同一个被禁用的 Block Offload 补丁。
  *
- *   合计 47 个死参数。本表用 `dead` / `banned` 标记它们，
+ *   4) 「参考图尺寸」是**形参零使用**
+ *      ref2va 路径把 `ref_image_size` 硬编码为 "max"（h3_generator.py:1604）。
+ *      match / max 在本地没有任何差异 —— UI 不应再给档位或据此提示降级。
+ *
+ *   合计 40 余个死参数。本表用 `dead` / `banned` 标记它们，
  *   前端默认折叠隐藏，避免用户在无效旋钮上浪费时间。
+ *
+ *   ⚠️ 反向注意：「启用西格玛调节」/「视频西格玛偏移」/「音频西格玛偏移」
+ *      **不是**死参数 —— V15 读它们并据此插 MiniMaxH3SigmaShift
+ *      （h3_generator.py:1727/1743/1751-1754），是 DMAD 类蒸馏学生
+ *      不出分布外的唯一通道。标 dead 会让 UI 把唯一可调的 shift 灰掉。
  *
  *   真正的「二采」是 **H3 潜空间放大二采**（`H3一采步数` + `H3二采步数`
  *   + `H3潜空间目标百万像素`），预设用的就是这一条 —— 有效且是主力路径。
@@ -51,9 +60,12 @@
  * @property {string} zh    一句话说明（做什么）
  * @property {string} [hint] 调参建议（什么时候动、怎么动）
  * @property {'dead'|'banned'|'advanced'} [flag]
- *           dead   = 上游硬编码关闭，调了完全没反应
- *           banned = 上游主动禁用，开了会报错/花屏
+ *           dead   = 上游硬编码关闭 / 形参零使用，调了完全没反应
+ *           banned = 上游主动禁用或本机缺依赖，开了会报错/花屏
  *           advanced = 高危或需要额外依赖，非老手不建议动
+ *
+ * ⚠️ `flag` 是 UI 的**唯一**真相来源：标错（把有效参数标 dead、
+ *    把死通道标成可用）会让整块参数面板撒谎。改标记前必须回 vendor 源码核实行号。
  */
 
 /** 分组级说明（覆盖 schema.js 里较简略的 desc） */
@@ -185,7 +197,10 @@ export const PARAM_DOCS = Object.freeze({
   },
   参考图尺寸: {
     zh: '参考图的预处理方式。match=缩放到与输出同尺寸；max=保留最大边不缩放。',
-    hint: '只是函数形参（h3_generator.py:1298），函数体零使用；ref2va 路径硬编码 `ref_image_size = "max"`（:1594-1599）。`match` / `max` 的差异在本地**不存在**。',
+    hint: '【上游已固定】ref2va 路径把 `ref_image_size` 硬编码为 "max"（h3_generator.py:1604，'
+      + '且在 :1854 注明"当前固定 ref_image_size=max"），本参数只是形参零使用 —— '
+      + '"match" / "max" 在本地**没有任何差异**。请在 UI 上按"无档位"呈现，不要给用户选择，'
+      + '也不要再据此生成显存降级提示（真实占用恒为 max）。',
     flag: 'dead',
   },
   固定随机种子: {
@@ -394,18 +409,30 @@ export const PARAM_DOCS = Object.freeze({
   T8指标步幅: { zh: '【已失效】T8 指标步幅。', hint: '死分支。', flag: 'dead' },
   T8详细日志: { zh: '【已失效】T8 日志开关。', hint: '死分支。', flag: 'dead' },
   启用西格玛调节: {
-    zh: '【已失效】Sigma 偏移总开关。',
-    hint: 'h3_generator.py:1687 硬编码 sigma_requested = False，整条 Sigma 面板都不执行。',
-    flag: 'dead',
+    zh: 'Sigma 偏移总开关：开启后会插入 MiniMaxH3SigmaShift 节点，用下面两个偏移值决定 video/audio 的 shift。',
+    hint: '**有效参数，且是 DMAD 类蒸馏学生不出分布外的唯一通道** —— '
+      + 'h3_generator.py:1727 读用户值（`sigma_requested = bool(kwargs.get("启用西格玛调节", False))`），'
+      + ':1743/:1747-1754 据此插 MiniMaxH3SigmaShift 并写 shift_video/shift_audio。'
+      + 'DMAD 在 12/2 上训练，模型自带的是 12/3，所以插件在加速方案里会自动把它设为 true。'
+      + '想手动调 shift 就走这里（必须配「原生轨迹」策略，即"不加步但仍指定 shift"）。',
+    flag: 'advanced',
   },
-  视频西格玛偏移: { zh: '【已失效】视频轨迹 Sigma 偏移。', hint: 'sigma_requested 恒 False，不生效。', flag: 'dead' },
-  音频西格玛偏移: { zh: '【已失效】音频轨迹 Sigma 偏移。', hint: '同上。', flag: 'dead' },
-  西格玛模式: { zh: '【已失效】Sigma 模式选择。', hint: '同上。', flag: 'dead' },
-  低西格玛开始: { zh: '【已失效】低西格玛起始值。', hint: '同上。', flag: 'dead' },
-  低西格玛结束: { zh: '【已失效】低西格玛结束值。', hint: '同上。', flag: 'dead' },
+  视频西格玛偏移: {
+    zh: '视频轨迹的 Sigma shift（插 MiniMaxH3SigmaShift 时使用）。',
+    hint: 'DMAD 学生训练值是 12。用非 12 的值属分布外采样，画质会悄悄变差但不报错。',
+    flag: 'advanced',
+  },
+  音频西格玛偏移: {
+    zh: '音频轨迹的 Sigma shift（插 MiniMaxH3SigmaShift 时使用）。',
+    hint: 'DMAD 学生训练值是 2（模型自带 3）。与「视频西格玛偏移」成对设置。',
+    flag: 'advanced',
+  },
+  西格玛模式: { zh: '【已失效】旧 V4/V7 Sigma 面板的模式选择。', hint: 'V15 恒走 V8.1 完整轨迹分支，本项零读取。真正生效的是「Sigma策略」。', flag: 'dead' },
+  低西格玛开始: { zh: '【已失效】旧 Sigma 加密的起始值。', hint: 'V15 走 V8.1 轨迹，本项零读取。', flag: 'dead' },
+  低西格玛结束: { zh: '【已失效】旧 Sigma 加密的结束值。', hint: '同上。', flag: 'dead' },
   手动西格玛: {
-    zh: '【已失效】手动 Sigma 序列。',
-    hint: '同上。真正会影响轨迹的是「Sigma策略」这一项。',
+    zh: '【已失效】旧 Sigma 面板的手动序列。',
+    hint: 'V15 恒走 V8.1 分支，本项零读取。要手动指定完整轨迹请用「H3完整Sigma序列」。',
     flag: 'dead',
   },
   H3专用注意力: {
@@ -415,10 +442,13 @@ export const PARAM_DOCS = Object.freeze({
   },
   Sigma策略: {
     zh: 'Sigma 时间表怎么生成：原生轨迹 / 面板 Sigma 轨迹 / 最终区间加 1 步。',
-    hint: 'V15 把 `sigma_requested` 硬编码为 False（h3_generator.py:1687），而 `sigma_enabled` 由它派生（:1702-1705）—— 结果恒为 False，三个选项（原生轨迹 / 加步 / 加密）只有"原生轨迹"是唯一可达状态。',
-    flag: 'dead',
+    hint: '「原生轨迹（不加步）」+ 开启「启用西格玛调节」= **只改 shift、不改步网格** —— '
+      + '这正是蒸馏学生需要的形态（h3_generator.py:1758-1765：'
+      + '`need_sigma_shift` 由总开关决定，`sigma_enabled` 才由本项派生）。'
+      + '另外两个值会额外重排步网格。',
+    flag: 'advanced',
   },
-  全局修复Sigma策略: { zh: '全局修复阶段的 Sigma 策略（独立于主生成）。', hint: '`generate()` 里零读取（全文件只在 h3_generator.py:2249 声明）。整个「全局修复」组都没有消费代码。', flag: 'dead' },
+  全局修复Sigma策略: { zh: '全局修复阶段的 Sigma 策略（独立于主生成）。', hint: '`generate()` 里零读取（只在 h3_generator.py:2249 声明）。整个「全局修复」组都没有消费代码。', flag: 'dead' },
   启用UniBlockSwap: {
     zh: 'UniBlockSwap —— 把部分 transformer 块换出显存的省显存方案。',
     hint: '显存紧张时可试。会明显变慢，且和分块处理不是一回事。',

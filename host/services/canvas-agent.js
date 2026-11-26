@@ -1,27 +1,17 @@
 /**
- * 画布内置 Agent —— 对齐参考实现内置的 17 个画布工具 + 4 个权限位。
+ * 画布内置 Agent —— 17 个画布工具 + 4 个权限位。
  *
- * 实测（bundle）：
- *  17 工具：resolve / list_refs / project_overview / list_nodes / get_node /
- *           read_document / search_assets / list_skills / image_job_status /
- *           skill_task_status / update_node / insert_image / batch /
- *           delete_node / generate_image / generate_video / call_skill
- *  4 权限位：canWriteCanvas / canSpend / canDelete / autoRun
+ * 工具在**后端**执行，画布状态由前端传入/写回（单一真相源在前端）。
+ * 权限位强制：写操作需 canWriteCanvas，删除需 canDelete，生成需 canSpend。
+ * 所有变更返回 diff（前端可预览/撤销）。
  *
- * 定位差异（重要）：
- *  参考实现这 17 个是**画布内** Agent 工具 —— 用户在画布上与 AI 对话，
- *  AI 直接改画布（增删节点/插入图片/触发生成）。
- *  插件原有的 studio_* 是 **Agent 侧**工具（模型调用插件）。
- *  两者不是同一层，本模块补的是前者。
- *
- * 实现策略：
- *  - 工具在**后端**执行，画布状态由前端传入/写回（保持单一真相源在前端）
- *  - 权限位强制：写操作需 canWriteCanvas，删除需 canDelete，生成需 canSpend
- *  - 所有变更返回 diff（前端可预览/撤销）
+ * 与 `studio_*` 工具的分工：那些是 **Agent 侧**工具（模型调用插件），
+ * 本模块补的是**画布内**那一层（用户在画布上与 AI 对话，AI 直接改画布）。
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 /** 4 个权限位（实测） */
 export const CANVAS_PERMISSIONS = Object.freeze([
@@ -52,12 +42,7 @@ export const CANVAS_TOOLS = Object.freeze([
   { name: 'call_skill', desc: '调用技能（剧本/分镜/漫画等）', perm: 'canSpend', kind: 'spend' },
 ]);
 
-/** 默认权限（保守：只读全开，写/删/花钱默认关）。
- *
- * ⚠️ canDelete 曾经是 true，与上面这句注释直接矛盾 ——
- *    而权限位是 need() 的唯一判据，等于"删除类操作默认放行"。
- *    现在改成 false。
- */
+/** 默认权限：只读全开，写/删/花钱默认关（need() 的唯一判据，保守取值） */
 export const DEFAULT_CANVAS_PERMISSIONS = Object.freeze({
   canWriteCanvas: true,
   canSpend: false,
@@ -66,35 +51,22 @@ export const DEFAULT_CANVAS_PERMISSIONS = Object.freeze({
 });
 
 /**
- * 权限位**不能由请求体决定**。
+ * 权限位**不能由请求体决定**：权限位只是给前端做二次确认的展示状态，
+ * 真正的边界必须在服务端 —— 否则调用方可以自己声明
+ * `{"permissions":{"canDelete":true}}` 绕过所有 need() 检查。
  *
- * ⚠️ 历史缺陷：/canvas-agent/exec 直接把 body.context 透传进来，
- *    于是调用方可以自己声明 `{"permissions":{"canDelete":true}}`
- *    绕过所有 need() 检查。权限位是给前端做二次确认的展示状态，
- *    真正的边界必须在服务端。
- *
- * 现在：服务端维护一份权威权限，请求体里同名字段一律忽略。
- *
- * ⚠️ 第二个历史缺陷（本条更严重）：`setCanvasPermission()` 曾经**全仓库零调用**，
- *    而 `canSpend` / `canDelete` 的初值都是 false —— 于是
- *    `generate_image` / `generate_video` / `delete_node` / `call_skill`
- *    四个工具**永久不可用**，用户没有任何办法开启；前端那 4 个开关
- *    只改本地 React state，从来不上送。
- *
- *    现在补了 HTTP 入口 `POST /canvas-agent/permissions`（写操作受
- *    X-JZ-Token + 同源校验保护），并把授权结果持久化到 dataDir，
- *    重启后不用每次重开。
+ * 服务端维护一份权威权限，请求体里同名字段一律忽略；变更走
+ * `POST /canvas-agent/permissions`（写操作受 X-JZ-Token + 同源校验保护），
+ * 结果持久化到 dataDir，重启后不用每次重开。
  */
 const SERVER_PERMISSIONS = { ...DEFAULT_CANVAS_PERMISSIONS };
 
 /**
  * 权限持久化文件。
- * 权限是"用户对我的信任级别"，属于配置性状态，应当跨重启保留。
  *
- * ⚠️ 历史缺陷（P2）：旧实现用 `_permFile` **模块级一次性缓存**，
- *    第一次调用时把路径钉死。改 `dataDir` 之后权限仍在读写旧目录，
- *    而且不会报错 —— 用户看到的是"权限设置保存了但重启就丢"。
- *    现在按 `dataDir` 做 Map 缓存，配置一改自然指向新目录。
+ * 权限是"用户对我的信任级别"，属于配置性状态，应当跨重启保留。
+ * 按 `dataDir` 做 Map 缓存 —— 模块级一次性缓存会把路径钉死，
+ * 改 dataDir 之后权限仍读写旧目录且不报错。
  */
 const _permFiles = new Map();
 function permissionsFile(cfg) {
@@ -140,15 +112,7 @@ export function getCanvasPermissions() {
 export function setCanvasPermission(key, value, cfg = null) {
   if (!(key in SERVER_PERMISSIONS)) throw new Error(`UNKNOWN_PERMISSION: ${key}`);
   SERVER_PERMISSIONS[key] = Boolean(value);
-  const f = cfg ? permissionsFile(cfg) : null;
-  if (f) {
-    try {
-      fs.mkdirSync(path.dirname(f), { recursive: true });
-      const tmp = `${f}.${process.pid}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(SERVER_PERMISSIONS, null, 2), 'utf8');
-      fs.renameSync(tmp, f);
-    } catch { /* 落盘失败不影响本次授权，只是重启后要重开 */ }
-  }
+  persistPermissions(cfg);
   return getCanvasPermissions();
 }
 
@@ -158,25 +122,26 @@ export function setCanvasPermissions(patch, cfg = null) {
   for (const [k, v] of Object.entries(patch)) {
     if (k in SERVER_PERMISSIONS) SERVER_PERMISSIONS[k] = Boolean(v);
   }
-  const f = cfg ? permissionsFile(cfg) : null;
-  if (f) {
-    try {
-      fs.mkdirSync(path.dirname(f), { recursive: true });
-      const tmp = `${f}.${process.pid}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(SERVER_PERMISSIONS, null, 2), 'utf8');
-      fs.renameSync(tmp, f);
-    } catch { /* ignore */ }
-  }
+  persistPermissions(cfg);
   return getCanvasPermissions();
 }
 
-/** 沙箱限制 */
-export const RUN_SCRIPT_LIMITS = Object.freeze({
-  timeoutMs: 10_000,
-  network: false,
-  dom: false,
-  maxOutputChars: 20_000,
-});
+/**
+ * 落盘权限位。
+ *
+ * tmp 名必须唯一到「同进程内并发写不撞名」：含 pid 会让两次并发写用同一条
+ * tmp 路径，后写覆盖先写的 tmp，再各自 rename → 一方修改丢失。用 uuid 保证零碰撞。
+ */
+function persistPermissions(cfg) {
+  const f = cfg ? permissionsFile(cfg) : null;
+  if (!f) return;
+  try {
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    const tmp = `${f}.${randomUUID()}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(SERVER_PERMISSIONS, null, 2), 'utf8');
+    fs.renameSync(tmp, f);
+  } catch { /* 落盘失败不影响本次授权，只是重启后要重开 */ }
+}
 
 function newId(prefix) {
   return `${prefix}_${Date.now().toString(36)}${crypto.randomBytes(3).toString('hex')}`;
@@ -355,11 +320,8 @@ export function createCanvasAgent({ getProject, listAssets, runGenerate, runSkil
           position: args.position ?? { x: Number(args.x) || 0, y: Number(args.y) || 0 },
           data: {
             title: text(args.title) || '插入的图片',
-            // ⚠️ 数据契约必须与画布渲染一致。
-            //    以前写进 `params.fileUrl`，而画布只读 `result.url`
-            //    （见 app-src/src/canvas/nodes/_shared.tsx 的 PreviewBox）→
-            //    节点插进去了但**显示为空占位**，用户以为没生效。
-            //    上传链路（CanvasArea）写的就是 `{url, path}`，这里对齐它。
+            // 数据契约必须与画布渲染一致：画布只读 `result.url`（见 _shared.tsx 的 PreviewBox），
+// 写进 `params.fileUrl` 的话节点插进去了但显示为空占位。与 CanvasArea 的上传链路对齐。
             result: { url: src },
             params: { fileUrl: src },
           },
@@ -424,17 +386,12 @@ export function createCanvasAgent({ getProject, listAssets, runGenerate, runSkil
     }
   }
 
-  /** 供前端展示的能力清单 */
+  /** 供前端展示的能力清单（只列真实存在的工具；`runScript` 沙箱并不存在，不下发） */
   function meta() {
     return {
       tools: CANVAS_TOOLS,
       permissions: CANVAS_PERMISSIONS,
       defaults: DEFAULT_CANVAS_PERMISSIONS,
-      // ⚠️ 这里以前下发 `runScript: RUN_SCRIPT_LIMITS`，宣称有一个
-      //     "10 秒、无网络、无 DOM 的沙箱 run_script 工具" ——
-      //     但 CANVAS_TOOLS 里**没有这个工具**，exec() 的 switch 也没有
-      //     对应 case。这个字段只是把一份不存在的限制原样吐给前端，
-      //     属于"文档里承诺了、代码里没有"的幽灵功能，已删除。
     };
   }
 

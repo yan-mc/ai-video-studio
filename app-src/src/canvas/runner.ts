@@ -345,9 +345,18 @@ export async function runNodeGeneration(opts: RunOptions): Promise<RunResult> {
      */
     const sizeId = str(p['sizeId']) || pixelToSizeId(num(p['size'], 2048));
 
-    // 手填参考图也要带上（UI 的 referenceImages 是换行分隔 list）
+    /**
+     * 手填参考图也要带上（UI 的 referenceImages 是换行分隔 list）。
+     *
+     * ⚠️ 上限从 9 改成 16：图像节点用的是 `MiniMaxH3ImageConditioning` 的
+     *    AUTOGROW 输入（最多 100 槽），与视频的 `图片1..9` 槽位是**两套上限**。
+     *    以前这里照抄视频的 9，用户在画布上挂到第 10 张就被静默丢。
+     *
+     * ⚠️ 顺序即语义：上游连线来的图在前、手填在后 ——
+     *    第 1 张是"被编辑的原图"，会决定输出画布尺寸。
+     */
     const manualRefs = toList(p['referenceImages']);
-    const allRefs = [...new Set([...images, ...manualRefs])].slice(0, 9);
+    const allRefs = [...new Set([...images, ...manualRefs])].slice(0, 16);
 
     onProgress?.(25, '提交图像生成');
     const job = await api.imageGenerate({
@@ -356,17 +365,18 @@ export async function runNodeGeneration(opts: RunOptions): Promise<RunResult> {
       ...(p['seed'] ? { seed: Number(p['seed']) } : {}),
       ...(allRefs.length ? { refImages: allRefs } : {}),
       projectId,
-    }) as { id?: string; status?: string };
-    if (!job?.id) throw new Error('IMAGE_JOB_FAILED: 后端没有返回任务号');
+    });
+    const jobId = job.id;
+    if (!jobId) throw new Error('IMAGE_JOB_FAILED: 后端没有返回任务号');
 
     onProgress?.(40, '出图中');
-    const final = await waitJob(job.id, onProgress, opts);
+    const final = await waitJob(jobId, onProgress, opts);
     if (final.status !== 'completed') {
-      return { jobId: job.id, status: final.status as never, outputs: [], error: final.error };
+      return { jobId, status: final.status as never, outputs: [], error: final.error };
     }
     const outs = (final.outputs ?? []).map((o) => ({ ...o, url: assetUrlFromPath(o.path, o.rel) }));
     onProgress?.(100, '完成');
-    return { jobId: job.id, status: 'completed', outputs: outs };
+    return { jobId, status: 'completed', outputs: outs };
   }
 
   /* ---------------- 音频路线：暂无后端 ---------------- */

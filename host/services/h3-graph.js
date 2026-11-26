@@ -1,46 +1,21 @@
 /**
- * H3 ComfyUI 节点图装配器。
+ * H3 ComfyUI 节点图装配器（`workflows/h3.json` 原生模板路径，即 backend='h3-local'）。
  *
- * ============================================================================
- * 为什么单独一个模块
- * ============================================================================
+ * 为什么单独一个模块：原先节点装配、槽位分配、"多余节点清理"三件事混在
+ * `runH3Local` 的一个大 if/else 里，靠**硬编码编号段**约定互不冲突
+ * （20..28 参考图 / 40.. 视频音频 / 70/71 引导图 / 80.. AddGuide）。
+ * 这种"编号即所有权"的约定已经炸过两次：首尾帧被 ref_images 的清理逻辑误删，
+ * AddGuide 从 70 编号覆盖了刚建好的 70/71 LoadImage。
  *
- * 原来的实现把节点装配、槽位分配、"多余节点清理"三件事混在 runH3Local 的
- * 一个大 if/else 里，靠**硬编码编号段**约定互不冲突：
- *
- *     20..28  参考图 LoadImage
- *     40..    参考视频 / 音频（LoadVideo → GetVideoComponents）
- *     70/71   引导图 LoadImage
- *     80..    AddGuide
- *
- * 这种"编号即所有权"的约定非常脆，实际已经炸过两次：
- *
- *   ① 首尾帧被误删（**线上 P0**）
- *      FL2VA 分支在 20/21 建了首帧/尾帧的 LoadImage，但收尾那段
- *      `usedLoadImages = names.map((_, i) => 20 + i)` 只承认 ref_images
- *      占用的槽位，于是 20/21 被无条件删掉，而 MiniMaxH3ImageToVideo 的
- *      first_frame 仍然指向 ['20', 0] →
- *      ComfyUI 报 `node_errors['9'].details = "'20'"`。
- *      实测：**任何"无参考图 + 首帧/尾帧"的镜头必然失败**，
- *      而这正是「Blender 渲首帧 → H3 出片」最自然的用法。
- *
- *   ② AddGuide 编号撞 LoadImage
- *      AddGuide 从 70 开始编号会覆盖刚建好的 70/71 LoadImage，
- *      ComfyUI 报 "image, received_type(CONDITIONING)"。
- *
- * ============================================================================
- * 现在的做法
- * ============================================================================
- *
- *   1. `NodeGraph` 负责**唯一 ID 分配**（按用途分段，但不再靠约定保证安全）；
+ * 现在的做法：
+ *   1. `NodeGraph` 负责**唯一 ID 分配**（按用途分段，但不靠约定保证安全）；
  *   2. 所有节点都经过 `set()` 登记；
  *   3. 装配完成后调 `pruneUnreachable()` —— 从输出节点反向遍历，
- *      **删掉一切不可达节点**。
+ *      删掉一切不可达节点。
  *
- * 第 3 步是关键：它不再需要任何"哪些槽位该删"的硬编码判断，
- * 因此不可能再出现"这个节点其实在用、却被清理逻辑删掉"的 bug。
- * 模板里遗留的 `{{REF_IMAGE_1}}` 占位符节点也会被同一条规则清掉
- * （它们没有上游生产者、也到不了输出）。
+ * 第 3 步是关键：它不需要任何"哪些槽位该删"的硬编码判断，
+ * 因此不可能再出现"这个节点其实在用、却被清理逻辑删掉"。
+ * 模板里遗留的 `{{REF_IMAGE_1}}` 占位符节点也会被同一条规则清掉。
  */
 
 /** 常见的输出类节点：从它们出发做可达性遍历。 */
@@ -215,10 +190,8 @@ export class NodeGraph {
   /**
    * 完整性检查：所有连线都必须指向存在的节点。
    *
-   * ⚠️ 这是给"节点被误删"这类 bug 兜底的最后一道防线。
-   *    历史实现里 first_frame 指向已删除的 '20'，要到 ComfyUI 校验
-   *    才以 `node_errors['9'] details "'20'"` 这种极难读的形式暴露。
-   *    现在在**提交之前**就抛出可读错误。
+   * 这是给"节点被误删"兜底的最后一道防线：没有它，dangling 引用要到
+   * ComfyUI 校验才以 `node_errors['9'].details "'20'"` 的形式暴露。
    *
    * @returns {{ok:boolean, dangling:Array<{from:string,to:string,path:string}>}}
    */
@@ -243,16 +216,6 @@ export class NodeGraph {
       check(node?.inputs ?? {}, `${id}.inputs`);
     }
     return { ok: dangling.length === 0, dangling };
-  }
-
-  /** 统计各 class_type 出现次数（日志/测试用） */
-  summary() {
-    const byType = {};
-    for (const node of Object.values(this.nodes)) {
-      const t = node?.class_type ?? '?';
-      byType[t] = (byType[t] ?? 0) + 1;
-    }
-    return { nodeCount: Object.keys(this.nodes).length, byType };
   }
 }
 

@@ -31,22 +31,9 @@ vendor/nanfeng/
 ├─ retired_mode_guard.py          退役字段守卫
 ├─ trt_options.py                 TRT 选项
 ├─ dlss_output.py + dlss_schema.json   DLSS 输出（无插件自动降级）
-└─ _removed/                      已移除的模块（保留作参考，**不被加载**）
-   ├─ storyboard_api.py           766 行
-   ├─ audio_drive_api.py          414 行
-   ├─ audio_media_api.py           78 行
-   ├─ model_refresh_api.py         43 行
-   └─ continuation_scheduler.py   287 行
+└─ （历史模块已于 v4 清理，见 git 历史）
 
-> ⚠️ 关于 `h3_generator.py.orig`：2026-11-18 已删除。
->    它是改造前的 2596 行原始副本（141 KB）。改造差异在下面第 4 节逐条记录，
->    且 git 历史里也有完整版本 —— 留一份无引用的 `.orig` 只会制造
->    "到底哪个才是正在跑的代码"这类疑问。需要溯源时：
->    `git log --diff-filter=D -- vendor/nanfeng/_removed/h3_generator.py.orig`
->
-> `_removed/` 里的 `.py` **不会**被执行：`__init__.py` 只 import
-> `h3_generator`，且 ComfyUI 只扫描包根目录的 `__init__.py`。
-> 它们存在的唯一理由是"当初删了什么、为什么删"有据可查。
+> 需要溯源被删模块时用 git 历史：`git log --diff-filter=D -- vendor/nanfeng/`。
 
 > ### ⚠️ 提示词技能书已迁出 vendor（2026-11-18）
 >

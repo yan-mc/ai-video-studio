@@ -54,7 +54,7 @@ const { token } = await (await fetch(`http://127.0.0.1:${port}/jiuzhang/api/toke
 |---|---|---|
 | `studio_shot` | `action: list\|create\|save\|delete`, `projectId`, `shot` | 镜头卡 CRUD |
 | `studio_generate` | `projectId`, `shotId`, `backend`, `seed` | 触发生成（**视频**，走镜头卡） |
-| `studio_image` | `action: meta\|generate`, `prompt`, `sizeId`, `refImages[]` | H3-Image **出图** |
+| `studio_image` | `action: meta\|lora\|generate`, `prompt`, `refImages[]`, `sizeId`, `width`/`height`, `seed`, `count`, `loras[]` | H3-Image **出图**（文生图 / 参考图编辑 / 批量 / LoRA） |
 | `studio_jobs` | `action: list\|get\|cancel`, `jobId` | 任务查询/取消（**没有 retry**；cancel 会真发 /interrupt 终止远端） |
 
 ### 1.4 专业工作台
@@ -146,11 +146,145 @@ POST /jiuzhang/api/h3/length          {durationSec, fps}
 ### 2.4 图像生成
 
 ```
-GET  /jiuzhang/api/image/meta         模型状态 + 12 种尺寸
-POST /jiuzhang/api/image/generate     {prompt, sizeId, seed, refImages[], projectId}
+GET  /jiuzhang/api/image/meta           模型状态 + 尺寸表 + **真实生效参数** + 各项上限
+GET  /jiuzhang/api/image/lora/catalog   图像 LoRA 目录（只列 models/loras/h3img/ 下）
+POST /jiuzhang/api/image/lora/solve     {items:[{name,strength}], hasRefImages} → 约束求解
+POST /jiuzhang/api/image/generate       {prompt, refImages[], sizeId, width, height, seed, count, loras[], projectId}
+GET  /jiuzhang/api/image/progress?ids=a,b,c   轻量进度（status + progress + 产物 rel）
+
+# 局部重绘（inpaint）
+GET  /jiuzhang/api/image/inpaint/meta   denoise 锁定说明 + 4 档强度 + crop 能力
+POST /jiuzhang/api/image/inpaint        {prompt, source, mask, mode, strength, seed, loras[], crop}
 ```
 
-**sizeId**：`auto`（2048²）/ `sq-2048` / `p-4x3` / `l-4x3` / `p-3x4-film` / `v-16x9` / `h-16x9` / `ecom-sq` / `ecom-45` / `comic-page` / `h3-4k-sq` / `h3-4k-169`
+#### 局部重绘（inpaint）
+
+**⚠️ 没有 denoise 参数，它被锁在 1.0。** 这不是保守设计，是硬约束：
+PDD 只有 6 个预测头、对应 7 点 sigma 网格；`BasicScheduler` 在 `denoise<1` 时
+`total_steps = int(6/denoise)`，实测 0.5 → 只剩 3 个头工作，
+表现是"区域被抹平、不按提示词生成"（模型失去重建能力），**不是**"改得更少"。
+→ 改动强弱一律用 `strength`。
+
+| 参数 | 说明 |
+|---|---|
+| `prompt` | 必填。只描述"选区里要出现什么"，不用复述选区外内容 |
+| `source` | 源图（dataDir 相对路径 / dataURL） |
+| `mask` | mask 图（白色=重绘区域）。**尺寸必须与源图完全一致**，否则 400 `MASK_SIZE_MISMATCH` |
+| `mode` | `crop`（默认，裁剪重绘再贴回，mask 外逐像素保真）/ `full`（全图 latent 混合） |
+| `strength` | `full` / `strong` / `medium` / `light` → SplitSigmas 切点 0/1/2/3 |
+| `crop.resolutionId` | `auto`（推荐）/ `512` / `768` / `1024` / `1280` —— 裁剪块的重绘分辨率 |
+| `bboxW` + `bboxH` | mask 外接框尺寸。**auto 档按它算分辨率，最准**；不给则由笔画面积估算 |
+| `strokePixels` | mask 非零像素数（估算 bbox 的兜底依据） |
+| `crop` 其他 | `{padding, minCrop, maxCrop}`；分辨率必须 32 倍数 |
+
+**`crop.resolutionId` 的 auto 档怎么算**（`base_res = max(bbox_w, bbox_h) × 1.5`）：
+
+- **保证缩放比 ≥ 1** —— 笔画绝不会被缩小。这是实测修正的结论：
+  第一版按「笔画总面积」算（`sqrt(像素)×2`），S 形细笔画算出 544²，
+  意味着 bbox 要缩小 0.53 倍，70px 宽的笔画降到 37px，经 latent 16× 只剩 2.3 px → 糊掉。
+  实测边缘差异 11.43 vs 固定 1024 的 5.53（差 2 倍）、外溢 3.82% vs 0.36%（差 10 倍）。
+- 小选区会**自动放大**（bbox 300×200 → 448²，1.49×），细节更足且更快
+- 大选区受 `maxCrop` 限制会被缩小，此时响应里带 `warnings` 说明（不静默）
+
+**实测对比（小选区，同样画一块蓝色水晶）**：
+- `1024²`（放大 3.4×）：水晶**盖在**裙子上、遮掉裙摆结构、边缘生硬
+- `auto 448²`（放大 1.49×）：水晶**嵌在**裙摆褶皱里、自然融合
+- 且 auto 快 14.8s（70.3s vs 85.1s）
+
+→ 不要迷信"改动强度数值更高"：过度放大让模型倾向"画个大东西填满"。**用 auto**。
+
+**实测对比**：
+
+| 模式 | mask 外差异 | 说明 |
+|---|---|---|
+| `crop` | **0.005（0.00% 像素变化）** | 逐像素保真 |
+| `full` | 3.4（4.5%） | 有 VAE 重编码损耗 |
+
+**不规则选区（如画笔拖出的 S 形）必须用 crop 模式**：
+实测 S 形笔画（覆盖率 6.84%），`crop` 有 **99.5%** 的改动落在笔画内；
+`full` 有 **52% 溢出到笔画外** —— 因为 `full` 靠 16× 下采样的 latent 表达 mask，
+细笔画根本表达不出来。
+
+**强度档实测**（mask 内差异）：full 121.2 / strong 86.0 / medium 50.4 / light 28.1。
+
+**依赖**：`crop` 模式需要 `vendor/inpaint-nodes/` 的两个节点。
+先用 `GET /image/inpaint/meta` 看 `cropAvailable`；false 时只能用 `full`。
+部署：`pwsh -File vendor/inpaint-nodes/deploy-vendor.ps1 -ComfyDir <ComfyUI>` 后重启 ComfyUI。
+
+**前端**：`#/image` 页有「局部重绘」tab，内置画笔画 mask（三层 canvas：底图 / mask 数据层 / 红色覆盖预览）。
+
+**入参全部可选、只有 `prompt` 必填**：
+
+| 键 | 说明 |
+|---|---|
+| `prompt` | ≤ **4096 字符**。超长 → **400 `PROMPT_TOO_LONG`**，**不静默截断** |
+| `refImages` | ≤ **16** 张（rel 或 dataURL）。**第 1 张 = 被编辑的原图**，决定输出画布与编辑目标。不传 = 文生图 |
+| `sizeId` | `auto` / `sq-2048` / `p-4x3` / `l-4x3` / `p-2x3-film`（旧 id `p-3x4-film` 是别名）/ `v-16x9` / `h-16x9` / `ecom-sq` / `ecom-45` / `comic-page` / `h3-4k-sq` / `h3-4k-169` |
+| `width` + `height` | 自定义尺寸，**必须成对**、必须 **32 的倍数**、边长 ≥256。会抵消 `sizeId` |
+| `seed` | 不给随机。`count>1` 时其余样本按 `seed+1`、`+2` 递增 |
+| `count` | 1–4。**拆成 N 个独立任务**（H3-Image 的 DiT 硬性拒绝 batch>1），不是一次采样出 N 张 |
+| `loras` | `[{name, strength}]`，≤6 条。名字形如 `h3img/30_style/x.safetensors`（见 `action=lora`） |
+
+**尺寸为什么必须 32 倍数**：节点按 `height//16` 取 latent、再按 patch(1,2,2) 打块。
+非 32 倍数会被补边 —— 请求 `2368×1776` 实际产出 **2368×1792**（历史 P0，已修表并加自检）。
+
+**采样参数不可调**：`pdd_steps: 6` 与 `pdd_sigmas` 写死在 checkpoint 元数据里，
+6 步正好每步用一个 PDD 预测头。`/image/meta` 的 `effective.samplingLocked = true` 就是这条声明。
+`cfg.imageSteps` 仍在，但只作排障用（改完 `/image/meta` 会显示 `stepsOverridden: true`）。
+
+**无负面提示词**：`BasicGuider` 没有 negative 分支，写"不要 XX"反而会把 XX 拉进画面。
+
+**参考图数量**：图像是 **16** 张（节点 AUTOGROW 上限），与视频南风节点的 **9** 槽是两套上限，
+不要混用（`ref-images.js` 里 `MAX_IMAGE_EDIT_REFS` 与 `MAX_REF_IMAGES` 并列声明）。
+
+**批量**：`count=2..4` 会返回 `jobIds[]` + `batchId`，用 `/image/progress?ids=` 一次轮询整组
+（只回 status / progress / 产物 rel，比 `/jobs/:id` 小一个数量级）。
+
+#### 图像 LoRA（与视频 LoRA 是两套体系）
+
+目录约定 —— **只有 `models/loras/h3img/` 前缀之下的文件才会出现在图像页**：
+
+```
+models/loras/
+├─ 00_turbo/ … 99_inbox/     ← H3 视频（现有，不要动）
+└─ h3img/                    ← H3-Image 专用
+   ├─ 30_style/              画风（单选）
+   ├─ 32_quality/            画质/细节（多挂，第 2 条起 ×0.6）
+   ├─ 40_character/          角色/换脸（单选）
+   ├─ 50_slider/             滑块（有符号，0 = 不生效）
+   ├─ 60_concept/            概念/服装/材质（多挂 ×0.8）
+   └─ 99_inbox/              未分类
+```
+
+放好后**重启 ComfyUI**（它只在启动时扫描 loras 目录）。约束由后端 `solveImageLoraStack` 统一算：
+
+- 画风 / 角色**单选**（后来的替换先来的，并回报"替换了谁"）
+- 画质 / 概念多挂按 `stackDecay` 递减
+- 总强度 >1.5 警告、>1.8 剔除最弱
+- **画风 × 角色**、**角色 × 参考图**：图像特有的硬冲突，必须告警
+- 文件不在 ComfyUI 的 loras 列表里 → **组装期就拒掉**（不能让 ComfyUI 报 `value_not_in_list`）
+
+> ⚠️ **不要放视频 LoRA 进 `h3img/`**。H3-Image 与 H3 视频的 DiT 键集完全相同（416 键逐一相同），
+> 所以视频 LoRA **能加载、不报错**，但它是按视频 latent 分布训的，
+> 在 6 步 PDD 蒸馏头下语义不成立 —— 这类错误属于"能出图但不对"。
+> 在 Civitai 上必须用 `baseModel = "MiniMax H3 Image"` 过滤（`types=LORA&baseModels=MiniMax H3 Image`），
+> 不要靠标题猜。图像生态里**加速类 LoRA 数量为 0**，不要为它做加速档。
+>
+> ⚠️ **量化底座上应当走 bypass 模式**（本插件已默认）：
+> 改权重式 `LoraLoaderModelOnly` 在 w4a8 上每层都要 `dequantize → 加 LoRA → requantize`，
+> 而且**随机重量化会给权重引入噪声**（脸/头发/线稿发糊）——Civitai 上
+> `Artistic Solo Anatomy` 的作者对 NVFP4 底座给过同样的警告。
+> `LoraLoaderBypassModelOnly` 走 `output = base_forward(x) + lora_path(x)`，
+> 不动基座权重，量化底座上唯一正确的做法。
+> 对照实测（w4a8 / 768² / 6 步 / 1 条 / 队列独占）：
+> **无 LoRA 69.2s → 改权重 123.8s（×1.79）→ bypass 87.8s（×1.27）**。
+> bypass 比改权重快 29%，但**不是免费**（仍有前向钩子开销，×1.27 而非 ×1.0）。
+> `runH3Image` 返回的 `meta.loraMode` 会写 `bypass` / `patch` / `none`；
+> 只有 ComfyUI 缺该节点时才回退 `patch`，并在 `warnings` 里明确说明。
+>
+> ⚠️ **不要把 Anima / Pony / Illustrious / Flux / Krea / MOSS 的 LoRA 放进 `h3img/`**：
+> 它们是 SD 系 `lora_unet_blocks_*_cross_attn_*` 命名，与 DiT 的
+> `diffusion_model.blocks.*.attn.qkv_proj` 无任何交集，加载会全部 missing key，等于不生效。
 
 ### 2.5 立绘拆解
 
@@ -368,10 +502,28 @@ GET  /jiuzhang/api/post/fonts
 ### 4.2 出一张图
 
 ```
-1) studio_image {action:'meta'}                                     → 确认模型就绪
+1) studio_image {action:'meta'}                                     → 确认模型就绪 + 看真实生效参数
 2) studio_image {action:'generate', prompt:'...', sizeId:'sq-2048'}  → 得 jobId
 3) studio_jobs  {action:'list'}                                     → 查状态
 ```
+
+**改图（编辑模式）** —— 参考图第 1 张就是"被编辑的原图"：
+
+```
+1) studio_image {action:'lora'}                                     → 看装了哪些图像 LoRA（可选）
+2) studio_image {
+     action:'generate',
+     prompt:'Edit <Picture 1>: change the dress to red silk, keep the face and pose unchanged.',
+     refImages:['assets/立绘.png', 'assets/红色礼服参考.png'],        ← 第 1 张决定画布与编辑目标
+     sizeId:'auto',                                                  ← auto 继承第 1 张的尺寸
+     loras:[{name:'h3img/30_style/xxx.safetensors', strength:0.8}],
+     count:2,                                                        ← 同 prompt 两个种子（拆成 2 个任务）
+   }                                                                 → 得 jobId + jobIds[]
+3) GET /image/progress?ids=<jobIds 逗号连接>                          → 排队 / 生成中 / 取回产物
+```
+
+> 编辑模式下**不要用文字复述图里的长相与服装** —— 模型看得见；只写"要改什么"。
+> 想改的范围越大，越要把"保持不变"的部分写清楚（`keep the face and pose unchanged`）。
 
 ### 4.3 做角色卡（立绘 → 拆解 → 入库）
 
@@ -499,7 +651,7 @@ queued → running → completed
                  ↘ interrupted（重启后恢复时检测到）
 ```
 
-**轮询建议**：图像 5 秒一次，视频 10 秒一次。插件内部最长等 40 分钟。
+**轮询建议**：图像 5 秒一次（或直接轮 `/image/progress?ids=` 拿排队/生成/取回三态），视频 10 秒一次。插件内部最长等 40 分钟（`comfyTimeoutMin` 可调）。
 
 **任务产物**：
 - 视频：`data/outputs/<jobId>.mp4`
@@ -559,13 +711,16 @@ data/
 | 视频帧数 | 17k+5（124/243/362） |
 | H3 guidance | 1.0 |
 | 视频步数 | DMAD 学生 4 或 8 |
-| 图像步数 | 固定 6 |
+| 图像步数 | 固定 6（PDD 头网格决定；`cfg.imageSteps` 仅排障用） |
 | 图像 guidance | 固定 1.0 |
-| 图像负面提示 | **不支持** |
+| 图像负面提示 | **不支持**（`BasicGuider` 无 negative 分支） |
+| 图像尺寸 | 宽高 **32 的倍数**（非 32 会被补边，产出尺寸与请求不符） |
+| 图像批量 | 1–4 张，**拆成 N 个独立任务**（DiT 拒绝 batch>1） |
 | 参考图 | Ref2VA ≤9 / H3-Image ≤16 |
 | 参考文件总数 | ≤12 |
 | 12GB 显存 | **不能并行**，串行执行 |
-| 提示词上限 | 7000 字符（H3）/ 4096 token（H3-Image） |
+| 提示词上限 | 7000 字符（H3）/ 4096 字符（H3-Image，超长 400 拒绝不截断） |
+| 图像 LoRA | ≤6 条，只在 `models/loras/h3img/` 下生效 |
 | 控制模型目录 | `models/model_patches/`（不是 `controlnet/`） |
 | Ref2VA 首尾帧 | **南风 V15**：直接占 图片1/图片2（无 AddGuide）；`h3-local` 旧路径才走 AddGuide |
 | 镜头卡坐标系 | (x, y=高度, z=深度)；Blender 是 Z-up |

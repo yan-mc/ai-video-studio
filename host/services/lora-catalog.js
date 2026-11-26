@@ -1,48 +1,28 @@
 /**
  * H3 LoRA 分类目录 —— 单一真源。
  *
- * ============================================================================
- * 为什么需要这一层
- * ============================================================================
+ * 南风 V15 有 8 个 LoRA 槽，谁都能往里塞。但 H3 的 LoRA 生态不是"一堆可自由叠加的
+ * 补丁"，而是**互相约束的功能轴**：加速蒸馏/运镜/画风/角色/音色/工具各自单选，
+ * 动作/滑块/画质/特效可多挂但同向要衰减。不做这层约束的后果不是报错，
+ * 而是"能出片但不对"，所以分类、互斥、强度策略全部**显式建模**。
  *
- * 南风 V15 有 8 个 LoRA 槽（LoRA1..LoRA8），谁都能往里塞东西。
- * 但 H3 的 LoRA 生态不是"一堆可自由叠加的补丁"，而是**11 个互相约束的功能轴**：
- *
- *   · 加速蒸馏（turbo）—— 全局单选。两条同挂 = 两套互不相容的去噪计划
- *   · 运镜（camera）   —— 每镜单选。两条运镜会给相机两个矛盾目标
- *   · 画风（style）    —— 单选。风格是整体映射，不可加
- *   · 角色一致性（character）—— 单选。两个脸必崩
- *   · 音色（audio）    —— 单选。两条声线会串
- *   · 工具（utility）  —— 多数单选（改变输出格式）
- *   · 动作/物理（motion）—— 可多挂，但同向要衰减
- *   · 滑块（slider）   —— 可多挂，但同一轴只留一个；强度**有符号**
- *   · 画质（quality）  —— 可多挂，但极易过度锐化
- *   · 特效/编辑（vfx）  —— 可多挂（不同目标物）
- *
- * 不做这层约束的后果不是报错，而是"能出片但不对" —— 这正是本项目反复
- * 要消灭的失败模式。所以分类、互斥、强度策略全部**显式建模**，不靠用户自觉。
- *
- * ============================================================================
- * 目录约定（ComfyUI 侧）
- * ============================================================================
- *
- * ComfyUI 的 `folder_paths.recursive_search` 是 `os.walk(followlinks=True)`，
- * 子目录**会被递归扫描**，返回的名字是相对路径（`00_turbo/xxx.safetensors`）。
- * 所以子目录既能在界面上分组，又天然成为"机器可读的分类标签"。
+ * 目录约定：`folder_paths.recursive_search` 是 `os.walk(followlinks=True)`，
+ * 子目录会被递归扫描，返回的名字形如 `00_turbo/xxx.safetensors` ——
+ * 子目录因此既是界面分组也是机器可读的分类标签：
  *
  *   models/loras/
- *   ├─ 00_turbo/          加速蒸馏（DMAD / Turbo / HyperFlow …）  单选
- *   ├─ 10_camera/         运镜                                   单选
- *   ├─ 20_motion/         动作 / 物理 / 表演                      可多挂
- *   ├─ 21_motion_slider/  动作类滑块（速度/幅度/重力）             可多挂，有符号
- *   ├─ 30_style/          画风 / 影调                             单选
- *   ├─ 31_look_slider/    影调类滑块（曝光/昼夜/焦点）             可多挂，有符号
- *   ├─ 32_quality/        画质 / 锐度 / 写实增强                   可多挂
- *   ├─ 40_character/      角色一致性 / 换脸 / 换人                 单选
- *   ├─ 50_audio/          音色 / 人声 / 口型                       单选
- *   ├─ 60_vfx/            特效 / 编辑 / 去人 / 换背景              可多挂
- *   ├─ 70_utility/        360 / VR / 转面 / 字幕 / 年龄            单选
- *   └─ 99_inbox/          未分类（前端标"未分类·请手动归类"）        可多挂
+ *   ├─ 00_turbo/          加速蒸馏                          单选
+ *   ├─ 10_camera/         运镜                              单选
+ *   ├─ 20_motion/         动作 / 物理 / 表演                可多挂
+ *   ├─ 21_motion_slider/  动作滑块（速度/幅度/重力）         可多挂，有符号
+ *   ├─ 30_style/          画风 / 影调                       单选
+ *   ├─ 31_look_slider/    影调滑块（曝光/昼夜/焦点）         可多挂，有符号
+ *   ├─ 32_quality/        画质 / 锐度 / 写实增强             可多挂
+ *   ├─ 40_character/      角色一致性 / 换脸                  单选
+ *   ├─ 50_audio/          音色 / 人声 / 口型                 单选
+ *   ├─ 60_vfx/            特效 / 编辑 / 去人 / 换背景        可多挂
+ *   ├─ 70_utility/        360 / VR / 转面 / 字幕 / 年龄      单选
+ *   └─ 99_inbox/          未分类（前端标"请手动归类"）        可多挂
  *
  * 数字前缀保证文件系统排序稳定，前端不必额外维护排序表。
  *
@@ -50,14 +30,9 @@
  */
 
 /**
- * 分类定义。
- *
- * 字段说明：
- *   folder      目录名（ComfyUI 里的路径前缀）
- *   id          对内标识
- *   label       界面上显示的中文名
- *   mode        'single' 单选 / 'multi' 可多挂
- *   strength    默认与范围。signed=true 表示"0 = 不生效，正负是反方向"
+ * 分类定义。字段：folder 目录名 / id 对内标识 / label 界面名 /
+ * mode（'single' 单选、'multi' 可多挂）/ strength（默认与范围，signed=true 表示
+ * 0 = 不生效、正负是反方向）
  *   stackDecay  多挂时的逐条衰减系数（1 = 不衰减）
  *   why         为什么是这个 mode —— 这句话会直接显示给用户
  */
@@ -78,11 +53,9 @@ export const LORA_CATEGORIES = Object.freeze([
     label: '运镜',
     mode: 'single',
     /**
-     * 默认 0.8 而不是 0.9。
-     *
-     * 社区给的区间是 0.8–1.0，但"运镜 + 动作"是最常见的组合，
-     * 两者都用 0.9/0.8 就超过 1.5 的连贯性阈值。运镜本身是"镜头怎么动"，
-     * 0.8 已经足够明确，留出余量给动作类才是正确取舍。
+     * 默认 0.8 而不是 0.9：社区区间是 0.8–1.0，但"运镜 + 动作"是最常见的组合，
+     * 两者都用 0.9/0.8 就超过 1.5 的连贯性阈值。运镜只是"镜头怎么动"，
+     * 0.8 已足够明确，留余量给动作类才是正确取舍。
      */
     strength: { def: 0.8, min: 0.4, max: 1.2, step: 0.05 },
     stackDecay: 1,
@@ -105,9 +78,8 @@ export const LORA_CATEGORIES = Object.freeze([
     label: '动作滑块',
     mode: 'multi',
     /**
-     * 滑块的中性值是 0，但"选了却什么都不发生"是典型静默失败。
-     * 所以 `defaultOnSelect` 给一个轻微正向初值（+0.5），
-     * 一挂上就能看到方向，用户再自己调正负。手动设 0 仍然有效。
+     * 滑块中性值是 0，但"选了却什么都不发生"是典型静默失败，
+     * 所以 `defaultOnSelect` 给一个轻微正向初值（+0.5）。手动设 0 仍然有效。
      */
     strength: { def: 0.5, min: -5, max: 5, step: 0.05 },
     stackDecay: 1,
@@ -215,22 +187,14 @@ export const CATEGORY_BY_ID = Object.freeze(
  */
 const NAME_RULES = Object.freeze([
   /**
-   * 加速蒸馏（学生本体）。
+   * 加速蒸馏（学生本体）。正则必须**足够具体**：这类是单选 + 强度锁 1.0，
+   * 误判会让真正的 DMAD 被顶掉（单选类后来的替换先来的）——
+   * 结果是「挂了一个画风 LoRA 当加速学生」，4 步跑在原模型上，能出片但质量悄悄崩。
    *
-   * ⚠️ 正则必须**足够具体**：这一类是"单选 + 强度锁 1.0"，一旦误判，
-   *    真正的 DMAD 会被它顶掉（单选类后来的替换先来的），
-   *    结果就是"挂了一个画风 LoRA 当加速学生" —— 4 步跑在原模型上，
-   *    能出片但质量悄悄崩，且不报错。
-   *
-   *    历史缺陷：这里曾经是 /turbo|acc(?:el)?|step|.../：
-   *      · 裸 step 会命中 rt_steps_style、step_by_step_anime 等画风名；
-   *      · 裸 cc(?:el)? 会命中 ccelerate_motion（其实是动作类）；
-   *      · 裸 dmd 会命中 dmd_style_pack 这类非蒸馏包。
-   *
-   *    现在要求"成词边界 + 明确语义词"：
-   *      · 4step / 8step / 6-step 这类**步数标记**
-   *      · turbo / hyperflow / lightx2v / taomate / fasth3 这类专有名词
-   *      · distill / dmd / pdd 要求是独立词（前后不是字母，或紧跟 4/8 步数）
+   * 只认三种形态：明确的步数标记（4step / 8step / 6-step）、专有名词
+   * （turbo / hyperflow / lightx2v / taomate / fasth3）、成词的 distill / dmd / pdd。
+   * 裸写 step / acc / dmd 会命中 rt_steps_style、accelerate_motion、dmd_style_pack
+   * 这类非蒸馏包。
    */
   {
     id: 'turbo',
@@ -262,32 +226,6 @@ export function baseNameOf(loraName) {
   const s = String(loraName ?? '').replace(/\\/g, '/');
   const i = s.lastIndexOf('/');
   return i >= 0 ? s.slice(i + 1) : s;
-}
-
-/**
- * 转成 ComfyUI 期望的 LoRA 名字形态。
- *
- * ============================================================================
- * 为什么不能统一用正斜杠
- * ============================================================================
- *
- * ComfyUI 的 `folder_paths.recursive_search` 用 `os.path.relpath` 生成名字，
- * 在 **Windows 上返回反斜杠**：
- *   `00_turbo\dmad_minimax_h3_8step_full_critic_comfyui.safetensors`
- *
- * 而 `value_not_in_list` 校验是**严格字符串比较**，不做路径归一。
- * 我们若把 `00_turbo/xxx` 提交上去，即使文件真实存在也会被拒：
- *   `LoRA1: '00_turbo/dmad_...' not in [...]`
- *
- * 所以：内部比对一律用纯文件名（`baseNameOf`），
- * **提交时必须还原成 ComfyUI 原始返回的那一串**。
- *
- * 这里保留原始串（`classifyLora` 的入参本身就是 ComfyUI 返回的原样名字），
- * 这个函数只负责在"用户手填了正斜杠"时把分隔符改回反斜杠。
- */
-export function toComfyLoraName(loraName, sep = '\\') {
-  const s = String(loraName ?? '');
-  return s.replace(/[\\/]+/g, sep);
 }
 
 /**
@@ -346,11 +284,24 @@ export function catalogLoras(files) {
 export const STRENGTH_LIMITS = Object.freeze({ warn: 1.5, block: 1.8 });
 
 /**
- * 校验一组用户想挂的 LoRA，返回"能挂什么 + 为什么"。
+ * 把任意强度夹到 `[-floor, floor]`。
  *
- * ============================================================================
- * 为什么不直接全挂上去
- * ============================================================================
+ * 图像侧（h3-image.js / h3-inpaint.js）一直有这层 `[-2,2]` 兜底，视频侧此前没有 ——
+ * 同一份 LoRA 配置在两条链路上会得到不同结果。这里导出成共享函数，两侧语义对齐。
+ *
+ * @param {unknown} strength
+ * @param {number} [floor=2]
+ * @returns {number}
+ */
+export function clampSignedStrength(strength, floor = 2) {
+  const n = Number(strength);
+  const limit = Number.isFinite(floor) && floor > 0 ? Math.abs(floor) : 2;
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(-limit, Math.min(limit, n));
+}
+
+/**
+ * 校验一组用户想挂的 LoRA，返回"能挂什么 + 为什么"。
  *
  * 不约束的后果不是报错，而是**能出片但不对**：
  *   · 两个运镜 LoRA → 相机收到两个矛盾目标，既不环绕也不推近
@@ -358,17 +309,16 @@ export const STRENGTH_LIMITS = Object.freeze({ warn: 1.5, block: 1.8 });
  *   · 加速 × 加速   → 两套 sigma 网格，采样器无法同时满足
  *   · 总强度 >1.5   → 动作连贯性开始崩（社区实测阈值）
  *
- * 所以这里做三件事：
- *   1. **单选类只保留一条**（后来的替换先来的，并说明替换了谁）
- *   2. **多挂类按 stackDecay 递减**（第 2 条起 × 0.6 之类）
- *   3. **总强度看门狗**（>1.5 警告，>1.8 直接剔除最弱的那条）
+ * 所以做三件事：
+ *   1. 单选类只保留一条（后来的替换先来的，并说明替换了谁）
+ *   2. 多挂类按 stackDecay 递减（第 2 条起 × 0.6 之类）
+ *   3. 总强度看门狗（>1.5 警告，>1.8 直接剔除最弱的那条）
  *
  * 返回里每条都带 `appliedStrength`，前端可直接显示"你填 1.0，实际用 0.6"。
  *
- * ⚠️ `opts.availableFiles` 必须传 **ComfyUI 原始返回的名字列表**。
- *    条目会回填成 `name` 字段（保留原始分隔符），因为 ComfyUI 的
- *    `value_not_in_list` 是严格字符串比较、不做路径归一 ——
- *    在 Windows 上必须是反斜杠形态，否则装了也提交不上去。
+ * `opts.availableFiles` 必须是 **ComfyUI 原始返回的名字列表**：条目会回填成
+ * `name` 字段（保留原始分隔符），因为 `value_not_in_list` 是严格字符串比较、
+ * 不做路径归一 —— Windows 上必须是反斜杠形态，否则装了也提交不上去。
  *
  * @param {Array<{name:string, strength?:number}>} requested
  * @param {{ maxSlots?: number, availableFiles?: string[] }} [opts]
@@ -398,10 +348,9 @@ export function solveLoraStack(requested, opts = {}) {
   /**
    * 把任意形态的入参归一成 ComfyUI 认识的字符串。
    *
-   * 用户可能给：`00_turbo/x.safetensors`（正斜杠）、`x.safetensors`（纯名）、
-   * 或 ComfyUI 原始返回的 `00_turbo\x.safetensors`。
-   * 统一策略：**按纯文件名去查 ComfyUI 的真实名字**，查不到才原样保留
-   * （让 ComfyUI 明确报错，而不是我这里静默丢掉）。
+   * 用户可能给 `00_turbo/x.safetensors`（正斜杠）、`x.safetensors`（纯名），
+   * 或 ComfyUI 原始返回的 `00_turbo\x.safetensors`。统一策略：**按纯文件名查
+   * ComfyUI 的真实名字**，查不到才原样保留（让 ComfyUI 明确报错，而不是静默丢掉）。
    */
   const canonical = (raw) => {
     const b = baseNameOf(raw);
@@ -425,15 +374,13 @@ export function solveLoraStack(requested, opts = {}) {
     const { category } = classifyLora(item.name);
 
     /**
-     * ⚠️ 文件必须真的在 ComfyUI 的 loras 目录里。
+     * 文件必须真的在 ComfyUI 的 loras 目录里。不检查的后果是**提交阶段才炸**：
+     * `value_not_in_list` 是严格字符串比较，返回
+     * `LoRA2: '30_style/x.safetensors' not in [...]`，用户只看到一个文件名，
+     * 看不出"是我少装了一个 LoRA"。
      *
-     * 不检查的后果是**提交阶段才炸**：ComfyUI 的 `value_not_in_list` 校验是
-     * 严格字符串比较，会返回 `LoRA2: '30_style/x.safetensors' not in [...]`，
-     * 用户只看到一个文件名，完全看不出"是我少装了一个 LoRA"。
-     *
-     * 这里在**组装期**就拒掉，并说明"不在 loras 目录里"。
-     * 只有 `availableFiles` 真的探测到了才做这个检查 ——
-     * 探测失败（ComfyUI 不可达）时不能误杀，否则用户会以为 LoRA 全丢了。
+     * 只在 `availableFiles` 真的探测到了才检查 —— 探测失败时不能误杀，
+     * 否则用户会以为 LoRA 全丢了。
      */
     if (canonicalByBase.size > 0 && !canonicalByBase.has(baseNameOf(item.name))) {
       rejected.push({
@@ -469,12 +416,10 @@ export function solveLoraStack(requested, opts = {}) {
     const nth = multiCount.get(category.id) ?? 0;
 
     /**
-     * ⚠️ 加速学生的强度**恒为 1.0，且不参与衰减、不接受用户覆盖**。
+     * 加速学生的强度**恒为 1.0，不参与衰减、不接受用户覆盖**。
      *
-     * 它是蒸馏后的**学生本体**，不是风格补丁。压到 0.7 等于把蒸馏预测
-     * 和 base 预测做线性插值 —— 在 4–8 步这种极短轨迹上误差被放大，
-     * 表现为竖条纹、色彩断层、画面抖动。
-     *
+     * 它是蒸馏后的**学生本体**，不是风格补丁。压到 0.7 等于把蒸馏预测和 base 预测
+     * 做线性插值 —— 在 4–8 步这种极短轨迹上误差被放大，表现为竖条纹、色彩断层、抖动。
      * 官方原话："the LoRA is the distilled student, not a style"。
      */
     const isAccel = category.id === 'turbo';
@@ -503,13 +448,16 @@ export function solveLoraStack(requested, opts = {}) {
       });
     }
 
-    // 夹到该类的合法区间
-    if (!category.signed) {
-      const clamped = Math.min(category.strength.max, Math.max(0, strength));
-      if (clamped !== strength) {
-        degraded.push({ name: item.name, from: strength, to: clamped, reason: `超出 ${category.label} 的合法区间` });
-        strength = clamped;
-      }
+    // 夹到该类的合法区间。signed 类（滑块）按**绝对值**夹：min/max 是对称的，
+    // 不夹的话 strength: 999 会原样写进 `LoRA{n}强度`，画质直接崩。
+    const lo = Number.isFinite(category.strength.min) ? category.strength.min : 0;
+    const hi = Number.isFinite(category.strength.max) ? category.strength.max : Infinity;
+    const clamped = category.signed
+      ? Math.min(hi, Math.max(-Math.abs(lo), strength))
+      : Math.min(hi, Math.max(0, strength));
+    if (clamped !== strength) {
+      degraded.push({ name: item.name, from: strength, to: clamped, reason: `超出 ${category.label} 的合法区间` });
+      strength = clamped;
     }
 
     const entry = {
@@ -531,18 +479,20 @@ export function solveLoraStack(requested, opts = {}) {
 
   // ---- 总强度看门狗 ----
   //
-  // ⚠️ 加速学生**不计入总和**。它是学生本体（1.0 是"用这个学生"的意思，
-  //    不是"叠加一个风格补丁"），把它算进去会让"DMAD + 一个动作 LoRA"
-  //    就逼近上限，正常组合反而被误杀。
+  // 只累加**语义补丁**类（style / quality / motion …）的强度：
+  //   · 加速学生不算：它是学生本体（1.0 表示"用这个学生"，不是叠加一个风格补丁），
+  //     算进去会让「DMAD + 一个动作 LoRA」就逼近上限，正常组合被误杀。
+  //   · signed 滑块不算：它是数值旋钮（±5 是合法区间），量级不参与 ComfyUI 的
+  //     加法叠加。算进去会让一个合法的 strength:-3 滑块被整个剔除。
   const sumAbs = () => accepted
-    .filter((a) => a.role !== 'accelerator')
+    .filter((a) => a.role !== 'accelerator' && !a.signed)
     .reduce((s, a) => s + Math.abs(a.appliedStrength), 0);
   let total = sumAbs();
 
   if (total > STRENGTH_LIMITS.block) {
-    // 硬阈值：按"最弱的先砍"从 semantic 里剔，直到降到 warn 以下
+    // 硬阈值：按"最弱的先砍"从中剔除，直到降到 warn 以下
     while (total > STRENGTH_LIMITS.warn) {
-      const candidates = accepted.filter((a) => a.role !== 'accelerator');
+      const candidates = accepted.filter((a) => a.role !== 'accelerator' && !a.signed);
       if (!candidates.length) break;
       const weakest = candidates.reduce((m, a) => (Math.abs(a.appliedStrength) < Math.abs(m.appliedStrength) ? a : m));
       accepted.splice(accepted.indexOf(weakest), 1);

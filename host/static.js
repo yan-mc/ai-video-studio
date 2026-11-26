@@ -10,6 +10,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { parseRangeHeader } from './api/http.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -49,27 +50,21 @@ function isInside(baseDir, target) {
   return t === base || t.startsWith(prefix);
 }
 
-function parseRange(header, size) {
-  if (!header) return null;
-  const m = /^bytes=(\d*)-(\d*)$/.exec(String(header).trim());
-  if (!m) return null;
-  const startRaw = m[1];
-  const endRaw = m[2];
-  if (startRaw === '' && endRaw === '') return null;
-  let start;
-  let end;
-  if (startRaw === '') {
-    const suffix = Number(endRaw);
-    if (!Number.isFinite(suffix) || suffix <= 0) return { invalid: true };
-    start = Math.max(0, size - suffix);
-    end = size - 1;
-  } else {
-    start = Number(startRaw);
-    end = endRaw === '' ? size - 1 : Number(endRaw);
-    if (!Number.isFinite(start) || !Number.isFinite(end)) return { invalid: true };
+/**
+ * 安全头 —— 与 `/file` / `/assets/item` 完全一致。
+ *
+ * SVG 是可执行文档（内含 <script>），以 image/svg+xml 内联返回等于
+ * **同源存储型 XSS**：`/jiuzhang/assets` 服务的是用户可上传的 dataDir/assets，
+ * 而该源上挂着全部写接口，令牌可从 /token 取到。
+ * 所以任何静态路径下的 `.svg` 都必须强制下载 + nosniff。
+ */
+function assetSecurityHeaders(abs) {
+  const headers = { 'X-Content-Type-Options': 'nosniff' };
+  if (path.extname(abs).toLowerCase() === '.svg') {
+    headers['Content-Disposition'] = 'attachment; filename="download.svg"';
+    headers['Content-Type'] = 'text/plain; charset=utf-8';
   }
-  if (start > end || start >= size) return { invalid: true };
-  return { start, end: Math.min(end, size - 1) };
+  return headers;
 }
 
 /** 安全地把文件流写进响应（有 error 监听） */
@@ -160,13 +155,15 @@ export async function serveStatic(req, res, { prefix, baseDir, spaFallback = nul
     return res.end();
   }
 
-  const range = req.method === 'GET' ? parseRange(req.headers.range, stat.size) : null;
+  const range = req.method === 'GET' ? parseRangeHeader(req.headers.range, stat.size) : null;
+  const secHeaders = assetSecurityHeaders(abs);
 
   if (range && range.invalid) {
     // 416：规范要求 Content-Range: bytes */size
     res.writeHead(416, {
       'Content-Type': 'application/json; charset=utf-8',
       'Content-Range': `bytes */${stat.size}`,
+      ...secHeaders,
     });
     return res.end(JSON.stringify({ error: 'RANGE_NOT_SATISFIABLE', size: stat.size }));
   }
@@ -176,6 +173,7 @@ export async function serveStatic(req, res, { prefix, baseDir, spaFallback = nul
     'Accept-Ranges': 'bytes',
     'Cache-Control': isIndex ? 'no-store' : 'no-cache',
     ...(isIndex ? {} : { ETag: etag }),
+    ...secHeaders,
   };
 
   if (range) {
@@ -194,7 +192,7 @@ export async function serveStatic(req, res, { prefix, baseDir, spaFallback = nul
   return pipeFile(res, abs);
 }
 
-/** SPA 专用：总是回退到 index.html，并把写 token 注入页面 */
+/** SPA 专用：总是回退到 index.html（前端靠 GET /token 自己取写令牌） */
 export async function serveSpa(req, res, { prefix, distDir }) {
   const url = new URL(req.url, 'http://127.0.0.1');
 
