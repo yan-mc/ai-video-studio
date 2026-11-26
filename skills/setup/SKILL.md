@@ -1,544 +1,440 @@
 ---
 name: jiuzhang-studio-setup
-description: 从零部署九章工作室插件（DSH 视频/图像创作插件）。当用户要安装、部署、修复或迁移这个插件时使用，涵盖环境准备、本地模型下载（H3 视频 + H3-Image 图像，约 68GB）、Blender 预演引擎安装、ComfyUI 配置、插件挂载与验收。插件本体不含模型权重、不含 Blender，必须由使用者自行下载。
+description: 从零部署九章工作室插件（DSH 视频/图像创作插件）。当用户要安装、部署、修复或迁移这个插件时使用，涵盖环境准备、本地模型下载（H3 视频 + H3-Image 图像，约 70 GB）、Blender 预演引擎安装、ComfyUI 配置、vendor 节点部署、插件挂载与人工验收。插件本体不含模型权重、不含 Blender，必须由使用者自行下载。
 ---
 
 # 九章工作室 · 部署与本地模型配置
 
-> 插件本体（`@local/dsh-jiuzhang-studio`）**不包含任何模型权重**，也**不包含 Blender**。
-> 生成能力依赖：本地 ComfyUI + MiniMax H3 系列模型（约 **70 GB**）+ 可选的 Blender 5.2（约 390 MB）。
-> 本 skill 描述完整部署流程，供 AI 代理按步骤执行。
-
----
+> 插件本体（`@local/dsh-jiuzhang-studio` v4.0.0）**不含模型权重**，也**不含 Blender**。
+> 依赖：本地 ComfyUI 0.45.0 + MiniMax H3 模型（最小可用集 **约 70 GB**）+ 可选 Blender 5.2（约 390 MB）。
+> v4 已删除全部测试脚本，验收一律走**人工步骤**（§7）。
 
 ## 0. 前置确认
 
-部署前必须确认四件事：
-
-| 项 | 要求 | 检查方式 |
+| 项 | 要求 | 检查 |
 |---|---|---|
-| **GPU 显存** | ≥ 12 GB（H3 视频 33B + H3-Image 33B 靠量化 + lowvram 运行） | `nvidia-smi --query-gpu=memory.total --format=csv,noheader` |
-| **磁盘** | ≥ 95 GB 空闲（模型约 70 GB + Blender 0.4 GB + 工作区） | `Get-PSDrive` / `df -h` |
-| **ComfyUI** | **0.45.0 或更高**（0.44 无 `MiniMaxH3ImageConditioning`） | `curl http://127.0.0.1:8488/system_stats` |
-| **Blender**（可选） | **5.2 或更高**；不装则 3D 预演不可用，其它功能不受影响 | `blender --version` |
+| **GPU 显存** | ≥ 12 GB（H3 33B + H3-Image 33B 靠量化 + DynamicVRAM） | `nvidia-smi --query-gpu=memory.total --format=csv,noheader` |
+| **磁盘** | ≥ 95 GB 空闲 | `Get-PSDrive` |
+| **Python / torch** | 3.10+（实测 3.12.10）/ CUDA 版（实测 2.11.0+cu128） | `python -c "import torch;print(torch.__version__)"` |
+| **PowerShell 7** | **必需**。`start-h3.ps1` 是 UTF-8，5.1 会解析失败 | `pwsh --version` |
+| **ComfyUI** | **0.45.0**（H3 节点在 `comfy_extras/nodes_minimax_h3.py`） | `curl.exe -s http://127.0.0.1:8488/system_stats` |
+| **Blender**（可选） | 5.2.x；不装则 3D 预演不可用，其它功能不受影响 | `blender --version` |
 
-显存不足时的取舍：
-
-- **12 GB**：只能跑 w4a8/int8 量化 + `--lowvram`（推荐路径，已验证）
-- **16-24 GB**：可用更大位宽，质量更好
-- **48 GB+**：可跑 bf16
-
----
+存算取舍：**12 GB** 必须 w4a8（12.55 GB）+ `maxConcurrentLocal:1` 串行；
+**16–24 GB** 可换 int8_convrot（~21 GB）；**48 GB+** 可跑 bf16（~40 GB）。
 
 ## 1. 目录约定
 
-推荐布局（路径可改，但下文以此为例）：
-
-> 下文用 `<工作区>` 代表你选的根目录（例如 `D:\AI视频`）。
-> 请先把它设成变量，后面的命令直接复制即可：
->
-> ```powershell
-> $ws = 'D:\AI视频'        # ← 改成你自己的目录
-> ```
+```powershell
+$ws = 'F:\AI视频'        # ← 改成你自己的根目录
+```
 
 ```
 <工作区>\
-├── ai-runtime\                 # 运行时（含模型，不进插件仓库）
-│   ├── ComfyUI\                # ComfyUI 源码（git 仓库）
-│   ├── venv\                   # Python 虚拟环境
-│   └── models\                 # ★ 模型放这里（见 §3）
-└── 工作室\
-    ├── dsh-jiuzhang-studio\    # 插件本体
-    └── tools\                  # ★ 便携工具（不进插件仓库）
-        ├── ffmpeg\             # ffmpeg / ffprobe
-        └── blender-5.2.4-windows-x64\   # Blender 便携版
+├── ai-runtime\
+│   ├── ComfyUI\models\        # ★ ComfyUI 读这里
+│   ├── models\                # ★ 插件探测这里（见 §1.1）
+│   ├── venv\  .comfy-port     # ★ 端口由 start-h3.ps1 写入
+│   └── start-h3.ps1           # ★ 插件「启动」按钮调它
+├── tools\  ffmpeg\  blender-5.2.4-windows-x64\
+└── dsh-jiuzhang-studio\       # 插件本体
 ```
 
-### 1.1 模型目录的自动探测
+### 1.1 模型根目录探测（`resolveModelRoot()`）
 
-插件通过 `resolveModelRoot()` 自动找模型目录，顺序：
+`host/services/h3-image.js`，取第一个真正存在 `diffusion_models/` 子目录的候选：
+① `imageModelRoot` ② `comfyInputDir/../models` 与 `../../models`
+③ `H3_MODEL_ROOT` / `COMFY_MODEL_ROOT` / `COMFYUI_MODEL_ROOT`
+④ 从插件向上 6 层的 `models` / `ai-runtime/models` / `ComfyUI/models`
 
-1. 配置项 `imageModelRoot`
-2. `comfyInputDir` 的兄弟目录 `models`
-3. 环境变量 `H3_MODEL_ROOT`
-4. 常见路径 `<工作区>\ai-runtime\models`
-5. 从插件位置向上 6 层找 `models` 或 `ai-runtime\models`
-
-**⚠️ 关键**：ComfyUI 自己读的是 `<ComfyUI>\models\`，而插件探测的是 `<工作区>\ai-runtime\models`。
-两者**可能不是同一个目录**！实测踩过：模型放在 `ai-runtime\models` 但 ComfyUI 读的是
-`ai-runtime\ComfyUI\models`，表现为 ComfyUI 的模型下拉框里**什么都看不到**。
-
-**推荐做法**：直接放进 **`<工作区>\ai-runtime\ComfyUI\models\`**（ComfyUI 的真实模型根），
-这样两边都能用；或者用 `extra_model_paths.yaml` 把 `ai-runtime\models` 挂进去。
-
-### 1.2 工具的二进制定位（都不接受配置注入）
-
-| 工具 | 定位顺序 |
-|---|---|
-| **ffmpeg** | `DSH_FFMPEG_DIR` / `FFMPEG_DIR` → 配置项 `ffmpegDir` → `<插件>/../../tools/ffmpeg` → PATH |
-| **Blender** | `DSH_BLENDER` / `BLENDER_EXE` / `BLENDER_PATH` → `DSH_BLENDER_DIR` → `<插件>/../../tools/blender-<版本>/` → PATH |
-
-可执行路径**刻意不接受** Web 配置项注入（防 RCE）。
-
----
-
-## 2. ComfyUI 安装与升级
+**⚠️ 关键**：插件扫 `<工作区>\ai-runtime\models`，ComfyUI 只读 `<ComfyUI>\models\`。
+两者不通时表现为 **ComfyUI 模型下拉框全空**（插件自己能扫盘，所以不报缺模型）。
 
 ```powershell
-# 克隆（或用已有的）
-git clone https://github.com/comfyanonymous/ComfyUI.git <工作区>\ai-runtime\ComfyUI
-
-# 建 venv（Python 3.10+，实测 3.12 可用）
-cd <工作区>\ai-runtime
-python -m venv venv
-
-# 装依赖（torch 用 CUDA 版，实测 cu128 + torch 2.11 可用）
-<工作区>\ai-runtime\venv\Scripts\python.exe -m pip install --upgrade pip
-<工作区>\ai-runtime\venv\Scripts\python.exe -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-cd ComfyUI
-<工作区>\ai-runtime\venv\Scripts\python.exe -m pip install -r requirements.txt
+# 方案 A（本机实际采用）：目录联接把 ComfyUI 的模型目录指过去
+$c = "$ws\ai-runtime\ComfyUI\models"
+foreach ($d in @('diffusion_models','text_encoders','vae','loras','latent_upscale_models')) {
+  if (Test-Path "$c\$d") { Remove-Item "$c\$d" -Recurse -Force }
+  cmd /c mklink /J "$c\$d" "$ws\ai-runtime\models\$d"
+}
+# 方案 B：写 ComfyUI 的 extra_model_paths.yaml
 ```
 
-**升级到 0.45.0+**（必须，否则没有 H3-Image 节点）：
+两头都绿才算接通：`/object_info/UNETLoader` 能看到模型名，**且** `/jiuzhang/api/image/meta` 的 `status.ready == true`。
+
+### 1.2 二进制定位（都不接受 Web 配置注入，防 RCE）
+
+- **ffmpeg**：`DSH_FFMPEG_DIR` / `FFMPEG_DIR` → `ffmpegDir` → 从插件向上 6 层找 `tools/ffmpeg`（认 `bin/` 与根目录两种布局）→ PATH
+- **Blender**：`DSH_BLENDER` / `BLENDER_EXE` / `BLENDER_PATH` → `DSH_BLENDER_DIR` → `<插件>/../../..` 与 `<插件>/../..` 下的 `tools/blender-*` → PATH
+
+`ffmpegDir` 默认值可用，但**不在** `WRITABLE_CONFIG_KEYS` 内（写了也不生效）。
+
+## 2. ComfyUI 安装与启动
 
 ```powershell
-cd <工作区>\ai-runtime\ComfyUI
-git fetch origin
-git pull origin master
-<工作区>\ai-runtime\venv\Scripts\python.exe -m pip install -r requirements.txt
+git clone https://github.com/comfyanonymous/ComfyUI.git "$ws\ai-runtime\ComfyUI"
+cd "$ws\ai-runtime"; python -m venv venv
+$py = "$ws\ai-runtime\venv\Scripts\python.exe"
+& $py -m pip install --upgrade pip
+& $py -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+cd ComfyUI; & $py -m pip install -r requirements.txt
 ```
 
-验证节点存在：
-
 ```powershell
-# H3-Image 图像节点
+curl.exe -s http://127.0.0.1:8488/system_stats                      # comfyui_version 应为 0.45.0
 curl.exe -s http://127.0.0.1:8488/object_info/MiniMaxH3ImageConditioning
-
-# 任意帧锚定节点（Ref2VA 没有 first_frame 口，靠它）
 curl.exe -s http://127.0.0.1:8488/object_info/MiniMaxH3AddGuide
 ```
 
-启动（12 GB 显存必须 `--lowvram`）：
+### 2.1 启动：**只用 `start-h3.ps1`**
 
-```powershell
-<工作区>\ai-runtime\venv\Scripts\python.exe main.py --lowvram --listen 127.0.0.1 --port 8488
+插件的 `/jiuzhang/api/comfy/start` 就是 `pwsh -File ai-runtime/start-h3.ps1`。
+**不要手写 `--lowvram`** —— 0.45.0 的 DynamicVRAM 下它是空操作，只会打出误导性的 `LOW_VRAM` 日志。
+
+脚本实际传参：`--fast-disk --disable-pinned-memory --cache-none --vram-headroom 1 --use-ck-attention --listen 127.0.0.1 --port <自动>`
+
+| 参数 | 为什么 |
+|---|---|
+| `--disable-pinned-memory` | Windows pin 上限 = ram×0.40，每模型预留 2 倍地址空间，泄漏 20–30 GB 且杀进程也释放不掉 |
+| `--fast-disk` | 模型在 NVMe，权重由 VBAR 直接读文件；与关 pinned 是**互斥的两条后备路径**，此组合自洽 |
+| `--cache-none` | 默认 RAM 缓存阈值 `min(128, ram/1024)` 在 32 GB 机器永不满足，每节点后都白清一遍 |
+| `--vram-headroom 1` | 12 GB 卡填满时 WDDM 把权重降级到共享显存 → 功耗 100W→44W、算力空转 |
+| `--use-ck-attention` | 自带，实测 −14.7%（116s→99s），零额外依赖 |
+
+### 2.2 端口是**自动挑**的，默认不一定是 8488
+
+Hyper-V / WSL / Docker 会**动态保留**大段 TCP 端口，绑定报 `WinError 10013`，且每次重启都可能变。脚本流程：
+
+1. `.comfy-port` 里的端口还在监听 → 直接复用
+2. 否则扫 `8488 / 8688 / 8888 / 8388 / 8188`，用 `/system_stats` 确认是 ComfyUI
+3. 否则从 `8488 8688 8888 9088 9288 9488 9688 9888 10088 10288` 挑「未被保留且未被占用」的，兜底 11000–24000 按偶数找
+4. 成功后把实际端口写入 `ai-runtime/.comfy-port`
+
+**插件解析顺序**（`comfy-client.js`）：
+
+```
+环境变量 DSH_COMFY_URL / COMFY_URL
+  > ai-runtime/.comfy-port（向上 8 层找，也认 DSH_COMFY_HOME / H3_HOME）
+  > 配置项 comfyUrl（DEFAULTS = http://127.0.0.1:8488）
+  > 常见端口探测 8488 8688 8888 9088 9288 8388 8188
 ```
 
-> 端口被 Hyper-V 占用时报 `WinError 10013`，换个端口即可（插件会自动跟随 `.comfy-port` 文件）。
+每个候选先打 `/system_stats`，第一个通的才用。所以改 `comfyUrl` 通常**没有效果**，真正生效的是 `.comfy-port`。
 
----
+## 3. 部署 vendor 节点（必做）
 
-## 2.5 部署 vendor/nanfeng（**必做，否则整个视频链路不可用**）
+`vendor/` 下是 **ComfyUI 的 Python 自定义节点包**，不是插件代码。插件只通过 HTTP 提交参数。
+它们必须复制到 `<ComfyUI>/custom_nodes/`。
 
-`vendor/nanfeng/` 是**南风 V15 的 ComfyUI 自定义节点包**，不是本插件的代码。
-插件只通过 HTTP 把参数交给 ComfyUI，由这个节点在 ComfyUI 进程内展开成 ~40 个原生节点。
-
-**它必须被复制到 `<ComfyUI>/custom_nodes/`，否则 `h3-nanfeng` 后端直接不可用。**
-（`h3-local` 是另一条独立的旧模板路径，不依赖它。）
+### 3.1 `vendor/nanfeng` —— 视频链路（不部署 = `h3-nanfeng` 后端全不可用）
 
 ```powershell
 cd <插件目录>
-pwsh -File vendor/nanfeng/deploy-vendor.ps1 -ComfyDir "<工作区>\ai-runtime\ComfyUI"
-
-# 目标已存在时需要确认覆盖（ComfyUI 在跑的话，覆盖后要重启它）
-pwsh -File vendor/nanfeng/deploy-vendor.ps1 -ComfyDir "..." -Force
+pwsh -File vendor/nanfeng/deploy-vendor.ps1 -ComfyDir "$ws\ai-runtime\ComfyUI"
+pwsh -File vendor/nanfeng/deploy-vendor.ps1 -ComfyDir "..." -Force -Clean   # 覆盖 / 清残留
 ```
 
-脚本只复制 `.py` 和 `dlss_schema.json`。
-
-局部重绘（crop&stitch 模式）另需 `vendor/inpaint-nodes`：
-
-```powershell
-pwsh -File vendor/inpaint-nodes/deploy-vendor.ps1 -ComfyDir "<工作区>\ai-runtime\ComfyUI"
-```
-
-未部署时 `/image/inpaint` 会在提交前报 `INPAINT_NODES_MISSING`（不会等到图展开时才崩）。
-
-还需要这些第三方节点包（各自独立安装到 `custom_nodes/`）：
-
-| 包 | 用途 | 必需? |
-|---|---|---|
-| `ComfyUI-KJNodes` | 采样辅助 / Sage Patch | 必需 |
-| `ComfyUI-H3-Motion-Context` | 续写 latent 读写 | 续写必需 |
-| `ComfyUI-H3-AudioRefine` | 续写音频精修 | 可选（`continuation-quality` 用到） |
-| `ComfyUI-VideoHelperSuite` | 输出 mp4 | 必需 |
-| `Comfyui_Minimax_h3_latent_Upscaler` | 潜空间二采 | 二采必需 |
-
-> ⚠️ `Comfyui_Minimax_h3_latent_Upscaler` 的上游 HEAD 已改名并删除了
-> `H3LatentUpscalerNodeMegapixels`。**不要**用该包的最新 HEAD。
-
-### 为什么这些 Python 不能放进 host/ 或 app-src/
-
-| 目录 | 为什么不行 |
+| 参数 | 行为 |
 |---|---|
-| `host/` | Node ESM，Python 在这里永远不会被执行 |
-| `app-src/` | 浏览器代码，更不可能 |
-| `custom_nodes/` ✅ | 唯一合法归宿 —— ComfyUI 进程加载它 |
+| `-ComfyDir` | **必填**。目标 = `<ComfyDir>\custom_nodes\nanfeng_prompt_nodes_v15_modified` |
+| `-Force` | 目标已存在时**必须加**，否则 `exit 2` 拒绝覆盖（不静默覆盖） |
+| `-Clean` | 复制前删掉目标里的 `*.py` 与 `__pycache__`。`Copy-Item -Force` **从不删除**残留旧文件，删过模块后必须用它；带路径校验，只动 `$DEST` |
 
-`vendor/` 是"随包分发、但由外部宿主执行"的第三方代码的标准位置。
-详见 [vendor/README.md](../../vendor/README.md)。
+- 复制范围：`*.py` + `*.json`（如 `dlss_schema.json`）+ 顶层 `VENDOR.md`；排除目录**只有 `__pycache__`**
+- 覆盖后**必须重启 ComfyUI**（只在启动时扫描 `custom_nodes`）；脚本末自动跑依赖自检（`torch` / `torchaudio`）
 
-### 验收
+### 3.2 `vendor/inpaint-nodes` —— 局部重绘 crop 模式（v4 起必需）
 
 ```powershell
-# 节点已注册（返回 JSON，含 221 个参数）
-curl.exe -s http://127.0.0.1:8488/object_info/NanFengH3MultiReferenceGeneratorV15
-
-# 插件侧自检
-npm test   # 「南风节点已加载」与「schema.js 与 ComfyUI object_info 逐项一致」应通过
+pwsh -File vendor/inpaint-nodes/deploy-vendor.ps1 -ComfyDir "$ws\ai-runtime\ComfyUI"
+pwsh -File vendor/inpaint-nodes/deploy-vendor.ps1 -ComfyDir "..." -Force -Clean
 ```
 
----
+- 目标 = `<CustomNodes>\jiuzhang_inpaint_nodes`；缺 `__init__.py` 直接 `exit 1`
+- 复制 `__init__.py` + `LICENSE-KJNodes.txt` + `VENDOR.md`；只提供
+  `JZImageCropByMaskAndResize` / `JZImageUncropByMask`
+- **只影响 crop 模式**。未部署时 `POST /image/inpaint` 在**提交前**报
+  `INPAINT_NODES_MISSING`（`detail.missing` 列出缺的节点），不会等图展开才崩；`full` 模式不需要它
+- 该包**自包含**，只依赖 ComfyUI 自带模块，不需要 KJNodes
 
-## 3. 模型下载（约 68 GB）
+### 3.3 第三方节点包
 
-来源：**Comfy-Org** 的魔改版仓库（已适配 ComfyUI 加载），比原版更适合直接使用。
-
-- 仓库：`Comfy-Org/MiniMax-H3`（视频）、`Comfy-Org/MiniMax-H3-Image`（图像）、
-  `Comfy-Org/Depth-Anything-3`（深度估计，可选）
-
-### 3.1 视频模型（H3，约 47 GB）
-
-**全部放进 `<ComfyUI>\models\`**（见 §1.1 的坑）。
-
-| 文件 | 大小 | 存放目录 | 作用 |
+| 包 | 被引用的节点 | 用途 | 必需? |
 |---|---|---|---|
-| `minimax_h3_ref2va_pruned_fp8_scaled.safetensors` | 19.5 GB | `diffusion_models/` | **参考图生成视频**（最常用） |
-| `minimax_h3_fl2va_pruned_fp8_scaled.safetensors` | 19.5 GB | `diffusion_models/` | 首尾帧生成视频 |
-| `qwen3vl_32b_minimax_h3_int8_convrot.safetensors` | 25.3 GB | `text_encoders/` | **文本编码器（视频+图像共用）** |
-| `minimax_h3_video_vae_fp16.safetensors` | 4.9 GB | `vae/` | 视频 VAE |
-| `minimax_h3_audio_vae_fp32.safetensors` | 0.6 GB | `vae/` | 音频 VAE（**必须 fp32**） |
-| `dmad_minimax_h3_8step_full_critic_comfyui.safetensors` | 1.8 GB | `loras/` | **DMAD 8 步加速 LoRA（默认，推荐）** |
-| `dmad_minimax_h3_4step_full_critic_comfyui.safetensors` | 1.8 GB | `loras/` | DMAD 4 步加速 LoRA（草稿） |
+| `ComfyUI-KJNodes` | `MiniMaxH3MemoryEfficientSageAttentionPatch`、`ModelPreviewOverrideKJ` | H3 专用 Sage 注意力、实时预览 | 必需（缺则自动关对应参数 + warning） |
+| `ComfyUI-H3-Motion-Context` | `MiniMaxH3MotionContext` / `…LoadLatent` / `…SaveLatent` / `…Trim` | 续写 latent 读写 | **续写必需** |
+| `ComfyUI-VideoHelperSuite` | `VHS_VideoCombine` | 输出 mp4（不接输出节点报 `prompt_no_outputs`） | 必需 |
+| `Comfyui_Minimax_h3_latent_Upscaler` | `H3LatentUpscalerNodeMegapixels` | 潜空间二采 | 二采必需 |
+| `ComfyUI-H3-AudioRefine` | `H3AudioRefineMask` | 续写音频精修 | 可选（`continuation*` 预设） |
 
-> 只做 Ref2VA 的话，`fl2va` 那 19.5 GB 可以不下载，省一半空间。
+> ⚠️ `latent_Upscaler` 上游 HEAD 已改名并删掉 `H3LatentUpscalerNodeMegapixels`，
+> **不要**用该包最新 HEAD，必须用还原了该节点的历史版本。
 
-### 3.2 图像模型（H3-Image，约 12.7 GB）
+**不要装** `ComfyUI-H3-upgrade-kit`（插件代码里零引用）。**不要另找第三方源**：
+`MiniMaxH3ReferenceToVideo` / `MiniMaxH3ImageConditioning` / `MiniMaxH3AddGuide` / `MiniMaxH3SigmaShift`
+由核心 `comfy_extras` 提供；`GrowMask` / `ImageBlur` / `SplitSigmas` / `SetLatentNoiseMask` /
+`ImageToMask` / `MaskToImage` / `ImageCompositeMasked` 也是核心；`LoraLoaderBypassModelOnly`
+在核心 `nodes_lora_debug.py`（缺则回退 `LoraLoaderModelOnly` + 告警 + 慢 29%）。
+`vendor/nanfeng` 内部还会按需关闭 `H3SLAAttention` / `MiniMaxH3BlockCacheT8` /
+`MiniMaxH3TRTVAELoader` / `NvidiaDLSS*` —— 缺哪个关哪个，不会整单失败。
 
-| 文件 | 大小 | 存放目录 | 说明 |
+### 3.4 验证
+
+```powershell
+$port = (Get-Content "$ws\ai-runtime\.comfy-port" -Raw).Trim()
+foreach ($n in @('NanFengH3MultiReferenceGeneratorV15','JZImageCropByMaskAndResize','JZImageUncropByMask','VHS_VideoCombine','MiniMaxH3MotionContextLoadLatent')) {
+  curl.exe -s "http://127.0.0.1:$port/object_info/$n"
+}
+curl.exe -s "http://127.0.0.1:<DSH端口>/jiuzhang/api/image/inpaint/meta"   # 期望 cropAvailable: true
+```
+
+## 4. 模型下载
+
+来源：**Comfy-Org** 魔改版仓库（已适配 ComfyUI）：`Comfy-Org/MiniMax-H3`（视频）、
+`Comfy-Org/MiniMax-H3-Image`（图像）、Qwen3-VL-32B（文本编码器）。
+
+### 4.1 视频模型（默认名来自 `generator.js` 的 `MODEL_DEFAULTS`）
+
+| 文件 | 大小 | 目录 | 作用 |
 |---|---|---|---|
-| `minimax_h3_image_pruned_w4a8.safetensors` | 12.55 GB | `diffusion_models/` | **12 GB 显存首选** |
-| `minimax_h3_image_pruned_int8_convrot.safetensors` | 20.98 GB | `diffusion_models/` | 16 GB+ 可用 |
-| `minimax_h3_image_pruned_bf16.safetensors` | 40.23 GB | `diffusion_models/` | 48 GB+ |
+| `minimax_h3_ref2va_pruned_fp8_scaled.safetensors` | 19.5 GiB | `diffusion_models/` | **参考图/视频生成视频**（最常用） |
+| `minimax_h3_fl2va_pruned_fp8_scaled.safetensors` | 19.5 GiB | `diffusion_models/` | 首尾帧模式 |
+| `qwen3vl_32b_minimax_h3_int8_convrot.safetensors` | 25.3 GiB | `text_encoders/` | **文本编码器（视频+图像共用）** |
+| `minimax_h3_video_vae_fp16.safetensors` | 4.85 GiB | `vae/` | 视频 VAE |
+| `minimax_h3_audio_vae_fp32.safetensors` | 0.56 GiB | `vae/` | **音频 VAE，必须 fp32（fp16 会静音）** |
+| `dmad_minimax_h3_8step_full_critic_comfyui.safetensors` | 1.82 GiB | `loras/`（可子目录） | **DMAD 8 步加速（默认 `dmad8`）** |
+| `dmad_minimax_h3_4step_full_critic_comfyui.safetensors` | 1.82 GiB | `loras/` | DMAD 4 步（草稿） |
+| `minimax_h3_latent_upscaler_3d_conv_v1_fp16.safetensors` | 0.64 GiB | `latent_upscale_models/` | **二采放大器（默认预设开二采，缺了必失败）** |
+
+> `fl2va` 那 19.5 GiB 只做 Ref2VA 时可不下。同功能其它量化版（`int8_convrot` / `nvfp4_awq` / `bf16`）都能用 ——
+> `resolveModelNames()` 按「配置 `modelNames` → 精确匹配 → 前缀 + 量化偏好」自动挑，
+> 偏好序 `fp8_scaled > int8_convrot > fp8 > int8 > w4a8 > nvfp4_awq > bf16 > fp16`。
+
+### 4.2 图像模型（三档选一，真实名来自 `IMAGE_MODELS` / `IMAGE_VAE` / `IMAGE_CLIP`）
+
+| 文件 | 大小 | 目录 | 说明 |
+|---|---|---|---|
+| `minimax_h3_image_pruned_w4a8.safetensors` | 12.55 GB | `diffusion_models/` | **12 GB 首选**（`checkImageModels` 优先挑它） |
+| `minimax_h3_image_pruned_int8_convrot.safetensors` | ~21 GB | `diffusion_models/` | 16 GB+ |
+| `minimax_h3_image_pruned_bf16.safetensors` | ~40 GB | `diffusion_models/` | 48 GB+ |
 | `minimax_h3_image_vae_fp16.safetensors` | 1.17 GB | `vae/` | **图像 VAE，与视频 VAE 不同** |
 
-**三档只需选一个**（插件会自动按 w4a8 → int8 → bf16 顺序挑可用的）。
-文本编码器与视频**共用**，不用重复下载。
+自动挑选顺序 **w4a8 → int8_convrot → bf16**；文本编码器与视频共用。
+**最小可用总量**（ref2va + clip + 两 VAE + dmad8 + w4a8 + image vae + upscaler）
+= **65.45 GiB ≈ 70.3 GB（十进制）**；加 fl2va + dmad4 约 **86.8 GiB**。
 
-### 3.3 下载方法（重要：踩坑记录）
-
-**推荐用 curl 直连**；也可以用 `huggingface_hub`（实测 200 MB/s，但需要 newer 版本）：
+### 4.3 下载与校验
 
 ```powershell
-$base = "$ws\ai-runtime\ComfyUI\models"
-
-# 例：视频底模（19.5 GB）
+$base = "$ws\ai-runtime\models"
 curl.exe -L --fail --retry 10 --retry-delay 3 --retry-all-errors -C - `
   -o "$base\diffusion_models\minimax_h3_ref2va_pruned_fp8_scaled.safetensors" `
   "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_ref2va_pruned_fp8_scaled.safetensors"
+
+Get-ChildItem "$ws\ai-runtime\models" -Recurse -Filter *.safetensors |
+  Where-Object { $_.Length -gt 1MB } | Sort-Object Length -Descending |
+  Select-Object @{n='GiB';e={[math]::Round($_.Length/1GB,2)}}, Name
 ```
 
-**镜像与源的选择**（实测数据）：
+- `-C -` 是断点续传，中断后重跑同一条命令即可继续
+- 镜像 `hf-mirror.com` 可用（需 `-L` 跟随 308）；ModelScope 上不一定有这个仓库
+- 校验：`w4a8` 应为 **`12549794530` 字节**；其余对远端 `Content-Length`
 
-| 源 | 速度 | 备注 |
-|---|---|---|
-| `huggingface.co` 直连 | **3-5 MB/s**（curl）/ **200 MB/s**（hf_hub） | 推荐 |
-| `hf-mirror.com` | 3 MB/s | 需 `-L` 跟随 308 重定向 |
-| ModelScope | 404 | 该仓库不一定有 |
-
-`-C -` 是断点续传，中断后重跑同一条命令即可继续。
-
-**校验**：下载完检查字节数是否与远端一致。`w4a8` 应为 `12549794530` 字节。
-
-### 3.4 快速自检脚本
+## 5. Blender 安装（3D 预演，可选）
 
 ```powershell
-$m = "$ws\ai-runtime\ComfyUI\models"
-  $p = Join-Path $m $d
-  if (Test-Path $p) {
-    "--- $d ---"
-    Get-ChildItem $p -Filter '*.safetensors' -ErrorAction SilentlyContinue |
-      Where-Object { $_.Length -gt 1MB } |
-      Select-Object Name, @{n='GB';e={[math]::Round($_.Length/1GB,2)}} | Format-Table -AutoSize
-  }
-}
-```
-
----
-
-## 4. Blender 安装（3D 预演必需）
-
-**Blender 5.2 LTS 便携版**，不改系统环境、不写注册表：
-
-```powershell
-$tools = "$ws\工作室\tools"
-New-Item -ItemType Directory -Force -Path $tools | Out-Null
-cd $tools
-
-# 下载便携版（约 387 MB）
-curl.exe -L --fail --retry 5 --retry-all-errors -C - `
-  -o "blender-5.2.4-windows-x64.zip" `
+$tools = "$ws\tools"; New-Item -ItemType Directory -Force -Path $tools | Out-Null; cd $tools
+curl.exe -L --fail --retry 5 --retry-all-errors -C - -o "blender-5.2.4-windows-x64.zip" `
   "https://download.blender.org/release/Blender5.2/blender-5.2.4-windows-x64.zip"
-
-# 解压
 Expand-Archive -Path "blender-5.2.4-windows-x64.zip" -DestinationPath "." -Force
-
-# 验证
-& "$tools\blender-5.2.4-windows-x64\blender.exe" --version
-# 应输出：Blender 5.2.4 LTS
+& "$tools\blender-5.2.4-windows-x64\blender.exe" --version     # 期望 Blender 5.2.4 LTS
 ```
 
-**插件会自动在 `<插件>/../../tools/blender-<版本>/` 找它**，无需配置。
-放在别处则设环境变量：
+放 `<插件>/../../tools/blender-<版本>/` 即自动识别，否则设 `DSH_BLENDER`。
+
+**只有两种渲染模式**（`host/blender/render_shot.py`）：
+
+| mode | 用途 |
+|---|---|
+| `blockout` | **唯一喂模型的出口** → 镜头「参考视频」→ Ref2VA 的 `<Video N>` |
+| `preview` | 彩色灰模动画，**人眼预览，不参与生成** |
+
+> v4 已删除 `depth` / `pose` / `canny` / `gray` 四条「控制塔」通道 ——
+> 别按旧文档找它们（要多下 4.22 GB 模型、单镜 +83% 耗时）。
+
+验证：`/jiuzhang/api/blender/health` 期望
+`{"ok":true,"available":true,"exe":"…","modes":["preview","blockout"],"referenceModes":["blockout"]}`。
+
+许可证：Blender 本体 GPL-2.0-or-later，以 `blender -b --factory-startup --python` 子进程调用，不作库链接；
+`host/blender/*.py` 自身按 GPL-3.0-or-later 释放；插件 JS 侧与产物（.blend / png / mp4）不受传染。
+
+## 6. 插件安装与配置默认值
 
 ```powershell
-$env:DSH_BLENDER = 'D:\your\path\blender.exe'
+# 开发态：%USERPROFILE%\.dsh\profiles\<profile>\package.json 里
+#   "@local/dsh-jiuzhang-studio": "link:<插件绝对路径>"
+# 或用 plugin_manager 工具：action="install_bundle", target="<插件绝对路径>"
 ```
 
-### 4.1 验证 Blender 可用
+挂载后**重启 DSH**。`cordis.patch.yml` 插入 id `jiuzhang-studio`，注册三个前缀：
+`/jiuzhang/api`（REST + SSE）、`/jiuzhang/app`（SPA）、`/jiuzhang/assets`（素材）。
 
-```powershell
-# 插件健康检查（应有 available: true）
-curl.exe -s "http://127.0.0.1:$port/jiuzhang/api/blender/health"
-```
+`host/config.js` 的 DEFAULTS（**改这些才是改默认行为**）：
 
-或在 SPA 的「3D 预演」页看状态徽章。
-
-### 4.2 为什么不做内嵌 WASM Blender
-
-浏览器里跑 WASM Blender 需要 **COOP/COEP 跨源隔离头**（会影响整个 SPA 的跨源资源），
-12 GB 笔记本上的编辑流畅度未验证，包体 66.7 MB，且与「打开桌面 Blender」功能重叠。
-当前方案：**页面渲预览让人看，桌面 Blender 负责改**。
-
-### 4.3 许可证边界（重要）
-
-| 内容 | 许可 | 说明 |
+| 键 | 默认 | 说明 |
 |---|---|---|
-| Blender 本体 | GPL-2.0-or-later | **以子进程方式调用**（`blender -b --python`），不作为库链接 |
-| `host/blender/*.py` | **GPL-3.0-or-later** | 它们 `import bpy`，属于 Blender 衍生脚本 |
-| 插件本体（JS 侧） | 保持现有许可 | 与 Blender 只通过命令行/文件通信 |
-| 产出的 .blend / 渲染图 / mp4 | **完全归用户** | GPL 不传染产出物 |
+| `comfyUrl` | `http://127.0.0.1:8488` | **只是兜底**，端口文件优先（§2.2） |
+| `comfyTimeoutMin` | `120` | 单任务上限（分钟）；`JZ_COMFY_TIMEOUT_MIN` 优先 |
+| `defaultBackend` | `h3-nanfeng` | 可选 `h3-nanfeng` / `h3-local` / `h3-image` / `mock` |
+| `defaultProfile` | `P12-draft` | 0.4 MP = 864×480 / 4 步 |
+| `accelPlan` | `dmad8` | `dmad8` / `dmad4` / `none`（原模型 50 步，可调 20–80） |
+| `maxConcurrentLocal` | `1` | 12 GB 卡不能并行 |
+| `imageSteps` | `6` | 蒸馏 checkpoint 决定；夹在 4–12，**仅排障，局部重绘忽略它** |
+| `imageMaxMP` | `4.3` | 单张出图面积上限（2048² = 4.19 MP） |
+| `imageSizeId` | `auto` | `auto` = 2048×2048（有参考图则继承原图） |
+| `theme` / `accent` / `locale` | `inknight` / `cinnabar` / `zh` | UI |
+| `modelNames` | `{}` | 空 = 自动从 ComfyUI 列表挑 |
 
-> ⚠️ 若改成 addon 形态（常驻 `import bpy` 的扩展），必须把整个插件改为 GPL 兼容。
-> `tests/verify-all.mjs` 有一条断言专门锁住"必须是 `-b --python` 子进程"。
+> 「默认档位」有两个正交概念：`cfg.defaultProfile = 'P12-draft'`（分辨率/步数档）
+> 与南风参数预设 `DEFAULT_PRESET = 'standard'`（含二采）。
 
----
-
-## 5. 插件安装
-
-插件以 **bundle** 形式挂在 DSH 上：
-
-```powershell
-# 方式一：本地路径（开发态）—— 用 plugin_manager 工具
-# plugin_manager(action="install_bundle", target="<插件绝对路径>")
-
-# 方式二：如果已发布到 npm
-# plugin_manager(action="install_bundle", target="<包名>")
-```
-
-**代码**即启用，之后验证：
+## 7. 人工验收（v4 无测试脚本，按序走）
 
 ```powershell
-$port = 10038   # 换成实际端口
-curl.exe -s "http://127.0.0.1:$port/jiuzhang/api/health"
-curl.exe -s "http://127.0.0.1:$port/jiuzhang/api/meta"
-curl.exe -s "http://127.0.0.1:$port/jiuzhang/api/blender/health"
+$dsh = 8375                                              # 换成实际 DSH Web 端口
+$port = (Get-Content "$ws\ai-runtime\.comfy-port" -Raw).Trim()
 ```
 
-打开 `http://127.0.0.1:<端口>/jiuzhang/app/` 即可看到界面。
+**① 插件健康** `/jiuzhang/api/health` — `ok:true`、`h3.ok:true`（连上 ComfyUI）、
+`workflows.ok:true`（两个模板都在）、`blender.available:true`（若装了 Blender）、`accel.current:"dmad8"`。
 
----
+**② 图像模型就绪** `/jiuzhang/api/image/meta` — `status.ready == true`、`status.unet` 是真实挑中的
+文件名、`status.missing == []`、`effective.maxMP == 4.3`、`effective.steps == 6`、
+`effective.samplingLocked == true`。
 
-## 6. 验收清单
+**③ 局部重绘节点就绪** `/jiuzhang/api/image/inpaint/meta` — `cropAvailable:true`、
+`denoiseLocked:true`、`stepsLocked:true`、`steps:6`，且**没有** `vendorHint` 字段。
 
-按顺序跑，全绿才算部署成功：
+**④ 跑一次出图**
 
 ```powershell
-cd <插件目录>
-
-# 1) 全量验收（351 项）
-node tests/verify-all.mjs
-# 期望 TOTAL PASS=351 FAIL=0
-
-# 2) 装机后检查（需要 DSH 在跑）
-node tests/postinstall-check.mjs http://127.0.0.1:<端口>
-# 期望 PASS=11 FAIL=0
-
-# 3) SPA 单测
-cd app-src && node --import ./tests/register.mjs tests/runAll.mjs
-# 期望 pass 179 fail 0
-
-# 4) 模型就绪
-curl.exe -s "http://127.0.0.1:<端口>/jiuzhang/api/image/meta"
-# 期望：{"status":{"ready":true, ...}}
-
-curl.exe -s "http://127.0.0.1:8488/object_info/ModelPatchLoader"
-
-# 6) Blender 就绪
-curl.exe -s "http://127.0.0.1:<端口>/jiuzhang/api/blender/health"
-# 期望：{"ok":true,"available":true,"exe":"...","modes":[...]}
+curl.exe -s -X POST "http://127.0.0.1:$dsh/jiuzhang/api/image/generate" `
+  -H "Content-Type: application/json" `
+  -d '{"prompt":"a quiet seaside street at dusk, 2D anime style","sizeId":"sq-2048","count":1}'
 ```
 
-**视觉验证**（重要，别只看接口）：
+拿返回的 job id 轮询，确认产物落 `data/outputs/` 且能打开。12 GB 卡 2048² 单张约 45–90 秒（首次含加载更久）。
 
-- 「图像」页输一句提示词 → 应在 1-2 分钟出 2048² 图
-- 「画布」建一个 AI 视频节点 → 应出 5 秒带音轨视频
-- **「3D 预演」页点「渲染预览」→ 应在 5 秒内出彩色灰模动画**
-- 「3D 预演」页点「渲染」depth → 应有灰度深度序列
+**⑤ 跑一次局部重绘**（必须 `inpaintMode: "crop"`）
 
----
+```powershell
+curl.exe -s -X POST "http://127.0.0.1:$dsh/jiuzhang/api/image/inpaint" `
+  -H "Content-Type: application/json" `
+  -d '{"prompt":"a red paper lantern","sourceImage":"outputs/<上一步的图>","maskImage":"tmp-inline/<mask>.png","inpaintMode":"crop","inpaintStrength":"medium","cropResolutionId":"auto"}'
+```
 
-## 7. 常见问题
+- mask 必须**与源图同尺寸**，否则 400 `MASK_SIZE_MISMATCH`
+- 预期：bbox 外**逐像素不动**（差异 0.0000）；bbox 内、笔画外轻微改写（≈0.005，羽化尾部，**属正常**）
+- 单次约 57–76 秒（2048² / 6 步）
+
+**⑥ 视频链路（可选但建议）** 镜头挂 1 张参考图 → 画布建 AI 视频节点 → 出 5 秒片。
+用 `ffprobe` 确认同时有 video 与 audio 两条流（只有视频流 = 音轨丢了，见 §9.1）。
+
+**⑦ 视觉检查（别只看接口）** 「图像」页输一句提示词 → 1–2 分钟出 2048² 图；
+「3D 预演」页「渲染预览」（preview）出彩色灰模动画、「渲染灰模」（blockout）把产物挂回镜头参考视频槽。
+
+## 8. 常见问题
 
 | 症状 | 原因 | 处理 |
 |---|---|---|
-| `IMAGE_MODEL_MISSING` 但文件确实在 | 模型目录不在探测路径内 | 设 `H3_MODEL_ROOT`，或填 `imageModelRoot`；见 §1.1 |
-| **ComfyUI 模型下拉框为空** | 模型放到了 `ai-runtime\models` 而非 `ComfyUI\models` | 移动文件，或配 `extra_model_paths.yaml` |
-| 生成报 `COMFY_HTTP_500` | 工作流 JSON 里混入非数字 key | 插件已自动剔除；自建工作流注意 |
-| 生成报 `Value not in list`（模型名） | 装的是 int8 版但代码写死 fp8 名 | 插件会自动降级；也可在配置里覆盖 `modelNames` |
-| 图像节点 404 | ComfyUI 版本 < 0.45 | 升级 ComfyUI |
-| 显存 OOM | 用了 int8/bf16 或没加 `--lowvram` | 换 w4a8 + `--lowvram` |
+| `IMAGE_MODEL_MISSING` 但文件确实在 | 模型目录不在探测路径内 | 设 `H3_MODEL_ROOT` 或填 `imageModelRoot`（§1.1） |
+| **ComfyUI 模型下拉框为空** | 模型在 `ai-runtime\models`，ComfyUI 读 `ComfyUI\models` | 建目录联接或配 `extra_model_paths.yaml`（§1.1 A） |
+| `INPAINT_NODES_MISSING` | 没部署 `vendor/inpaint-nodes`（或没重启） | 跑 §3.2 脚本后重启 ComfyUI |
+| `prompt_no_outputs` | 南风输出没接 `VHS_VideoCombine` | 装 `ComfyUI-VideoHelperSuite` |
+| `MiniMaxH3MotionContextLoadLatent not found` | 续写依赖缺失 | 装 `ComfyUI-H3-Motion-Context` |
+| `WinError 10013` | 端口被 Hyper-V 动态保留 | 用 `start-h3.ps1` 自己挑；不要手写端口 |
+| 启动即退出、报编码错 | 用了 Windows PowerShell 5.1 | 装 PowerShell 7（`pwsh`） |
+| 日志 `LOW_VRAM` 却更慢 | 手加了 `--lowvram` | 删掉（DynamicVRAM 下是空操作） |
+| 显存 OOM | 用了 int8/bf16 或调大了 `imageMaxMP` | 换 w4a8；`imageMaxMP` 保持 4.3 |
 | 视频静音 | 音频 VAE 用了 fp16 | 必须 `minimax_h3_audio_vae_fp32` |
-| 中文标注显示方块 | ffmpeg drawtext 没指定字体 | 插件会自动探测 `msyh.ttc`；手动调用时传 `fontFile` |
-| 页面报 `BAD_RESPONSE` | 浏览器缓存了旧端口页面 | `Ctrl+Shift+R` 硬刷新 |
-| 下载卡 0 字节 | `hf_hub_download` 与镜像不兼容 | 改用 curl 直连 |
-| **3D 预演显示"未安装"** | Blender 不在探测路径 | 放到 `<插件>/../../tools/blender-<版本>/`，或设 `DSH_BLENDER` |
-| **AddGuide 报 `image, received_type(CONDITIONING)`** | 节点编号冲突（已在 1.4.0 修复） | 升级插件 |
-| **canny 产物和 gray 一样** | 边缘检测缺失（已在 1.4.0 修复） | 升级插件 |
+| `Value not in list`（模型名） | 装的是别的量化版 | 会自动降级；也可用 `modelNames` 覆盖 |
+| 图像节点 404 / 挂 LoRA 慢 29% 且发糊 | ComfyUI < 0.45.0（缺 `LoraLoaderBypassModelOnly`） | 升到 0.45.0 |
+| 中文标注显示方块 | ffmpeg drawtext 无中文字体 | 插件自动探测 `msyh.ttc`；手动调用传 `fontFile` |
+| **3D 预演「未安装」** | Blender 不在探测路径 | 放 `tools/blender-<版本>/` 或设 `DSH_BLENDER` |
+| 找不到 depth / pose / canny | 该功能已在 v4 删除 | 只用 `blockout` / `preview` |
 
----
-
-## 8. 硬件与性能基线（实测数据）
-
-测试机：**RTX 4080 Laptop 12 GB / 24 核 / 64 GB RAM**
-
-| 任务 | 分辨率 | 耗时 | 显存峰值 |
-|---|---|---|---|
-| H3 视频（5 秒，Ref2VA） | 864×480 | **130 秒** | 11.5 GB |
-| H3 视频（5 秒，Ref2VA） | 864×480 | **217–259 秒** | 11.5 GB |
-| H3 视频（3 秒，\+ 角色卡 \+ 首帧） | 864×480 | **240–300 秒** | 同上 |
-| H3-Image 文生图 | 2048×2048 | 45-85 秒 | 11.4 GB |
-| 立绘拆解图 | 2048×2048 | 80-90 秒 | 11.4 GB |
-| 漫画单格 | 2048×2048 | 75 秒 | 11.4 GB |
-| **Blender 渲 depth（124 帧）** | 864×480 | **20.7 秒** | 无（CPU/GPU 都很轻） |
-| **Blender 渲 pose（124 帧）** | 864×480 | **20.8 秒** | 同上 |
-| **Blender 渲 preview（72 帧）** | 864×480 | **4 秒** | 同上 |
-
-**结论**：Blender 渲染的耗时只占 H3 生成的 **< 10%**，不构成瓶颈。
-
-**注意**：
-
-- 首次加载模型很慢（1024² 那次 9 分钟基本都在加载）
-- 模型常驻后单张约 45-90 秒
-- 12 GB 显存**不能并行**，插件内部串行执行
-
----
-
-## 9. 硬约束（改代码时必须遵守）
-
-这些是从实际报错反推出来的，违反会直接失败：
+## 9. 硬约束（改代码/改参数必须遵守）
 
 | 约束 | 值 | 违反后果 |
 |---|---|---|
-| H3 视频分辨率 | 必须是 32 的倍数，且在官方档位（864×480 / 960×544 / 1056×608 / 1344×768） | RuntimeError |
-| H3 视频帧数 | 必须在 17k+5 网格（124 / 243 / 362） | 报错或时长错误 |
-| H3 视频时长 | 训练范围 **124–362 帧（≈5–15 秒）**，更长未经训练 | 质量崩坏 |
-| H3 guidance | 必须 1.0（CFG 蒸馏模型） | 画面崩坏 |
-| 视频采样步数 | DMAD 学生只能 4 或 8 步 | 质量崩 |
-| 音频 VAE | 必须 fp32 | 静音 |
-| H3-Image 步数 | 固定 6（checkpoint 蒸馏） | 无此参数 |
-| H3-Image guidance | 固定 1.0 | 同上 |
-| H3-Image 负面提示 | **不支持** | 写了也没用，改成正向描述 |
-| H3-Image 尺寸 | 32 的倍数；0 = 自动 2048² | 报错 |
-| 参考图上限 | Ref2VA 9 张；H3-Image 16 张 | 报错 |
-| 参考视频/音频 | 各 3 段，每段 2-15 秒 | 报错 |
-| 参考视频+音频合计 | **≤ 14.8 秒**（超出自动裁剪） | 自动裁剪并告警 |
-| 参考文件总数 | ≤ 12 | 报错 |
-| **音轨必须接线** | `SamplerCustomAdvanced → VAEDecodeAudio(audio_vae) → CreateVideo.audio` | **产物静音**（不报错，静默丢失） |
+| 视频帧数 | `17k+5` 网格，夹到 **[124, 362]** | 退化成噪声或时长错误 |
+| 视频时长 | 5–15 s（≈5.17–15.08 s），> 14 s 只告警 | 超出即截断 |
+| 视频分辨率 | 宽高 **32 倍数**；面积 0.2–0.98 MP | RuntimeError |
+| CFG | **1.0**，采样器无 negative 分支 | 写负面提示词会反噬 |
+| 视频步数 | DMAD 学生**只能 4 或 8**（`strictSteps`） | 分布外采样 |
+| 音频 VAE | **必须 fp32** | 静音（不报错） |
+| H3-Image 步数 | 训练态 **6**；配置 4–12 仅排障，**局部重绘恒用 6** | 出图塌陷 / 重绘抹平 |
+| H3-Image 尺寸 | 32 倍数，边长 ≥ 256；`imageMaxMP` 4.3 | 报错 / OOM |
+| 图像参考图 | ≤ **16**（第 1 张 = 被编辑原图） | `IMAGE_TOO_MANY_REFS` |
+| 图像/重绘提示词 | ≤ **4096 字符**，超长 400（**不静默截断**） | 报错 |
+| 视频参考图 | ≤ **9**（首尾帧占槽，见 prompt skill §5.1） | 超出被丢 + warning |
+| 参考视频/音频 | 各 ≤ 3 段，每段 2–15 s；**合计 ≤ 14.8 s**（超出按「视频优先」自动裁 + warning） | 静默截断 |
+| 参考文件总数 | ≤ 12 | warning |
+| 重绘 mask / full 模式 | mask 与源图同尺寸；full 源图必须 32 对齐 | 400 `MASK_SIZE_MISMATCH` / `SOURCE_NOT_ALIGNED` |
+| 重绘 denoise | 恒 **1.0**，强弱用 `strength`（切点 0/1/2/3） | 改 denoise 会把选区抹平 |
+| **音轨必须接线** | `SamplerCustomAdvanced → VAEDecodeAudio(audio_vae) → CreateVideo.audio` | 产物静音（静默丢失） |
 | **AUTOGROW 用点号路径** | `ref_images.ref_image_1` / `ref_videos.ref_video_1` | 被 ComfyUI **静默忽略** |
 | **Ref2VA 没有 first_frame 口** | 首尾帧必须走 `MiniMaxH3AddGuide` | 静默丢弃 |
-| **AddGuide 节点编号** | 从 80 起（70/71 是 LoadImage 槽位） | 覆盖 LoadImage → `received_type(CONDITIONING)` |
-| **坐标系** | 镜头卡用 (x, y=高度, z=深度)；Blender 是 Z-up | 人偶躺平 / 整张图全黑 |
+| **镜头卡坐标系** | (x, y=高度, z=深度)；Blender 是 Z-up | 人偶躺平 / 整图全黑 |
 
 ### 9.1 音轨丢失（最隐蔽的坑）
 
-H3 是**音画同步模型**：采样器输出的 LATENT 是 AV latent（音视频合一），
-只接视频 `VAEDecode` 会**把音轨整个丢掉**，而且**不报错**。
-
-工作流必须这样接：
+H3 是**音画同步模型**：采样器的 LATENT 是 AV latent，只接视频 `VAEDecode` 会把音轨整个丢掉，**且不报错**。
 
 ```json
-"15": { "class_type": "VAELoader",       "inputs": { "vae_name": "minimax_h3_audio_vae_fp32.safetensors" } },
-"16": { "class_type": "VAEDecodeAudio",  "inputs": { "samples": ["11",0], "vae": ["15",0] } },
-"13": { "class_type": "CreateVideo",     "inputs": { "images": ["12",0], "audio": ["16",0], "fps": 24 } },
-"9":  { "inputs": { "audio_vae": ["15",0], ... } }
+"15": { "class_type": "VAELoader",      "inputs": { "vae_name": "minimax_h3_audio_vae_fp32.safetensors" } },
+"16": { "class_type": "VAEDecodeAudio", "inputs": { "samples": ["11",0], "vae": ["15",0] } },
+"13": { "class_type": "CreateVideo",    "inputs": { "images": ["12",0], "audio": ["16",0], "fps": 24 } }
 ```
 
-验收方法（不要只看文件存在）：
+验收（不要只看文件存在）：
 
 ```powershell
-ffprobe -v error -print_format json -show_streams out.mp4
-# 必须同时有 video 和 audio 两条流
-ffmpeg -i out.mp4 -af volumedetect -f null -
-# mean_volume 不能是 -inf（-inf = 纯静音）
+ffprobe -v error -print_format json -show_streams out.mp4     # 必须有 video + audio 两条流
+ffmpeg -i out.mp4 -af volumedetect -f null -                  # mean_volume 不能是 -inf
 ```
 
-### 9.2 AUTOGROW 输入的写法
+### 9.2 参考视频要拆成帧序列
 
-`ref_images` / `ref_videos` / `ref_video_audios` / `ref_audios` 都是 **Autogrow** 输入，
-必须写成**带点号的平铺键**：
-
-```
-✅ "ref_images.ref_image_1": ["20", 0]
-❌ "ref_images": [["20", 0]]        ← 会被静默忽略，参考图完全不生效
-```
-
-判断是否真的生效：同一 prompt+seed，有无参考图若输出哈希完全相同，说明没接上。
-
-### 9.3 参考视频要拆成帧序列
-
-`ref_videos` 要的是 **IMAGE（帧序列）**，不是 VIDEO。必须转：
+`ref_videos` 要的是 **IMAGE（帧序列）**，不是 VIDEO：
 
 ```
 LoadVideo(file) → GetVideoComponents ─┬─ 0=IMAGE → ref_videos.ref_video_K
                                        └─ 1=AUDIO → ref_video_audios.ref_video_audio_K
 ```
 
-视频与其音轨**必须同号**（源码按编号配对，不按数组顺序）。
+视频与其音轨**必须同号**（按编号配对，不按数组顺序）。没有音轨的视频**不要**接 `ref_video_audios`。
 
-### 9.4 分段串联：为什么必须 Ref2VA + AddGuide
+### 9.3 两套编号不要混
 
-| 方案 | 能否用 | 原因 |
-|---|---|---|
-| I2VA / FL2VA | ❌ | **没有 `ref_images` 输入口**，用了就没法挂角色卡，两张脸会飘 |
-| Ref2VA | ✅ 基础 | 支持参考图 + 参考视频 |
-| **Ref2VA + `MiniMaxH3AddGuide`** | ✅ **推荐** | 参考图锁身份，AddGuide 在 `frame_idx=0` 锚首帧，两者共存 |
+- `<Picture N>` / `图片1..9` 的**唯一权威**是 `ref-images.js` 的 `planImageSlots`
+  （首尾帧占槽；`images` 是**按槽位定位的稀疏数组**，`pictureIndexMap` 是下标 → 槽位号）
+- `<Video K>` / `<Audio J>` 的权威是 `render-plan.js`（视频自带音轨**先占** `<Audio>` 号）
 
-```json
-"80": { "class_type": "MiniMaxH3AddGuide",
-        "inputs": { "positive": ["9",0], "latent": ["9",1], "vae": ["3",0],
-                    "frame_idx": 0, "image": ["70",0] } },
-"70": { "class_type": "LoadImage", "inputs": { "image": "上一段的末帧.png" } }
-```
+任何一处自己重写排序或编号，就会出现「预览是角色卡、实际提交是道具」这类无声错位。
 
-**⚠️ AddGuide 节点编号必须 ≥ 80**：70/71 已被 LoadImage 占用，
-若 AddGuide 也从 70 开始编号会**覆盖掉 LoadImage**，ComfyUI 报
-`image, received_type(CONDITIONING)`（把 conditioning 当图用了）。
+### 9.4 分段串联：必须 Ref2VA + AddGuide
 
-**⚠️ 首尾帧必须是成片风格的图**：AddGuide 锚定强度非常高，
-锚白模首帧会让整段输出都是白模。
+I2VA / FL2VA **没有 `ref_images` 输入口**，用了就没法挂角色卡 → 两张脸会飘。
+Ref2VA 是基础（支持参考图 + 参考视频）；**Ref2VA + `MiniMaxH3AddGuide`** 是推荐（参考图锁身份，
+AddGuide 在 `frame_idx=0` 锚首帧，两者共存）。节点 ID 由 `h3-graph.js` 的 `NodeGraph`
+**统一分配 + `pruneUnreachable()` 兜底**（`GUIDE_IMG=70..79` / `GUIDE=80..99` 只是可读性分段），
+不要再手写「AddGuide 必须 ≥80」式的约定 —— 那个约定已因编号冲突出过两次事故。
 
----
+## 10. 许可证
 
-## 10. 许可证提醒
+**H3-Image 的许可与 H3 视频不同**：年收入 ≤ 100 万美元且不对外提供托管服务可直接使用，
+否则需向 MiniMax 单独申请（https://platform.minimax.io/license）。个人与内部团队使用不受限制。
 
-**H3-Image 的许可与 H3 视频不同。**
-
-- 年收入 ≤ 100 万美元 且 不对外提供托管服务 → 可直接使用
-- 超出上述任一条件 → 需向 MiniMax 单独申请授权（https://platform.minimax.io/license）
-
-**Blender** 是 GPL-2.0-or-later，以子进程调用不传染插件本体；但 `host/blender/*.py`
-按 GPL-3.0-or-later 释放（见 §4.3）。产出的 .blend / 渲染图 / mp4 完全归用户。
-
-个人与内部团队使用不受限制。
-
+Blender 见 §5。`vendor/nanfeng` 与 `vendor/inpaint-nodes` 各自保留原 LICENSE
+（inpaint 源自 KJNodes，GPL-3.0）。它们是**独立进程加载的独立节点包**，与插件 ESM 代码之间只有 HTTP。

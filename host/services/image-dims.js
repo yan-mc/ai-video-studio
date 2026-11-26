@@ -15,6 +15,7 @@
  * @module services/image-dims
  */
 import fs from 'node:fs';
+import zlib from 'node:zlib';
 
 /** 采样画布对齐基数（latent 16 倍下采样 × patch(1,2,2) 的 2 倍） */
 export const CANVAS_ALIGN = 32;
@@ -159,4 +160,132 @@ export async function probeImageDims(absPath) {
 export function maskMismatchMessage(src, mask) {
   return `mask ${mask.w}×${mask.h} 与源图 ${src.w}×${src.h} 不一致。`
     + '尺寸不同会让重绘区域整体偏移（ComfyUI 会静默拉伸 mask，不报错）。';
+}
+
+/* ============================================================================
+ * 从 mask 文件里**真正量出**笔画外接框
+ * ============================================================================
+ *
+ * 为什么必须真解一次像素：`resolveStrokePixels` 在调用方没给 bbox 时只能用
+ * "mask 面积 × 0.35"估算，而那个估算与真实选区无关 —— 任何 1024² mask 都
+ * 得到同一个 774×774。后果直接反映在画质上：
+ *
+ *   真实 bbox 33×33（涂一个小点）→ 估算 774×774 → auto 给 1024² 画布
+ *   → 那一小块只占 33/774 ≈ 4% 的采样像素 → 模型几乎没有预算去画它
+ *   → 出图表现为"几乎没变"。
+ *
+ * 实测：同一张 mask、同一个提示词，用估算 bbox 出图几乎不可见；
+ * 传入真实 bbox 后选区被放大到足够像素，细节清晰。
+ *
+ * 实现只用 Node 内置 zlib 解 PNG，不引入图像库（插件不依赖 sharp/canvas）。
+ * 非 PNG 或解不出来返回 null，调用方继续走估算兜底。
+ */
+
+/**
+ * 读 PNG 的像素数据并求非零区域的外接框。
+ *
+ * 只支持 8-bit 灰度 / RGB / RGBA / 灰度+alpha 的非隔行 PNG —— 这正是
+ * MaskEditor 导出的格式（黑底白区 RGBA）。其它格式返回 null。
+ *
+ * @param {string} absPath
+ * @returns {Promise<{w:number,h:number,strokePixels:number}|null>}
+ */
+export async function probeMaskBbox(absPath) {
+  let buf;
+  try {
+    buf = await fs.promises.readFile(absPath);
+  } catch {
+    return null;
+  }
+
+  const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (buf.length < 33 || PNG_SIG.some((b, i) => buf[i] !== b)) return null;
+
+  // ---- 解析 IHDR
+  const width = buf.readUInt32BE(16);
+  const height = buf.readUInt32BE(20);
+  const bitDepth = buf[24];
+  const colorType = buf[25];
+  const interlace = buf[28];
+  if (bitDepth !== 8 || interlace !== 0) return null;
+
+  /** colorType → 每像素通道数 */
+  const CHANNELS = { 0: 1, 2: 3, 4: 2, 6: 4 };
+  const channels = CHANNELS[colorType];
+  if (!channels) return null;
+
+  // ---- 收集 IDAT
+  const idat = [];
+  let off = 8;
+  while (off + 8 <= buf.length) {
+    const len = buf.readUInt32BE(off);
+    const type = buf.toString('ascii', off + 4, off + 8);
+    const dataStart = off + 8;
+    if (type === 'IDAT') idat.push(buf.subarray(dataStart, dataStart + len));
+    if (type === 'IEND') break;
+    off = dataStart + len + 4;
+  }
+  if (!idat.length) return null;
+
+  let raw;
+  try {
+    raw = zlib.inflateSync(Buffer.concat(idat));
+  } catch {
+    return null;
+  }
+
+  // ---- 反过滤（PNG 的 5 种行过滤器）
+  const bpp = channels;                 // bitDepth=8 → 每像素字节数 = 通道数
+  const stride = width * bpp;
+  if (raw.length < height * (stride + 1)) return null;
+
+  const cur = Buffer.alloc(stride);
+  const prev = Buffer.alloc(stride);
+  let minX = Infinity; let minY = Infinity; let maxX = -1; let maxY = -1;
+  let strokePixels = 0;
+  let p = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[p]; p += 1;
+    raw.copy(cur, 0, p, p + stride); p += stride;
+
+    for (let i = 0; i < stride; i += 1) {
+      const a = i >= bpp ? cur[i - bpp] : 0;   // 左
+      const b = prev[i];                       // 上
+      const c = i >= bpp ? prev[i - bpp] : 0;  // 左上
+      let v = cur[i];
+      if (filter === 1) v += a;
+      else if (filter === 2) v += b;
+      else if (filter === 3) v += (a + b) >> 1;
+      else if (filter === 4) {
+        const pp = a + b - c;
+        const pa = Math.abs(pp - a); const pb = Math.abs(pp - b); const pc = Math.abs(pp - c);
+        v += (pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c);
+      }
+      cur[i] = v & 0xff;
+    }
+
+    // 亮度取最大值通道；MaskEditor 导出的是 R=G=B 的黑白图
+    for (let x = 0; x < width; x += 1) {
+      const o = x * bpp;
+      const lum = channels >= 3 ? Math.max(cur[o], cur[o + 1], cur[o + 2]) : cur[o];
+      if (lum > 127) {
+        strokePixels += 1;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+
+    cur.copy(prev);
+  }
+
+  if (strokePixels === 0) return null;
+
+  return {
+    w: maxX - minX + 1,
+    h: maxY - minY + 1,
+    strokePixels,
+  };
 }

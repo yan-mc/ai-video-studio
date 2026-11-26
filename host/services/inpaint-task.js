@@ -13,7 +13,7 @@
 import { loadConfig } from '../config.js';
 import { newJob } from './job-store.js';
 import { resolveImageEditRefs } from './ref-images.js';
-import { resolveInpaintSizes, maskMismatchMessage, normalizeCanvasSize } from './image-dims.js';
+import { resolveInpaintSizes, maskMismatchMessage, normalizeCanvasSize, probeMaskBbox } from './image-dims.js';
 import {
   INPAINT_DENOISE, validateInpaintRequest, resolveCropResolution, resolveStrokePixels,
   guardFullCanvas,
@@ -102,13 +102,43 @@ export async function prepareInpaint(body = {}, cfg = loadConfig(), opts = {}) {
   const canvas = guardFullCanvas(req, dims?.src ?? null);
 
   // ---- 5) crop 模式的最终分辨率（auto 档按 bbox 长边算）
+  //
+  // ⚠️ bbox 的优先级：调用方显式给 > 从 mask 文件真实量出 > 按面积估算。
+  //
+  // "真实量出"这一步不能省。没有它时，任何 1024² mask 都估成同一个 774×774，
+  // 于是涂一个小点时 auto 仍给 1024² 画布，选区只占 4% 采样像素，
+  // 出图表现为"几乎没变"。Agent 与外部调用都不传 bbox，只能靠这一步。
   const stroke = resolveStrokePixels(body, dims?.mask ?? null);
+  let bboxW = stroke.bboxW;
+  let bboxH = stroke.bboxH;
+  let bboxSource = stroke.bboxW != null ? 'caller' : null;
+
+  if (bboxW == null) {
+    const measured = await probeMaskBbox(maskAbs).catch(() => null);
+    if (measured) {
+      bboxW = measured.w;
+      bboxH = measured.h;
+      bboxSource = 'mask';
+      // 真实像素数比估算准，顺带覆盖掉兜底值
+      stroke.strokePixels = measured.strokePixels;
+    } else {
+      bboxSource = 'estimated';
+      req.warnings = Array.isArray(req.warnings) ? req.warnings : [];
+      req.warnings.push(
+        '无法从 mask 文件直接量出选区外接框（仅支持 8-bit 非隔行 PNG），'
+        + '已按面积估算。若涂的是小选区，auto 分辨率会偏大、细节被稀释 —— '
+        + '建议改用 PNG mask，或显式传 bboxW/bboxH。',
+      );
+    }
+  }
+
   resolveCropResolution(req, {
-    bboxW: stroke.bboxW,
-    bboxH: stroke.bboxH,
+    bboxW,
+    bboxH,
     strokePixels: stroke.strokePixels,
     maskDims: dims?.mask ?? null,
   }, cfg);
+  req.crop.bboxSource = bboxSource;
 
   // ---- 6) 面积上限（auto 档解析后仍可能超限）
   if (req.mode === 'crop') {

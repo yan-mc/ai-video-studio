@@ -65,6 +65,76 @@ export function blurForResolution(baseResolution) {
   return { radius, sigma };
 }
 
+/**
+ * 笔画平均宽度（采样画布上的像素）。用于给羽化带上限。
+ *
+ * 羽化是**像素空间固定半径**，它不区分"一米宽的大色块"和"两像素的发丝"。
+ * 对细笔画，半径 28 的高斯会把整条线糊成一片半透明渐变 —— 实测一条
+ * 613×213、14869 px 的笔画，羽化后膨胀到 131051 px、平均强度只剩 0.37。
+ * 模型的 noise mask 因此几乎是"半透明"的，重绘效果趋近于零
+ * （实测选区内外差值只有 2/255）。
+ *
+ * @param {{strokePixels:number, bbox:{w:number,h:number}}|null} info
+ * @param {{w:number,h:number}|null} canvas 采样画布尺寸
+ * @returns {number|null} 平均宽度（像素），信息不足返回 null
+ */
+export function estimateStrokeWidth(info, canvas) {
+  const px = Number(info?.strokePixels) || 0;
+  if (px <= 0) return null;
+  const bw = Number(info?.bbox?.w) || 0;
+  const bh = Number(info?.bbox?.h) || 0;
+  if (bw <= 0 || bh <= 0) return null;
+
+  // 笔画在裁剪块里的平均线宽 ≈ 面积 / (bbox 半周长估算的骨架长度)
+  // 用 bbox 对角线近似骨架长度，对 L 形 / 折线足够稳；方块选区会得到
+  // 接近短边的值（合理：方块没有"细线"问题，羽化本就该大一些）。
+  const skeleton = Math.max(1, Math.hypot(bw, bh));
+  const widthInCrop = px / skeleton;
+
+  // 换算到采样画布坐标（裁剪块被整块缩放到 canvas 长边）
+  const cw = Number(canvas?.w) || bw;
+  const ch = Number(canvas?.h) || bh;
+  const scale = Math.min(cw / bw, ch / bh);
+  return Math.max(1, widthInCrop * scale);
+}
+
+/**
+ * 计算**最终生效**的羽化参数：在 `blurForResolution` 的基础上，
+ * 再按笔画宽度封顶，保证羽化带不超过笔画宽度的一半。
+ *
+ * 为什么是"一半"：GrowMask 已经把选区外扩 16px，羽化只负责最后一道软过渡。
+ * 若羽化半径 ≥ 笔画宽度，线条中心也到不了满强度，等于把整个选区降成半透明。
+ * 取一半能保留清晰的芯 + 一圈软化边。
+ *
+ * 实测（613×213 折线笔画，14869 px，采样画布 928×352）：
+ *   radius=28 → noise mask 峰值 0.937、平均 0.372、核心(>0.9)仅 544 px
+ *   radius=17 → 峰值 0.996、平均 0.492、核心(>0.9) 20257 px
+ * 核心像素多 37 倍，出图才真正"改得动"。
+ *
+ * @param {number} baseResolution 采样分辨率
+ * @param {{strokePixels:number, bbox:{w:number,h:number}}|null} [info]
+ * @param {{w:number,h:number}|null} [canvas]
+ * @returns {{radius:number, sigma:number, capBy:number|null, strokeWidth:number|null}}
+ */
+export function featherFor(baseResolution, info = null, canvas = null) {
+  const base = blurForResolution(baseResolution);
+  const width = estimateStrokeWidth(info, canvas);
+  if (width == null) return { ...base, capBy: null, strokeWidth: null };
+
+  const cap = Math.max(1, Math.round(width / 2));
+  if (base.radius <= cap) return { ...base, capBy: null, strokeWidth: width };
+
+  const radius = cap;
+  // sigma 与 radius 保持基准比例，且不超节点上限
+  const sigma = Math.max(0.1, Math.min(
+    IMAGE_BLUR_LIMITS.sigma,
+    Number((INPAINT_BLUR_BASE.sigma * (radius / INPAINT_BLUR_BASE.radius)).toFixed(1)),
+  ));
+  return { radius, sigma, capBy: 'strokeWidth', strokeWidth: width };
+}
+
+
+
 /** crop 模式的默认参数 */
 export const INPAINT_CROP_DEFAULTS = Object.freeze({
   baseResolution: 1024, padding: 64, minCrop: 256, maxCrop: 1024,

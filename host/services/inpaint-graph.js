@@ -16,7 +16,7 @@ import {
 } from './h3-image.js';
 import {
   VENDOR_NODES, INPAINT_DENOISE, INPAINT_GROW, INPAINT_BLUR_REF_RES,
-  blurForResolution, cropSampleEdge, sampleCanvasFor,
+  featherFor, blurForResolution, cropSampleEdge, sampleCanvasFor,
 } from './inpaint-params.js';
 
 /**
@@ -116,9 +116,18 @@ export async function buildInpaintWorkflow({
    * GrowMask 作用在已经缩放到裁剪块分辨率的 mask 上，1 latent 格恒为 16px，
    * 所以 expand 是网格常数；而 blur 是像素空间的视觉宽度，必须按画布缩放
    * （否则 448² 档羽化带占画布 6.9%，贴边选区能看到一圈矩形过渡带）。
+   *
+   * 此外 blur 还要按**笔画宽度封顶**：固定半径对细线是灾难 —— 实测一条
+   * 14869 px 的笔画在 radius=28 下膨胀到 131051 px、平均强度只剩 0.37，
+   * 模型的 noise mask 近乎半透明，重绘结果几乎不可见。
    */
   const featherRes = isCrop ? cropRes : (req.sourceDims?.w ?? INPAINT_BLUR_REF_RES);
-  const blurOpts = blurForResolution(featherRes);
+  const feather = featherFor(
+    featherRes,
+    isCrop ? { strokePixels: req.crop?.strokePixels, bbox: req.crop?.bbox } : null,
+    isCrop ? (req.crop?.sampleCanvas ?? null) : null,
+  );
+  const blurOpts = { radius: feather.radius, sigma: feather.sigma };
   const growPx = INPAINT_GROW;
 
   let modelOutForScheduler = modelOut;
@@ -133,6 +142,12 @@ export async function buildInpaintWorkflow({
     loraMode,
     featherRes,
     blur: blurOpts,
+    /** 羽化是否被笔画宽度封顶（排障时要能看出"为什么半径这么小"） */
+    feather: {
+      baseRadius: blurForResolution(featherRes).radius,
+      capBy: feather.capBy,
+      strokeWidth: feather.strokeWidth == null ? null : Number(feather.strokeWidth.toFixed(1)),
+    },
     grow: growPx,
     /** crop：采样画布长边与（估算的）实际画布；full：就是源图画布 */
     sampleEdge: null,
@@ -153,6 +168,11 @@ export async function buildInpaintWorkflow({
       },
     };
     // 羽化链路（全核心节点，不依赖 kornia / scipy）
+    //
+    // ⚠️ 这张羽化 mask（含 GrowMask 外扩）**只能用于采样**，不能用于贴回。
+    //    它比用户选区大一圈，拿它当贴回权重会把生成内容渗到选区外
+    //    （实测污染 7–23px 的矩形边缘，视觉上是一圈硬切边）。
+    //    贴回用下面独立的 maskFrom（未外扩、未羽化）。
     wf['72'] = { class_type: 'GrowMask', inputs: { mask: ['70', 1], expand: growPx, tapered_corners: true } };
     wf['73'] = { class_type: 'MaskToImage', inputs: { mask: ['72', 0] } };
     wf['74'] = { class_type: 'ImageBlur', inputs: { image: ['73', 0], blur_radius: blurOpts.radius, sigma: blurOpts.sigma } };
@@ -162,7 +182,29 @@ export async function buildInpaintWorkflow({
     wf['32'] = { class_type: 'SetLatentNoiseMask', inputs: { samples: ['30', 0], mask: ['75', 0] } };
 
     latFrom = ['32', 0];
-    maskFrom = ['75', 0];
+
+    /**
+     * 贴回权重：**用户原始选区**（crop 节点第 1 路输出），再叠加一层
+     * **对称**软边（blur 半径取羽化的一半）。
+     *
+     * 为什么不能用 ['75',0]（外扩 16 + 羽化 22 那张）：它整体比用户选区大一圈，
+     * 以它做权重会把生成内容渗到选区外 16–22px —— 视觉上是一圈矩形硬边。
+     *
+     * 为什么软边要对称：blur 的 50% 等值线落在原始边界上，向左向右各让
+     * radius/2 过渡。这样边界居中柔化，向外溢出只有几个像素且是渐变，
+     * 不会形成可见的接缝。
+     */
+    wf['76'] = { class_type: 'MaskToImage', inputs: { mask: ['70', 1] } };
+    wf['77'] = {
+      class_type: 'ImageBlur',
+      inputs: {
+        image: ['76', 0],
+        blur_radius: Math.max(1, Math.round(blurOpts.radius / 2)),
+        sigma: Math.max(0.1, Number((blurOpts.sigma / 2).toFixed(1))),
+      },
+    };
+    wf['78'] = { class_type: 'ImageToMask', inputs: { image: ['77', 0], channel: 'red' } };
+    maskFrom = ['78', 0];
 
     /**
      * 这里的 condW/condH **不控制采样尺寸**：inpaint 的
@@ -230,13 +272,34 @@ export async function buildInpaintWorkflow({
 
   /* ---------------- 输出 ---------------- */
   if (isCrop) {
+    // 贴回：按 bbox 把重绘结果写回原图，权重是"原始选区 + 对称软边"（见 maskFrom）
     wf['80'] = {
       class_type: VENDOR_NODES.uncrop,
       inputs: { destination: ['20', 0], source: ['10', 0], mask: maskFrom, bbox: ['70', 2] },
     };
     wf['11'] = { class_type: 'SaveImage', inputs: { images: ['80', 0], filename_prefix: 'h3inpaint' } };
   } else {
-    wf['11'] = { class_type: 'SaveImage', inputs: { images: ['10', 0], filename_prefix: 'h3inpaint' } };
+    // full 模式没有 bbox：用同样的"原始选区 + 对称软边"整幅合成，
+    // 选区外逐像素保留原图。
+    wf['81'] = {
+      class_type: 'MaskToImage', inputs: { mask: ['50', 0] },
+    };
+    wf['82'] = {
+      class_type: 'ImageBlur',
+      inputs: {
+        image: ['81', 0],
+        blur_radius: Math.max(1, Math.round(blurOpts.radius / 2)),
+        sigma: Math.max(0.1, Number((blurOpts.sigma / 2).toFixed(1))),
+      },
+    };
+    wf['83'] = { class_type: 'ImageToMask', inputs: { image: ['82', 0], channel: 'red' } };
+    wf['84'] = {
+      class_type: 'ImageCompositeMasked',
+      inputs: {
+        destination: ['20', 0], source: ['10', 0], x: 0, y: 0, resize_source: false, mask: ['83', 0],
+      },
+    };
+    wf['11'] = { class_type: 'SaveImage', inputs: { images: ['84', 0], filename_prefix: 'h3inpaint' } };
   }
 
   applied.loraStack = req.loras.map((l) => `${l.name}@${l.strength}`);

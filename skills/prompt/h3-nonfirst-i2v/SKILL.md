@@ -1,6 +1,6 @@
 ---
 name: h3-nonfirst-i2v
-description: 用户明确说“H3官方提示词”或“用H3官方写”时调用；先做连续性与空间审计，再输出精简的MiniMax官方英文结构。不得与“海螺H3提示词”或本地中文流程混用。
+description: 用于「非首帧 I2V」——用户要把一张图当视觉参考而不是首帧，想直接从给定景别开始演（不绑定 0.00 秒首帧构图）时使用。输出四段结构（integrated_multimodal_description / overall_soundscape / non_diegetic_music），并解除参考图的像素级首帧绑定，同时保留身份、服装、姿势、道具、场景与光线。仅当用户明确说「非首帧」「不要拿这张图当首帧」「参考图只是视觉参考」时触发；与 h3-official-prompt 的官方六段式互斥。
 ---
 
 # H3 Official Prompt — Continuity-First Production

@@ -1,726 +1,753 @@
 ---
 name: jiuzhang-studio-usage
-description: 九章工作室插件的完整操作手册，供 AI 代理调用。涵盖 14 个 Agent 工具、115+ 条 REST 路由、14 条前端路由的调用方式与参数。当需要通过插件生成视频/图像（含参考图/视频/音频）、管理角色卡与素材、用 Blender 白模指导视频生成、做分段续写串联时使用。
+description: 当需要通过九章工作室插件生成视频或图像、调用 studio_* 工具、直接打 REST 接口、管理项目/镜头/角色卡/素材、用 Blender 白模指导生成、或做跨镜头续写串联时使用。本文是插件的完整操作手册：14 个 Agent 工具的真实参数、124 组 REST 方法+路径（按 11 个域模块组织）、14 条前端路由，以及任务生命周期、数据目录与错误码。
 ---
 
 # 九章工作室 · 操作手册（AI 调用向）
 
-> 面向 AI 代理：本 skill 说明如何通过 **Agent 工具**、**REST API**、**前端页面** 使用插件的全部能力。
-> 部署与模型下载见 `jiuzhang-studio-setup`；提示词写法见 `jiuzhang-studio-prompt`。
+> 面向 AI 代理：如何通过 **Agent 工具** / **REST API** / **前端页面** 使用插件。
+> 本文所有参数名、路由、字段均与 `host/` 代码逐条核对（v4.0.0）。
+> 部署与模型下载见 `jiuzhang-studio-setup`；提示词写法见 `jiuzhang-studio-prompt`；
+> 代码结构与"改哪里改什么"见 `jiuzhang-studio-architecture`。
 
 ---
 
-## 0. 三种调用方式怎么选
+## 0. 三种调用方式
 
 | 方式 | 适用场景 | 入口 |
 |---|---|---|
-| **Agent 工具** | AI 在对话中直接调用，最简单 | `studio_*` 工具（13 个） |
-| **REST API** | 脚本/外部程序调用，粒度最细 | `http://127.0.0.1:<port>/jiuzhang/api/*` |
-| **前端页面** | 人工操作，可视化 | `http://127.0.0.1:<port>/jiuzhang/app/` |
+| **Agent 工具** | 对话中直接调用，最简单 | 14 个 `studio_*` 工具 |
+| **REST API** | 脚本 / 外部程序，粒度最细 | `http://127.0.0.1:<port>/jiuzhang/api/*` |
+| **前端页面** | 人工操作，可视化 | `http://127.0.0.1:<port>/jiuzhang/app/#/<route>` |
 
-**端口**：DSH 每次启动随机分配，用 `webServer.getOrigin()` 或从 DSH 配置读。下文用 `<port>` 占位。
+**端口**：DSH 每次启动随机分配。用 `GET /jiuzhang/api/token` 拿 `origin`（Desktop 窗口的
+`location.port` 恒为空，`origin` 是唯一可靠来源）。下文 `<port>` 占位。
 
-**鉴权**：所有 POST/PUT/PATCH/DELETE 需带 `X-JZ-Token` 头。
+**鉴权**：写方法（POST/PUT/PATCH/DELETE）必须带 `X-JZ-Token`；GET/HEAD 不需要。
+
 ```js
-const { token } = await (await fetch(`http://127.0.0.1:${port}/jiuzhang/api/token`)).json();
+const { token, origin } = await (await fetch(`http://127.0.0.1:${port}/jiuzhang/api/token`)).json();
 // 之后 headers: { 'X-JZ-Token': token, 'Content-Type': 'application/json' }
 ```
 
+`guard()` 的三道闸：仅本机（`FORBIDDEN_HOST`）→ 同源（`FORBIDDEN_ORIGIN`）→ 写令牌
+（`WRITE_TOKEN_REQUIRED`）。
+
 ---
 
-## 1. 14 个 Agent 工具速查
+## 1. 14 个 Agent 工具
 
-### 1.1 基础
+### 1.1 元信息 / 配置
 
-| 工具 | 关键参数 | 作用 |
+| 工具 | 参数（字面） | 说明 |
 |---|---|---|
-| `studio_meta` | — | 返回 26 节点 / 15 资产类型 / H3 19 槽位 / 档位表 |
-| `studio_config` | `action: get\|set`, `patch` | 读写配置（16 个白名单字段） |
+| `studio_meta` | 无 | 26 节点 · 15 类资产 · 19 个 H3 模型槽 · 4 档位 · 后端枚举 · ComfyUI 健康 · 南风 221 参数/12 组/7 预设 |
+| `studio_config` | `action: get\|set`，`patch` | 读写配置。`set` 走 17 键白名单（`WRITABLE_CONFIG_KEYS`） |
 
-### 1.2 项目与素材
+`patch` 白名单：`dataDir` · `workflowDir` · `comfyUrl` · `comfyInputDir` · `comfyTimeoutMin` ·
+`defaultBackend` · `defaultProfile` · `maxConcurrentLocal` · `accelPlan` · `theme` · `accent` ·
+`locale` · `imageModelRoot` · `imageSizeId` · `imageSteps` · `imageMaxMP` · `modelNames`。
+白名单外的键被静默丢弃；`comfyUrl` 只接受本机 http(s)（否则 `INVALID_COMFY_URL`）。
 
-| 工具 | 关键参数 | 作用 |
+### 1.2 项目 / 镜头 / 任务
+
+| 工具 | 参数（字面） | 说明 |
 |---|---|---|
-| `studio_project` | `action: list\|create\|get\|update\|delete`, `id`, `patch` | 项目 CRUD |
-| `studio_toolbox` | `domain: promptTemplates\|wardrobe\|importScan\|orphans\|motionShots\|logs\|batchProgress`, `action` | 工具箱 7 个域 |
+| `studio_project` | `action: list\|create\|get\|update\|delete`，`projectId`，`patch` | 项目 CRUD。`update` 只写 `allowedProjectPatch` 白名单：`name / category / rootPath / description / nodes / edges / viewport / nodeCount / scriptProjectName / scriptProjectDir / comicProjectName / comicProjectDir` |
+| `studio_shot` | `action: list\|create\|save\|delete`，`projectId`，`shotId`，`shot` | 镜头卡 CRUD。`save` 认 `shotId`（不传 id 会新建）。**删镜头只有这个入口**，REST 没有 DELETE |
+| `studio_jobs` | `action: list\|get\|cancel\|retry`，`jobId`，`limit` | 任务查询/取消/重试。`cancel` 对本地后端会真发 ComfyUI `/interrupt`；`list` 默认 50 条 |
 
-> **素材没有独立工具**。素材的增删查走 REST：`/assets`、`/assets/upload`、
-> `/assets/archive`、`/assets/delete`。`studio_image` / `studio_generate` 的产物
-> 会自动归档进素材库（带 `assetId`），所以多数场景不需要手动调素材 API。
+### 1.3 生成
 
-### 1.3 镜头与生成
-
-| 工具 | 关键参数 | 作用 |
+| 工具 | 参数（字面） | 说明 |
 |---|---|---|
-| `studio_shot` | `action: list\|create\|save\|delete`, `projectId`, `shot` | 镜头卡 CRUD |
-| `studio_generate` | `projectId`, `shotId`, `backend`, `seed` | 触发生成（**视频**，走镜头卡） |
-| `studio_image` | `action: meta\|lora\|generate`, `prompt`, `refImages[]`, `sizeId`, `width`/`height`, `seed`, `count`, `loras[]` | H3-Image **出图**（文生图 / 参考图编辑 / 批量 / LoRA） |
-| `studio_jobs` | `action: list\|get\|cancel`, `jobId` | 任务查询/取消（**没有 retry**；cancel 会真发 /interrupt 终止远端） |
+| `studio_generate` | **必填** `projectId` `shotId`；可选 `backend` `seed` `preset` `params` `mode` `continuationTask` `accelPlan` `steps` | 提交视频/图像任务，立即返回 job |
+| `studio_image` | 见 §1.4 | H3-Image 出图 / 局部重绘 |
 
-### 1.4 专业工作台
+`backend` 枚举：`h3-nanfeng`（默认，南风 V15，支持二采/续写）· `h3-local`（旧模板替换路径，
+回退用）· `h3-image` · `mock`（占位，只出 ffmpeg 色卡）。写错名字 → `UNKNOWN_BACKEND`，
+**不会静默降级**。
 
-| 工具 | 关键参数 | 作用 |
+`preset` 枚举：`draft` `standard` `quality` `quality-preview` `continuation`
+`continuation-quality` `low-vram`。`params` 覆盖预设里的单项参数（键名同南风参数名）。
+
+### 1.4 `studio_image`（4 个 action）
+
+| 参数 | 类型 | 适用 action | 说明 |
+|---|---|---|---|
+| `action` | `meta\|lora\|generate\|inpaint` | 全部 | 必填 |
+| `prompt` | string | generate / inpaint | ≤4096 字符，超长 400 拒绝，**不截断** |
+| `sizeId` | string | generate | `auto`（默认）\| 尺寸表 id，见 `meta.sizes` |
+| `width` / `height` | number | generate | 显式尺寸，必须**成对**且是 32 的倍数，会抵消 `sizeId` |
+| `seed` | number | generate / inpaint | 不给则随机；`count>1` 时其余按 `seed+1`、`+2` 递增 |
+| `count` | number | generate | 1–4，**拆成 N 个独立任务**（DiT 拒绝 batch>1） |
+| `refImages` | string[] | generate | ≤16 张（dataDir 相对路径或 dataURL）。**第 1 张 = 被编辑的原图**；不传即文生图 |
+| `loras` | `[{name, strength}]` | generate / inpaint | ≤6 条，`name` 形如 `h3img/30_style/x.safetensors` |
+| `projectId` | string | generate / inpaint | 可选归属 |
+| `sourceImage` | string | **inpaint** | 源图（相对路径或 dataURL） |
+| `maskImage` | string | **inpaint** | 白=重绘区。尺寸必须与源图**完全一致**，否则 `MASK_SIZE_MISMATCH` |
+| `inpaintMode` | `crop\|full` | **inpaint** | `crop` 默认（裁剪重绘再贴回）/ `full`（全图 latent 混合） |
+| `inpaintStrength` | `full\|strong\|medium\|light` | **inpaint** | SplitSigmas 切点 0/1/2/3 |
+| `cropResolutionId` | `auto\|512\|768\|1024\|1280` | **inpaint** | `auto` 按 bbox 长边 ×1.5 自动算（推荐） |
+| `cropResolution` | number | **inpaint** | 手动档分辨率（32 倍数）；只给它不给 id 即手动档 |
+| `strokePixels` | number | **inpaint** | mask 非零像素数（兜底估 bbox） |
+| `bboxW` / `bboxH` | number | **inpaint** | mask 外接框。**优先从 mask 文件实测**，实测失败才用它们 |
+
+返回：`{ ok, jobId, jobIds, batchId, count, mode:'edit'|'t2i', refCount, loraStack, seed, warnings, note }`。
+Agent 出图产物留在 `data/outputs/`（**不进素材库**），REST `/image/generate` 才走归档。
+
+### 1.5 提示词 / 分镜 / 工坊
+
+| 工具 | 参数（字面） | 说明 |
 |---|---|---|
-| `studio_prompt` | `action: meta\|compile\|fromShot`, `mode`, `styleId`, `subjects[]` | H3 提示词编译 |
-| `studio_post` | `op: transcode\|scale\|crop\|split\|annotate\|extractFrame\|extractAudio\|qc`, `input` | 图像/视频工具 |
-| `studio_h3_workshop` | `action: analyze\|import`, `text`/`dir`, `episode` | 剧本 → 分段 + 资产 |
-| `studio_blender` | `action: health\|assets\|actions\|render\|spec`, `mode`, `projectId`, `shotId`, `assetRel` | **Blender 预演**：渲灰模参考视频 / 列资产 / 读动作名 |
-| `studio_storyboard` | `action: meta\|analyze\|generate`, `imageRels[]`, `mode`, `count` | **智能分镜**：DSH 模型看图 + 写分镜 |
-| `studio_edit` | `op: probe\|trim\|concat\|audio\|render\|clips\|projects`, `input`/`inputs[]`, `startSec`/`endSec`, `transitionSec`, `audioOp`, `projectId` | **视频剪辑**：裁切 / 拼接 / 音轨 / 出片 |
+| `studio_prompt` | `action: meta\|compile\|fromShot`，`projectId` `shotId` `mode` `styleId` `styleEn` `durationSec` `sceneLayout` `subjects[]` `shots[]` `references` `overall_soundscape` `non_diegetic_music` `summary` | H3 提示词编译。`mode` 枚举 `t2va\|i2va\|fl2va\|l2va\|ref2va`。`fromShot` 走角色卡（与真实生成同一份入参） |
+| `studio_storyboard` | `action: meta\|analyze\|generate`，`projectId` `idea` `count` `mode` `skillId` `imageRels[]` `durationSec` `contextLength` | 智能分镜，走 DSH 内部 LLM（零 API Key） |
+| `studio_h3_workshop` | `action: analyze\|import`，`projectId` `text` `file` `episode` `aspect` `style` `language` `durationMin` `durationMax` | 剧本 → 中性分段 + 资产提示词。**只产文本，不出图** |
 
-> ⚠️ `studio_script` / `studio_mw` 已随剧本页、模特工坊一并删除，不再存在。
-> 当前注册的工具**恰好 14 个**，以上五张表合起来就是全部。
+`studio_storyboard` 的 `mode` 枚举（7 个）：`ref2va` `reference_i2va` `i2va` `fl2va` `t2va`
+`oneshot_continuation` `continuation_cuts`；`skillId` 两个：`regular_storyboard` `ns_storyboard`；
+`count` 夹在 1–12；`contextLength` 取 5/22/39/56。
 
-### 视频剪辑（studio_edit）
+`studio_subjects[]` 的字段：`id` `name` `pictureIndex` `gender` `heightCm` `traits` `personality`
+`voiceDesc` `audioIndex`。
 
-最常用的三条链路：
+### 1.6 后处理 / 剪辑 / 预演
 
-```
-# 1) 掐掉头尾，得到一段
-studio_edit { op:'trim', input:'outputs/job_xxx.mp4', startSec:1.5, endSec:8 }
+| 工具 | 参数（字面） | 说明 |
+|---|---|---|
+| `studio_post` | `op: transcode\|scale\|crop\|split\|annotate\|extractFrame\|extractAudio\|stripAudio\|qc`，`input` `path` `width` `height` `x` `y` `rows` `cols` `text` `fontSize` `color` `fontFile` `timeSec` `crf` | ffmpeg 后处理与图像工具 |
+| `studio_edit` | `op: probe\|trim\|concat\|audio\|render\|clips\|projects`，见 §1.7 | 视频剪辑 |
+| `studio_blender` | `action: health\|assets\|actions\|render\|spec`，`mode` `assetRel` `projectId` `shotId` `shot` `frames` `timeoutMs` `jobId` | Blender 预演 |
 
-# 2) 按顺序把几段接起来（硬切快、带转场需重编码）
+`studio_post` 的两处特例：
+- **`qc` 的入参是 `path`**（`{op:'qc', path:'outputs/x.mp4'}`）；`input` 作为等价别名同时保留。
+  其余 op 一律用 `input`。
+- `path` 字段本身标注为 deprecated，仅为兼容 REST 调用方；新代码请用 `input`。
+
+`studio_blender` 的 `mode` 枚举 `blockout`（唯一喂模型的通道）/ `preview`（人眼看）；
+`timeoutMs` 夹取 30s–15min（默认 10min）；`jobId` 是本次渲染的目录名（缺省用 `shotId`）。
+
+### 1.7 `studio_edit`（7 个 op）
+
+| op | 必填 | 可选 | 说明 |
+|---|---|---|---|
+| `probe` | `input` | — | 时长/分辨率/帧率/音轨 |
+| `trim` | `input` | `startSec` `endSec` **`reencode`** | 裁切 |
+| `concat` | `inputs[]` | `transitionSec` `reencode` | 拼接；形状一致走流复制，否则重编码 |
+| `audio` | `input` **`audioOp`** | `bgmInput` `replaceOriginal` `bgmVolume` `originalVolume` `fadeInSec` `fadeOutSec` | `audioOp: strip\|volume\|bgm`（顶层 `op` 已被动作分发占用，故子操作叫 `audioOp`） |
+| `render` | — | `projectId` `clips[]` `audio{}` `transitionSec` `reencode` `name` | 按工程出片 |
+| `clips` | — | — | 可剪辑素材（`outputs/` + `assets/` + `edit/outputs/`） |
+| `projects` | — | `action: list\|get\|save\|delete`，`projectId` | 剪辑工程增删查改 |
+
+```js
+// 掐头尾
+studio_edit { op:'trim', input:'outputs/job_x.mp4', startSec:1.5, endSec:8, reencode:true }
+// 拼接（带转场必须重编码）
 studio_edit { op:'concat', inputs:['outputs/a.mp4','outputs/b.mp4'], transitionSec:0.5 }
-
-# 3) 一条命令从片段列表直接出片（带 BGM 替换）
+// 一条命令出片 + 换 BGM
 studio_edit { op:'render',
   clips:[{rel:'outputs/a.mp4',startSec:0,endSec:2},{rel:'outputs/b.mp4',startSec:1}],
   audio:{mode:'bgm', bgmRel:'assets/bgm.mp3', bgmVolume:0.5, replaceOriginal:true},
   transitionSec:0.4 }
 ```
 
-要点：
-- 工具里音轨子操作用 **`audioOp`**（顶层 `op` 已被占用），取值 `strip|volume|bgm`。
-- 只接受 `dataDir` 内的路径；外部素材先走素材库上传。
-- `concat` 会自动判断能否流复制：形状一致才 copy，否则重编码（避免花静默屏）。
-- 产物写 `data/edit/outputs/`，返回 `{rel, bytes, meta}`；用 `probe` 复核时长。
+产物写 `data/edit/outputs/`，返回 `{rel, bytes, meta}`。只接受 `dataDir` 内的路径。
+
+### 1.8 `studio_toolbox`（7 域）
+
+| domain | 支持的 action | 关键参数 |
+|---|---|---|
+| `promptTemplates` | `list` `upsert` `delete` | `item` / `id` |
+| `wardrobe` | `list` `upsert` `delete` | `kind` / `item` / `id` |
+| `importScan` | `scan` `preview` | `dir` / `path` / `limit` |
+| `orphans` | `list` `clean` | `confirm`（clean 必填 true） |
+| `motionShots` | `list` `upsert` `delete` | `projectId` / `item` / `id` |
+| `logs` | `list` `upsert` | `limit` / `item` |
+| `batchProgress` | **仅 `list`** | — |
 
 ---
 
-## 2. REST API 分组（115 条精确方法+路径，另有 5 条前缀族与 7 条参数化族）
+## 2. REST API（124 组方法+路径，11 个域模块）
 
-### 2.1 基础
+> 全部挂在 `/jiuzhang/api` 前缀下。`host/api/index.js` 是 84 行分发器，
+> 业务在 `host/api/routes/` 的 11 个域文件里。下表按域分块，**顺序即匹配顺序**。
 
-```
-GET  /jiuzhang/api/token              获取写令牌 + origin
-GET  /jiuzhang/api/health             健康检查
-GET  /jiuzhang/api/meta               元信息
-GET  /jiuzhang/api/monitor            监控（含后端状态）
-GET  /jiuzhang/api/config             读配置（key 掩码）
-POST /jiuzhang/api/config             改配置
-```
+### 2.1 `meta` — 元信息 / 配置 / ComfyUI 进程（16 组）
 
-### 2.2 项目 / 镜头 / 素材
-
-```
-GET    /jiuzhang/api/projects
-POST   /jiuzhang/api/projects
-GET    /jiuzhang/api/projects/:id
-POST   /jiuzhang/api/projects/:id      {patch}
-DELETE /jiuzhang/api/projects/:id
-
-GET  /jiuzhang/api/projects/:id/shots
-POST /jiuzhang/api/projects/:id/shots  {shot}
-
-GET  /jiuzhang/api/assets?type=&projectId=
-POST /jiuzhang/api/assets/upload       multipart
-GET  /jiuzhang/api/assets/item?id=     支持 Range/HEAD
-POST /jiuzhang/api/assets/delete       {id}
-GET  /jiuzhang/api/file?path=          通用文件（产物/资产）
-```
-
-### 2.3 视频生成
-
-```
-POST /jiuzhang/api/generate           {projectId, shotId, backend, seed}
-GET  /jiuzhang/api/jobs
-POST /jiuzhang/api/jobs/:id/cancel
-POST /jiuzhang/api/jobs/:id/retry
-GET  /jiuzhang/api/jobs/batch-progress
-POST /jiuzhang/api/resolution         {profile, ratio}
-POST /jiuzhang/api/h3/length          {durationSec, fps}
-```
-
-**backend 取值**：`h3-nanfeng`（**默认**，南风 V15，支持二采与续写）/ `h3-local`（旧模板路径，仅回退用）/ `h3-image`（本地图像）/ `mock`（**测试占位**，只出纯色卡）
-
-### 2.4 图像生成
-
-```
-GET  /jiuzhang/api/image/meta           模型状态 + 尺寸表 + **真实生效参数** + 各项上限
-GET  /jiuzhang/api/image/lora/catalog   图像 LoRA 目录（只列 models/loras/h3img/ 下）
-POST /jiuzhang/api/image/lora/solve     {items:[{name,strength}], hasRefImages} → 约束求解
-POST /jiuzhang/api/image/generate       {prompt, refImages[], sizeId, width, height, seed, count, loras[], projectId}
-GET  /jiuzhang/api/image/progress?ids=a,b,c   轻量进度（status + progress + 产物 rel）
-
-# 局部重绘（inpaint）
-GET  /jiuzhang/api/image/inpaint/meta   denoise 锁定说明 + 4 档强度 + crop 能力
-POST /jiuzhang/api/image/inpaint        {prompt, source, mask, mode, strength, seed, loras[], crop}
-```
-
-#### 局部重绘（inpaint）
-
-**⚠️ 没有 denoise 参数，它被锁在 1.0。** 这不是保守设计，是硬约束：
-PDD 只有 6 个预测头、对应 7 点 sigma 网格；`BasicScheduler` 在 `denoise<1` 时
-`total_steps = int(6/denoise)`，实测 0.5 → 只剩 3 个头工作，
-表现是"区域被抹平、不按提示词生成"（模型失去重建能力），**不是**"改得更少"。
-→ 改动强弱一律用 `strength`。
-
-| 参数 | 说明 |
-|---|---|
-| `prompt` | 必填。只描述"选区里要出现什么"，不用复述选区外内容 |
-| `source` | 源图（dataDir 相对路径 / dataURL） |
-| `mask` | mask 图（白色=重绘区域）。**尺寸必须与源图完全一致**，否则 400 `MASK_SIZE_MISMATCH` |
-| `mode` | `crop`（默认，裁剪重绘再贴回，mask 外逐像素保真）/ `full`（全图 latent 混合） |
-| `strength` | `full` / `strong` / `medium` / `light` → SplitSigmas 切点 0/1/2/3 |
-| `crop.resolutionId` | `auto`（推荐）/ `512` / `768` / `1024` / `1280` —— 裁剪块的重绘分辨率 |
-| `bboxW` + `bboxH` | mask 外接框尺寸。**auto 档按它算分辨率，最准**；不给则由笔画面积估算 |
-| `strokePixels` | mask 非零像素数（估算 bbox 的兜底依据） |
-| `crop` 其他 | `{padding, minCrop, maxCrop}`；分辨率必须 32 倍数 |
-
-**`crop.resolutionId` 的 auto 档怎么算**（`base_res = max(bbox_w, bbox_h) × 1.5`）：
-
-- **保证缩放比 ≥ 1** —— 笔画绝不会被缩小。这是实测修正的结论：
-  第一版按「笔画总面积」算（`sqrt(像素)×2`），S 形细笔画算出 544²，
-  意味着 bbox 要缩小 0.53 倍，70px 宽的笔画降到 37px，经 latent 16× 只剩 2.3 px → 糊掉。
-  实测边缘差异 11.43 vs 固定 1024 的 5.53（差 2 倍）、外溢 3.82% vs 0.36%（差 10 倍）。
-- 小选区会**自动放大**（bbox 300×200 → 448²，1.49×），细节更足且更快
-- 大选区受 `maxCrop` 限制会被缩小，此时响应里带 `warnings` 说明（不静默）
-
-**实测对比（小选区，同样画一块蓝色水晶）**：
-- `1024²`（放大 3.4×）：水晶**盖在**裙子上、遮掉裙摆结构、边缘生硬
-- `auto 448²`（放大 1.49×）：水晶**嵌在**裙摆褶皱里、自然融合
-- 且 auto 快 14.8s（70.3s vs 85.1s）
-
-→ 不要迷信"改动强度数值更高"：过度放大让模型倾向"画个大东西填满"。**用 auto**。
-
-**实测对比**：
-
-| 模式 | mask 外差异 | 说明 |
+| 方法 | 路径 | 说明 |
 |---|---|---|
-| `crop` | **0.005（0.00% 像素变化）** | 逐像素保真 |
-| `full` | 3.4（4.5%） | 有 VAE 重编码损耗 |
+| GET | `/token` | 写令牌 + `origin`（**本身免 token**） |
+| GET | `/monitor` | 任务计数 + H3 健康 + Blender + 磁盘（侧栏 3s 轮询） |
+| GET | `/meta` | 档位 / 26 节点 / 15 资产类型 / 19 槽位 / 后端枚举 |
+| GET | `/events` | SSE 长连接（`job-progress` / `batch-progress` / `replace-progress`） |
+| GET | `/health` | ComfyUI 健康 + Blender + 加速方案 + 工作流模板诊断 + SSE 连接数 |
+| GET · POST | `/config` | 读（掩码）/ 写（白名单 + `comfyUrl` SSRF 校验） |
+| GET | `/comfy/status` | ComfyUI 进程状态 |
+| POST | `/comfy/stop` | 停止（`purge` 默认 true） |
+| POST | `/comfy/start` | 启动 |
+| POST | `/comfy/restart` | 重启（清队列 + 显存碎片 + 节点缓存） |
+| GET | `/accel/plans` | 加速方案（`dmad8` / `dmad4` / `none`） |
+| GET | `/lora/catalog` | **视频** LoRA 目录（分类 / 强度限 / 探活标志） |
+| POST | `/lora/solve` | 视频 LoRA 约束求解 |
+| GET | `/workflows/diagnostics` | `h3.json` / `h3-image.json` 是否就位 |
+| GET | `/nanfeng/schema` | 221 参数 + 12 组 + 无效参数清单 |
+| GET | `/nanfeng/presets` | 7 预设 + Sigma 序列 + 加速方案 |
+| GET | `/nanfeng/presets/:id` | 某预设合并后的参数快照（**未经 applyFixes**） |
 
-**不规则选区（如画笔拖出的 S 形）必须用 crop 模式**：
-实测 S 形笔画（覆盖率 6.84%），`crop` 有 **99.5%** 的改动落在笔画内；
-`full` 有 **52% 溢出到笔画外** —— 因为 `full` 靠 16× 下采样的 latent 表达 mask，
-细笔画根本表达不出来。
+### 2.2 `nanfeng` — 续写批次 / 智能分镜（9 组）
 
-**强度档实测**（mask 内差异）：full 121.2 / strong 86.0 / medium 50.4 / light 28.1。
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/nanfeng/continuation/batches` | 建批次 `{projectId, shotIds[], preset, contextLength, audioContextLength, trimFrames}` → 201 |
+| GET | `/nanfeng/continuation/batches` | 列批次（`?projectId=` 过滤） |
+| GET | `/nanfeng/continuation/batches/:id` | 单批次（含各段状态） |
+| GET | `/nanfeng/continuation/batches/:id/next` | 取下一段任务 `{done, index, shotId, task, contextFolder}` |
+| POST | `/nanfeng/continuation/batches/run` | 一键跑完整组（立即 202，进度走 SSE；同批次已跑 → 409 `BATCH_ALREADY_RUNNING`） |
+| POST | `/nanfeng/continuation/batches/reset` | 重置失败段 |
+| POST | `/nanfeng/continuation/segment` | 手工更新单段 `{batchId, index, status, jobId, outputRel, frames, error}` |
+| POST | `/nanfeng/continuation/plan` | 分段规划 `{targetSeconds, segments, contextLength}`（帧数落在 `17k+5`） |
+| GET | `/nanfeng/storyboard/meta` | 7 模式 + 2 skill + LLM 状态 |
+| POST | `/nanfeng/storyboard/generate` | 智能分镜 `{imageRels[], idea, count, mode, skillId, durationSec, contextLength}` |
 
-**依赖**：`crop` 模式需要 `vendor/inpaint-nodes/` 的两个节点。
-先用 `GET /image/inpaint/meta` 看 `cropAvailable`；false 时只能用 `full`。
-部署：`pwsh -File vendor/inpaint-nodes/deploy-vendor.ps1 -ComfyDir <ComfyUI>` 后重启 ComfyUI。
+`contextLength` 取 `'5' / '22' / '39' / '56'`（=0.21 / 0.92 / 1.63 / 2.33 秒），默认 `'22'`。
+段 2 起裁掉这 N 帧，所以**交付时长比请求时长短**。
 
-**前端**：`#/image` 页有「局部重绘」tab，内置画笔画 mask（三层 canvas：底图 / mask 数据层 / 红色覆盖预览）。
+### 2.3 `generate` — 生成 / 任务（6 组）
 
-**入参全部可选、只有 `prompt` 必填**：
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/generate` | `{projectId, shotId, backend, seed, preset, params, mode, accelPlan, steps}` |
+| GET | `/jobs` | 全量列表（按 `createdAt` 倒序）；`?fields=list` 走轻量投影（无 prompt 全文） |
+| GET | `/jobs/batch-progress` | 批量进度 `{total, done, failed, running, queued, pending, percent}`；`?batchId=` 分组 |
+| GET | `/jobs/:id` | 单任务（**必须** `job_*` 形状，否则 400 `INVALID_ID`） |
+| POST | `/jobs/:id/cancel` | 取消（本地后端真发 `/interrupt`） |
+| POST | `/jobs/:id/retry` | 以同参重开一条新 job |
+| POST | `/resolution` | `{profile, ratio}` → `{width, height, mp}` |
+| POST | `/h3/length` | `{durationSec, fps}` → `{length}`（`17k+5` 网格） |
+
+### 2.4 `image` — 图像 / 局部重绘 / 立绘拆解（10 组）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/image/meta` | 模型状态 + 尺寸表 + **真实生效参数** + 各项上限 + LoRA 分类 + inpaint 元信息 |
+| GET | `/image/lora/catalog` | **图像** LoRA 目录（只列 `models/loras/h3img/`） |
+| POST | `/image/lora/solve` | 图像 LoRA 约束求解 `{items[], maxSlots, hasRefImages}` |
+| POST | `/image/generate` | 出图（见 §3.2 入参表） |
+| GET | `/image/inpaint/meta` | `denoiseLocked:true` + 4 档强度 + 5 档分辨率 + `cropAvailable` |
+| POST | `/image/inpaint` | 局部重绘 `{prompt, source, mask, mode, strength, seed, loras[], crop, bboxW, bboxH, strokePixels}` |
+| GET | `/image/progress?ids=` | 按 id 逐个取（轻量：status + progress + 产物 rel） |
+| GET | `/breakdown/meta` | 默认提示词 + 字符上限 + 固定尺寸 |
+| POST | `/breakdown/preview` | 回显提交用提示词（**不拼装、不改写**） |
+| POST | `/breakdown/generate` | 出拆解图（无参考图 → 400 `REF_IMAGE_REQUIRED`） |
+
+> **inpaint 的 REST 键是 `source` / `mask`**，而工具层与 `validateInpaintRequest` 同时接受
+> `sourceImage` / `maskImage` 别名。`crop` 是对象：`{resolutionId, baseResolution, padding, bboxW, bboxH}`。
+
+### 2.5 `projects` — 项目 / 镜头 / 项目绑卡（5 组）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET · POST | `/projects` | 列表（只回 `projectSummary`）/ 新建 |
+| GET · POST · DELETE | `/projects/:id` | 单项目（DELETE 先清产物再删记录） |
+| GET · POST | `/projects/:id/shots` | 镜头列表 / 保存（**部分保存**：只覆盖提交的字段） |
+| GET · POST | `/projects/:id/cards` | 项目绑卡 `{projectId, cardIds, cards}` |
+
+> 镜头**没有** `DELETE /projects/:pid/shots/:sid`；删镜头走 `studio_shot {action:'delete'}`。
+
+### 2.6 `prompt` — 提示词编译 / 渲染计划（6 组）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/prompt/meta` | 11 画风（含 `none`）+ 7 打光 + 5 模式 + 硬约束 |
+| POST | `/prompt/compile` | 完整输入包 → 提示词 |
+| POST | `/prompt/from-shot` | 从镜头卡编译（**走角色卡**，与真实生成同源） |
+| POST | `/prompt/preview` | 只编译不落盘 |
+| POST | `/render/plan` | 渲染计划：`<Picture N>` / `<Video K>` / `<Audio J>` 编号的**唯一权威来源** |
+| POST | `/render/compile` | 按计划编译（接受 `cardIds`，由后端算编号） |
+
+### 2.7 `vault` — 角色卡（5 组）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/vault/meta` | 槽位 / 引用模式 / 默认策略 / 上限 / 目录 |
+| GET · POST | `/vault/cards` | 列表（`?q=` 搜索）/ 建卡或更新 |
+| GET · POST | `/vault/cards/:id` | 单卡（`card_*` 形状）/ 就地更新 |
+| POST | `/vault/cards/delete` | 删卡 `{id}` |
+| GET | `/vault/plan?projectId=&cardIds=&extra=&firstLast=` | 参考图预算规划（项目已绑卡自动并入） |
+
+### 2.8 `media` — 素材 / 文件 / 后处理 / 剪辑（26 组）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/assets` | 素材列表（`?type=` / `?projectId=`） |
+| POST | `/assets/upload` | multipart 上传；视频/音频上传后立刻 ffprobe 补 `durationSec`/`hasAudio` |
+| GET · HEAD | `/assets/item?id=` | 单条素材二进制（Range / 缓存头） |
+| POST | `/assets/delete` | 删素材 `{id}` |
+| POST | `/assets/archive` | 产物归档进素材库；`items[]` 或单对象，**子目录白名单** `outputs/assets/previz/post/tmp-inline/inputs` |
+| GET · HEAD | `/file?path=` | 读 dataDir 内文件（`SERVABLE_DATA_DIRS` 白名单） |
+| POST | `/post/transcode` | `{input, crf, preset, videoCodec, audioCodec, audioBitrate}` |
+| POST | `/post/scale` | `{input, width, height=-2}` |
+| POST | `/post/crop` | `{input, x, y, width, height}` |
+| POST | `/post/split` | `{input, rows=2, cols=2}` |
+| POST | `/post/annotate` | `{input, text, fontSize, color, x, y, fontFile}`（中文需 fontFile） |
+| POST | `/post/extractFrame` | `{input, timeSec}` |
+| POST | `/post/extractAudio` | `{input}` |
+| POST | `/post/stripAudio` | `{input}` —— 人物替换的必备前置 |
+| POST | `/post/qc` | **入参 `{path}`**（`{input}` 亦可）；只回探测结果 |
+| GET | `/post/fonts` | 可用中文字体 |
+| GET | `/edit/clips` | 可剪辑素材 |
+| POST | `/edit/probe` | `{input}` |
+| POST | `/edit/trim` | `{input, startSec, endSec, reencode}` |
+| POST | `/edit/concat` | `{inputs[], transitionSec, reencode}` |
+| POST | `/edit/audio` | `{input, op: strip\|volume\|bgm, bgmInput, replaceOriginal, bgmVolume, originalVolume, fadeInSec, fadeOutSec}` |
+| POST | `/edit/render` | `{id, clips[], audio{}, transitionSec, reencode, name}` |
+| GET · POST | `/edit/projects` | 工程列表 / 保存 |
+| GET · POST · DELETE | `/edit/projects/:id` | 单工程 CRUD（POST/PUT/PATCH 同义） |
+
+> `/file` 白名单：`outputs assets previz previz-shots post comic tmp-inline inputs edit replace`。
+> `/assets/archive` 白名单更窄：`outputs assets previz post tmp-inline inputs`。
+> SVG 一律 `attachment` + `nosniff`（该源挂着全部写接口，内联 SVG = 存储型 XSS）。
+
+### 2.9 `blender` — 3D 预演（6 组）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/blender/health` | exe / 通道 / 脚本 / 推荐模式 |
+| GET | `/blender/assets` | 3D 资产库（glb/gltf/fbx/obj） |
+| GET | `/blender/actions/catalog` | 动作目录（60 条，**不启 Blender**） |
+| POST | `/blender/actions` | `{assetRel}` 读模型内置动作名（**会启一次 Blender**） |
+| POST | `/blender/open` | `{blendRel}` 用桌面 Blender 打开 .blend |
+| POST | `/blender/render` | `{mode, projectId, shotId, shot, spec, frames, jobId, timeoutMs}` |
+
+`mode` 只有两个：`blockout`（**唯一喂模型的通道** → `shot.refs.videos`）/
+`preview`（人眼验收，不要填进镜头卡）。`timeoutMs` 夹取 30s–15min。
+返回 `{ok, mode, usage, dir, mp4, rel, frames, seconds, spec, blend, blendRel, blender, missingAssets, hint}`。
+
+### 2.10 `replace` — 视频换人（11 组）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/replace/meta` | 默认值 / 提示词字段 / 预设 / 画风 / 打光 / 加速方案 / 重叠帧档 / 上限 |
+| POST | `/replace/prompt-template` | `{refCount}` → 带 `<Picture N>` 的模板 |
+| POST | `/replace/preview-prompt` | `{roles[], shotBeats, extraNote}` → 预览 |
+| POST | `/replace/compile-prompt` | `{prompt, useLlm}` → 三层降级编译（规则 → 本地翻译 → 原文兜底） |
+| GET | `/replace/llm-status` | 本地翻译服务状态 |
+| POST | `/replace/plan` | `{sourceRel, segmentSec, continuation, contextLength, segmentCount}` → 分段方案 |
+| GET · POST | `/replace/tasks` | 列任务 / 建任务（建库存盘，不启动） |
+| GET · DELETE | `/replace/tasks/:id` | 单任务 / 删任务 |
+| POST | `/replace/run/:id` | 启动执行（立即返回，进度走 SSE `replace-progress`） |
+
+换人线**完全不读** `projects/` 与 `shots/`：只有源视频、参考图（≤9，下标 +1 = `<Picture N>`）、
+提示词三个概念。`continuation` 默认开启（独立重绘必然段间跳变）。
+
+### 2.11 `toolbox` — 工坊 / 模板 / 服化道 / 资源 / 画布（27 组）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/h3/workshop/analyze` | 剧本 → 分段 + 资产提示词（**只产文本**） |
+| POST | `/h3/workshop/import` | 分析结果落盘进素材库 |
+| GET · POST | `/h3/film/status` `/h3/film/render` | 成片合成 `{inputs[], output, subtitleFile, timeoutSec}` |
+| GET | `/templates` | 提示词模板（内置 20 条 + 用户覆盖） |
+| POST | `/templates/upsert` `/templates/delete` | 增改 / 删 |
+| GET | `/wardrobe` | 服化道（`?kind=`） |
+| POST | `/wardrobe/upsert` `/wardrobe/delete` `/wardrobe/resolve` | 增改 / 删 / → `{images, notes, count, items}` |
+| GET | `/toolbox/health` | 数据健康（坏 JSON 降级清单） |
+| POST | `/import/scan` `/import/preview` | 分镜目录扫描 / 预览（不落盘） |
+| GET | `/resources/orphans` | 孤儿产物（`assets/` 里无索引引用的文件） |
+| GET | `/resources/previz` | 预演产物占用（按 run 统计） |
+| POST | `/resources/previz/clean` | `{keepRuns, maxBytes}` |
+| POST | `/resources/clean` | `{confirm:true}` 清孤儿 |
+| GET | `/motionshots` | 动态条（`?projectId=`） |
+| POST | `/motionshots/upsert` `/motionshots/delete` | 增改 / 删 |
+| GET · POST | `/logs` | 运行日志（`?limit=` / 追加） |
+| GET | `/canvas-agent/meta` | 17 工具 + 4 权限位 + `current` 当前值 |
+| POST · PUT | `/canvas-agent/permissions` | 改权限 `{permissions}` |
+| POST | `/canvas-agent/exec` | `{name, arguments, context, projectId}` |
+
+**画布 Agent 的 17 个工具**：
+读 —— `resolve` `list_refs` `project_overview` `list_nodes` `get_node` `read_document`
+`search_assets` `list_skills` `image_job_status` `skill_task_status`；
+写 —— `update_node` `insert_image` `batch` `delete_node`；
+花钱 —— `generate_image` `generate_video` `call_skill`。
+
+**4 个权限位**：`canWriteCanvas`（默认 true）/ `canSpend`（默认 false）/ `canDelete`（默认 true）/
+`autoRun`（默认 false）。`/exec` 一律用**服务端**权限，请求体里同名声明会被丢弃。
+
+### 2.12 已删除的域（不存在，别照旧文档调用）
+
+`/script/*`、`/comic/*`、`/mw/*` 共 30+ 条已随页面删除，现在打过去是 404 `UNKNOWN_ROUTE`。
+剧本类需求用 `/h3/workshop/*`（只产文本）。
+
+---
+
+## 3. 生成入参细节
+
+### 3.1 视频（`/generate` / `studio_generate`）
 
 | 键 | 说明 |
 |---|---|
-| `prompt` | ≤ **4096 字符**。超长 → **400 `PROMPT_TOO_LONG`**，**不静默截断** |
-| `refImages` | ≤ **16** 张（rel 或 dataURL）。**第 1 张 = 被编辑的原图**，决定输出画布与编辑目标。不传 = 文生图 |
-| `sizeId` | `auto` / `sq-2048` / `p-4x3` / `l-4x3` / `p-2x3-film`（旧 id `p-3x4-film` 是别名）/ `v-16x9` / `h-16x9` / `ecom-sq` / `ecom-45` / `comic-page` / `h3-4k-sq` / `h3-4k-169` |
-| `width` + `height` | 自定义尺寸，**必须成对**、必须 **32 的倍数**、边长 ≥256。会抵消 `sizeId` |
-| `seed` | 不给随机。`count>1` 时其余样本按 `seed+1`、`+2` 递增 |
-| `count` | 1–4。**拆成 N 个独立任务**（H3-Image 的 DiT 硬性拒绝 batch>1），不是一次采样出 N 张 |
-| `loras` | `[{name, strength}]`，≤6 条。名字形如 `h3img/30_style/x.safetensors`（见 `action=lora`） |
+| `projectId` `shotId` | 必填。`shotId` 必须在该项目的镜头表里 |
+| `backend` | 缺省取 `shot.backend` → `cfg.defaultBackend`（默认 `h3-nanfeng`） |
+| `seed` | 缺省 1101。南风链路真正透传到 `随机种子` |
+| `preset` `params` `mode` | 与 `studio_generate` 同形，两入口落点一致 |
+| `accelPlan` `steps` | 单次尝试覆盖（优先于 shot / cfg） |
 
-**尺寸为什么必须 32 倍数**：节点按 `height//16` 取 latent、再按 patch(1,2,2) 打块。
-非 32 倍数会被补边 —— 请求 `2368×1776` 实际产出 **2368×1792**（历史 P0，已修表并加自检）。
+流程：解析角色卡（`withVaultCards`）→ 编译提示词（带 lint 警告）→ 建 job → 异步执行。
 
-**采样参数不可调**：`pdd_steps: 6` 与 `pdd_sigmas` 写死在 checkpoint 元数据里，
-6 步正好每步用一个 PDD 预测头。`/image/meta` 的 `effective.samplingLocked = true` 就是这条声明。
-`cfg.imageSteps` 仍在，但只作排障用（改完 `/image/meta` 会显示 `stepsOverridden: true`）。
+### 3.2 图像（`/image/generate`）
 
-**无负面提示词**：`BasicGuider` 没有 negative 分支，写"不要 XX"反而会把 XX 拉进画面。
+除 `prompt` 外全部可选：`refImages ≤16`（第 1 张 = 被编辑的原图）· `sizeId` / `width`+`height` ·
+`seed` · `count 1..4` · `loras ≤6` · `projectId`。
 
-**参考图数量**：图像是 **16** 张（节点 AUTOGROW 上限），与视频南风节点的 **9** 槽是两套上限，
-不要混用（`ref-images.js` 里 `MAX_IMAGE_EDIT_REFS` 与 `MAX_REF_IMAGES` 并列声明）。
+尺寸表 id：`auto` `sq-2048` `p-4x3` `l-4x3` `p-2x3-film` `v-16x9` `h-16x9` `ecom-sq` `ecom-45`
+`comic-page` `h3-4k-sq` `h3-4k-169`。
 
-**批量**：`count=2..4` 会返回 `jobIds[]` + `batchId`，用 `/image/progress?ids=` 一次轮询整组
-（只回 status / progress / 产物 rel，比 `/jobs/:id` 小一个数量级）。
+**三条硬约束**：
+- 采样 6 步写死在 checkpoint 的 PDD 头网格里（`effective.samplingLocked = true`），
+  `cfg.imageSteps` 只影响普通出图，改了也只在 `/image/meta` 显示 `stepsOverridden: true`；
+- 无负面提示词（`BasicGuider` 没有 negative 分支，写"不要 XX"反而把 XX 拉进画面）；
+- 宽高必须 **32 的倍数**（latent 16× × patch(1,2,2)），非 32 倍数会被补边。
 
-#### 图像 LoRA（与视频 LoRA 是两套体系）
+**批量**：`count=2..4` 返回 `jobIds[]` + `batchId`（`imgbatch_*`），用
+`/image/progress?ids=` 一次轮询整组。返回里 `mode` 为 `edit`（有参考图）或 `t2i`。
 
-目录约定 —— **只有 `models/loras/h3img/` 前缀之下的文件才会出现在图像页**：
+### 3.3 局部重绘（`POST /image/inpaint` / `studio_image action=inpaint`）
 
+`prompt` 必填，其余可选。**没有 denoise 参数，被锁在 1.0**——PDD 只有 6 个预测头 /
+7 点 sigma 网格，`BasicScheduler` 在 `denoise<1` 时取 `int(6/denoise)`，实测 0.5 只剩 3 个头
+工作（"区域被抹平"，不是"改得更少"）。改动强弱一律用 `strength`。
+
+| 参数 | 说明 |
+|---|---|
+| `source` / `sourceImage` | 源图（相对路径或 dataURL） |
+| `mask` / `maskImage` | 白=重绘区。**尺寸必须与源图完全一致**，否则 400 `MASK_SIZE_MISMATCH` |
+| `mode` | `crop`（默认）· `full` |
+| `strength` | `full`/`strong`/`medium`/`light` → SplitSigmas 切点 0/1/2/3（6/5/4/3 步） |
+| `crop.resolutionId` | `auto`（推荐）/ `512` / `768` / `1024` / `1280` |
+| `crop.padding` / `minCrop` / `maxCrop` | 默认 `64` / `256` / `1024` |
+| `bboxW` + `bboxH` | 优先级：调用方显式给 > 从 mask 文件实测 > 按面积估算 |
+
+**`auto` 档的算法**：`base_res = max(bbox_w, bbox_h) × 1.5`，保证**缩放比 ≥ 1**（笔画绝不
+被缩小）。小选区会自动放大（bbox 300×200 → 448²）；大选区受 `maxCrop` 封顶，响应里带
+`warnings` 说明，不静默。
+
+| 模式 | mask 外像素变化 | 说明 |
+|---|---|---|
+| `crop` | ~0.005（0.00%） | 逐像素保真 |
+| `full` | ~3.4（4.5%） | 有 VAE 重编码损耗 |
+
+不规则选区（画笔拖出的 S 形）**必须用 crop**：实测 S 形笔画（覆盖率 6.84%），`crop` 有
+99.5% 改动落在笔画内，`full` 有 52% 溢出到笔画外（16× 下采样的 latent 表达不了细笔画）。
+
+**依赖**：`crop` 模式需要 `vendor/inpaint-nodes/` 的两个节点
+（`JZImageCropByMaskAndResize` / `JZImageUncropByMask`）。先用 `GET /image/inpaint/meta` 看
+`cropAvailable`，false 时只能用 `full`。部署：
+
+```powershell
+pwsh -File vendor/inpaint-nodes/deploy-vendor.ps1 -ComfyDir "<ComfyUI>"   # 之后重启 ComfyUI
 ```
-models/loras/
-├─ 00_turbo/ … 99_inbox/     ← H3 视频（现有，不要动）
-└─ h3img/                    ← H3-Image 专用
-   ├─ 30_style/              画风（单选）
-   ├─ 32_quality/            画质/细节（多挂，第 2 条起 ×0.6）
-   ├─ 40_character/          角色/换脸（单选）
-   ├─ 50_slider/             滑块（有符号，0 = 不生效）
-   ├─ 60_concept/            概念/服装/材质（多挂 ×0.8）
-   └─ 99_inbox/              未分类
-```
 
-放好后**重启 ComfyUI**（它只在启动时扫描 loras 目录）。约束由后端 `solveImageLoraStack` 统一算：
+**前端**：`#/image` 页的「局部重绘」tab，内置画笔画 mask（三层 canvas：底图 / mask 数据层 /
+红色覆盖预览）。
 
-- 画风 / 角色**单选**（后来的替换先来的，并回报"替换了谁"）
-- 画质 / 概念多挂按 `stackDecay` 递减
-- 总强度 >1.5 警告、>1.8 剔除最弱
-- **画风 × 角色**、**角色 × 参考图**：图像特有的硬冲突，必须告警
-- 文件不在 ComfyUI 的 loras 列表里 → **组装期就拒掉**（不能让 ComfyUI 报 `value_not_in_list`）
-
-> ⚠️ **不要放视频 LoRA 进 `h3img/`**。H3-Image 与 H3 视频的 DiT 键集完全相同（416 键逐一相同），
-> 所以视频 LoRA **能加载、不报错**，但它是按视频 latent 分布训的，
-> 在 6 步 PDD 蒸馏头下语义不成立 —— 这类错误属于"能出图但不对"。
-> 在 Civitai 上必须用 `baseModel = "MiniMax H3 Image"` 过滤（`types=LORA&baseModels=MiniMax H3 Image`），
-> 不要靠标题猜。图像生态里**加速类 LoRA 数量为 0**，不要为它做加速档。
->
-> ⚠️ **量化底座上应当走 bypass 模式**（本插件已默认）：
-> 改权重式 `LoraLoaderModelOnly` 在 w4a8 上每层都要 `dequantize → 加 LoRA → requantize`，
-> 而且**随机重量化会给权重引入噪声**（脸/头发/线稿发糊）——Civitai 上
-> `Artistic Solo Anatomy` 的作者对 NVFP4 底座给过同样的警告。
-> `LoraLoaderBypassModelOnly` 走 `output = base_forward(x) + lora_path(x)`，
-> 不动基座权重，量化底座上唯一正确的做法。
-> 对照实测（w4a8 / 768² / 6 步 / 1 条 / 队列独占）：
-> **无 LoRA 69.2s → 改权重 123.8s（×1.79）→ bypass 87.8s（×1.27）**。
-> bypass 比改权重快 29%，但**不是免费**（仍有前向钩子开销，×1.27 而非 ×1.0）。
-> `runH3Image` 返回的 `meta.loraMode` 会写 `bypass` / `patch` / `none`；
-> 只有 ComfyUI 缺该节点时才回退 `patch`，并在 `warnings` 里明确说明。
->
-> ⚠️ **不要把 Anima / Pony / Illustrious / Flux / Krea / MOSS 的 LoRA 放进 `h3img/`**：
-> 它们是 SD 系 `lora_unet_blocks_*_cross_attn_*` 命名，与 DiT 的
-> `diffusion_model.blocks.*.attn.qkv_proj` 无任何交集，加载会全部 missing key，等于不生效。
-
-### 2.5 立绘拆解
-
-```
-GET  /jiuzhang/api/breakdown/meta       → {defaultPrompt, maxChars, size}
-POST /jiuzhang/api/breakdown/preview    {prompt}                 → {prompt, chars, isDefault}
-POST /jiuzhang/api/breakdown/generate   {prompt, refImages[]}    → {id, refCount, chars}
-```
+### 3.4 立绘拆解（`/breakdown/*`）
 
 **只有一个可调项：`prompt`（整段提示词）。**
+不传 / 空串 → 用 `meta.defaultPrompt`（三视图角色设定卡）。后端**不拼装、不改写、不追加**，
+只 trim。超 4096 字符 → 400 `PROMPT_TOO_LONG`（不静默截断）。尺寸固定 2368×1776，没有 sizeId。
 
-- 不传 / 传空串 → 用 `meta.defaultPrompt`（三视图角色设定卡）
-- 用户改什么就提交什么：后端**不拼装、不改写、不追加**，只 `trim`
-- 超 `maxChars`（4096）→ **400 `PROMPT_TOO_LONG`**，不静默截断
-- 尺寸固定横版 2368×1776（4.2MP），没有 sizeId
+已作废的结构化字段（`character` / `outfit` / `parts` / `views` / `notes` / `level` / `sizeId`）：
+传了不报错，但不影响提示词，响应里回 `legacyFieldsIgnored`。
 
-> ⚠️ 档位（`level`）与结构化字段（`character` / `outfit` / `parts` / `views` /
-> `notes` / `expressions` / `sizeId`）**已作废**：传了不报错，但不影响提示词，
-> 响应里回 `legacyFieldsIgnored` 提醒调用方改直接写 `prompt`。
-
-**换装类改动必须有授权句**：默认提示词里写着「文字里明确写出的要求优先于参考图」，
-用自定义提示词时也要保留同义的一句，否则参考图会把你的改动盖回去。
-
-**页面**：`#/breakdown` 首屏直接落在「② 改提示词」，参考图在加载时自动选中
-第一张可用的大图。提示词面板右上角有五个按钮：
-
-| 按钮 | 作用 |
-|---|---|
-| 复制默认值 | 复制后端下发的默认提示词（不受输入框当前内容影响）|
-| 复制当前 | 复制输入框里这段（= 实际提交的那段）；框为空时回落默认值 |
-| 恢复默认 | 把输入框覆盖回默认提示词 |
-| 清空 | 清空输入框（提交时后端回落默认值）|
-| 校验 | 走 `preview`，回报提交用词字符数 |
-
-> ⚠️ 复制走的剪贴板在 Windows 上会把 `\n` 规范化为 `\r\n`（平台约定），
-> 复制结果的字节数会比页面显示的多，内容是一样的。
-
-### 2.6 提示词编译
-
-```
-GET  /jiuzhang/api/prompt/meta        9 种画风 + 5 种模式 + 硬约束
-POST /jiuzhang/api/prompt/compile     完整输入包 → 提示词
-POST /jiuzhang/api/prompt/from-shot   从镜头卡编译
-POST /jiuzhang/api/prompt/preview     只编译不落盘
-```
-
-### 2.7 剧本 / 漫画 / 模特工作台 —— **已整体删除**
-
-这三个模块（`/script/*`、`/comic/*`、`/mw/*` 共 30+ 条路由）在 2.0.0 已随页面一起删除：
-它们与「用南风 V15 出视频」这条主线无关，是早期对标别的软件时留下的。
-
-```
-GET  /jiuzhang/api/script/meta        ← 404（已删除）
-GET  /jiuzhang/api/comic/meta         ← 404（已删除）
-GET  /jiuzhang/api/mw/meta            ← 404（已删除）
-```
-
-> 如果你看到某份旧文档还在讲这三个模块，那是过期信息。
-> 剧本类的**替代**是 `studio_h3_workshop`（剧本 → 中性分段 + 资产提示词，只产文本）。
-
-### 2.8 续写批次（长视频的唯一正确做法）
-
-```
-GET  /jiuzhang/api/nanfeng/continuation/plan   {count?, durationSec?} → 分段方案
-POST /jiuzhang/api/nanfeng/continuation/batches/run   {projectId, shotIds[], preset, contextLength}
-GET  /jiuzhang/api/nanfeng/continuation/batches/:id
-POST /jiuzhang/api/nanfeng/continuation/batches/reset
-```
-
-`contextLength`（段间重叠帧）可选 `5 / 22 / 39 / 56`，默认 22（约 0.92 秒）。
-段 2 起会裁掉这 `context_length` 帧，所以交付时长比请求时长短。
-
-> ⚠️ **单镜头渲染 vs 续写批次**
->
-> 镜头卡挂着 `continuation` 预设时，直接在渲染页点「开始渲染」**不会**接上一段 ——
-> 插件会关掉续写并给出警告（没有上一段的 AV latent，接不上）。
-> 要真正衔接，必须用续写批次按顺序提交整组镜头。
-
-### 2.9 加速方案
-
-```
-GET  /jiuzhang/api/accel/plans        可用加速方案（dmad8 / dmad4 / none）
-```
-
-方案决定挂哪个蒸馏 LoRA、采样器、步数。默认 `dmad8`。
-
-> ⚠️ 开「H3潜空间放大二采」时，上游只读 `H3一采步数 + H3二采步数`，
-> `采样步数` 不生效。插件会按总步数自动拆分，并把拆分明细写进 `job.warnings`。
-
-
-### 2.10 Blender 预演（渲灰模参考视频）
-
-```
-GET  /jiuzhang/api/blender/health                       引擎状态（exe / 支持的通道 / 脚本是否存在）
-GET  /jiuzhang/api/blender/assets                       3D 资产库（glb/gltf/fbx/obj）
-POST /jiuzhang/api/blender/actions  {assetRel}          读某模型内置的动作名（会启一次 Blender）
-POST /jiuzhang/api/blender/render   {mode, projectId, shotId, frames?}
-                                                        渲一路（blockout / preview）
-POST /jiuzhang/api/blender/open     {blendRel?}         用桌面 Blender 打开 .blend
-```
-
-**两个通道**：
-
-| mode | 用途 | 实现 |
-|---|---|---|
-| `blockout` | **喂模型**：灰模参考视频 → Ref2VA 的 `<Video N>` | Workbench FLAT 平光、无阴影、多角色带身份色 |
-| `preview` | **给人看**，不进 H3 | Workbench MATERIAL 着色（彩色 + 阴影 + 描边） |
-
-> `render` 返回 `{ok, mode, dir, mp4, rel, frames, seconds, spec, blend, blendRel, blender, exitCode, missingAssets}`。
-> `rel` 可直接填进 `shot.refs.videos`。
-
-**性能**：124 帧 @864×480 — blockout **~21s** / preview **4s**（72 帧）。
-H3 单镜要 130–260s，Blender 占比 **< 10%**。
-
-
-### 2.11 画布 Agent
-
-```
-GET  /jiuzhang/api/canvas-agent/meta   17 工具 + 4 权限位
-POST /jiuzhang/api/canvas-agent/exec   {name, arguments, context, projectId}
-```
-
-**17 个工具**：
-读：`resolve` `list_refs` `project_overview` `list_nodes` `get_node` `read_document` `search_assets` `list_skills` `image_job_status` `skill_task_status`
-写：`update_node` `insert_image` `batch` `delete_node`
-花钱：`generate_image` `generate_video` `call_skill`
-
-**4 个权限位**：`canWriteCanvas`（默认 true）/ `canSpend`（默认 false）/ `canDelete`（默认 true）/ `autoRun`（默认 false）
-
-### 2.12 工具箱
-
-```
-GET  /jiuzhang/api/templates  |  POST /templates/upsert  |  /templates/delete
-GET  /jiuzhang/api/wardrobe   |  POST /wardrobe/upsert   |  /wardrobe/delete
-POST /jiuzhang/api/import/scan | /import/preview
-GET  /jiuzhang/api/resources/orphans | POST /resources/clean
-GET  /jiuzhang/api/motionshots | POST /motionshots/upsert | /motionshots/delete
-GET  /jiuzhang/api/logs | POST /logs
-```
-
-### 2.13 后处理
-
-```
-POST /jiuzhang/api/post/transcode | scale | crop | split | annotate
-POST /jiuzhang/api/post/extractFrame | extractAudio | qc
-GET  /jiuzhang/api/post/fonts
-```
+**换装类改动必须保留授权句**「文字里明确写出的要求优先于参考图」，否则参考图会把改动盖回去。
 
 ---
 
-## 3. 前端 12 页面对应关系
+## 4. 前端 14 条路由
 
-按「制作 / 资源 / 工具 / 系统」四组组织。
-权威来源是 `app-src/src/router.tsx` 的 `ROUTES`，`pnpm run check:routes` 会校验
-它 / `App.tsx` 的 NAV / `client.js` 的 entries 三方一致。
+权威来源 `app-src/src/router.tsx` 的 `ROUTES`；`client.js` 的 `entries` 与 `App.tsx` 的 `NAV`
+必须逐项一致（不一致会导致"点了 A 出现 B"）。
 
-| 组 | 路由 | 页面 | 主要 API |
+| 组 | 路由 | 页面 | 主要接口 |
 |---|---|---|---|
-| 制作 | `#/render` | **渲染（主入口）** 选角色卡 + 参考图/视频/音频 → 编译 → 渲染 → 页面内预览；含「续写批次」面板 | `/render/plan`、`/render/compile`、`/generate`、`/nanfeng/continuation/*` |
-| 制作 | `#/storyboard` | **智能分镜**：DSH 模型看图 + 写分镜提示词（零 API Key） | `/nanfeng/storyboard/*` |
-| 制作 | `#/workshop` | **H3 工坊**：一集剧本 → 中性分段 + 资产提示词（**只产文本，不出图**） | `/h3/workshop/*`、`/h3/film/*` |
+| 制作 | `#/render` | **渲染（主入口）** 选角色卡 + 参考图/视频/音频 → 编译 → 渲染 → 页内预览；含续写批次面板 | `/render/plan` `/render/compile` `/generate` `/nanfeng/continuation/*` |
+| 制作 | `#/replace` | **视频换人**：源视频 + 目标角色参考图 + 提示词 | `/replace/*` |
+| 制作 | `#/storyboard` | **智能分镜**：DSH 模型看图 + 写分镜提示词 | `/nanfeng/storyboard/*` |
+| 制作 | `#/workshop` | **H3 工坊**：剧本 → 中性分段 + 资产提示词（只产文本） | `/h3/workshop/*` `/h3/film/*` |
 | 资源 | `#/assets` | 素材库（15 类） | `/assets*` |
 | 资源 | `#/vault` | **角色卡仓库** | `/vault/*` |
-| 资源 | `#/projects` | 项目（含「本项目角色卡」） | `/projects*`、`/projects/:id/cards` |
-| 工具 | `#/breakdown` | **立绘拆解**（立绘 → 多视角设定卡图） | `/breakdown/*` |
+| 资源 | `#/projects` | 项目（含"本项目角色卡"） | `/projects*` `/projects/:id/cards` |
+| 工具 | `#/edit` | **视频剪辑**：裁切 / 拼接 / 音轨 / 出片 | `/edit/*` |
+| 工具 | `#/breakdown` | **立绘拆解**（立绘 → 多视角设定卡） | `/breakdown/*` |
 | 工具 | `#/previz` | **3D 预演**：Blender 渲灰模参考视频 | `/blender/*` |
-| 工具 | `#/canvas` | 画布（26 节点 + AI 助手） | `/projects/:id`、`/canvas-agent/*` |
-| 工具 | `#/image` | 图像生成（H3-Image） | `/image/*` |
+| 工具 | `#/canvas` | 画布（26 节点 + AI 助手） | `/projects/:id` `/canvas-agent/*` |
+| 工具 | `#/image` | **图像生成**（H3-Image，含局部重绘 tab） | `/image/*` |
 | 系统 | `#/jobs` | 任务中心 | `/jobs*` |
-| 系统 | `#/settings` | 设置 8 区 +「工具」tab（模板 / 服化道 / 清理 / 日志） | `/config`、`/templates`、`/wardrobe` 等 |
+| 系统 | `#/settings` | 设置 8 区 +「工具」tab（模板 / 服化道 / 清理 / 日志） | `/config` `/templates` `/wardrobe` 等 |
 
-**旧路由自动重定向**（书签不会白屏）：`h3→render`、`prompt→render`、`director→previz`、`toolbox→settings`。
+**旧路由重定向**（书签不白屏）：`h3 → render`、`prompt → render`、`director → previz`、
+`toolbox → settings`。已删除且不重定向：`#/script` `#/comic` `#/mw`（走未知路由告警并回退 render）。
 
-> 已删除且**不再重定向**：`#/script`、`#/comic`、`#/mw`（点进去会走未知路由告警并回退到渲染页）。
+### 页面职责边界（容易搞混的四组）
 
-### 页面职责的边界（容易搞混的四组）
-
-| 名字相似 | 实际做什么 | 不做什么 |
+| 页面 | 做什么 | 不做什么 |
 |---|---|---|
-| 「H3 工坊」(`#/workshop`) | 一集剧本 → 中性分段 + 抽角色/场景/道具清单 | **不出任何图**，只产文本 |
-| 「智能分镜」(`#/storyboard`) | 给参考图 → LLM 看图 + 写分镜提示词 | 不生成视频 |
-| 「立绘拆解」(`#/breakdown`) | 立绘 → 多视角设定卡图（走 H3-Image） | 不做剧本分析 |
-| 「角色卡」(`#/vault`) | 存设定卡图 + 文字设定，供渲染时引用 | 不生成图 |
-
-
-
+| H3 工坊 `#/workshop` | 一集剧本 → 中性分段 + 抽角色/场景/道具清单 | **不出任何图** |
+| 智能分镜 `#/storyboard` | 给参考图 → LLM 看图 + 写分镜提示词 | 不生成视频 |
+| 立绘拆解 `#/breakdown` | 立绘 → 多视角设定卡图（走 H3-Image） | 不做剧本分析 |
+| 角色卡 `#/vault` | 存设定卡图 + 文字设定，渲染时引用 | 不生成图 |
 
 ---
 
-## 4. 典型调用链
+## 5. 典型调用链
 
-### 4.1 从头做一条视频（推荐路径：走角色卡 + 渲染页那套）
-
-```
-1) GET  /vault/cards                                  → 拿已有角色卡 id
-2) POST /render/plan  {cardIds, videos:[{rel}], audios:[{rel}], refImageSize}
-                                                      → ★ 先看「这一镜到底传什么」
-                                                        返回 images[{index,source,cardName}]、
-                                                        videos[{index,audioIndex}]、warnings、stats
-3) POST /render/compile {cardIds, ..., shots:[...]}    → 拿编译好的提示词（含 <Picture N>）
-4) studio_project {action:'create', patch:{name}}      → 得 projectId
-5) POST /projects/:id/cards {cardIds}                  → 项目级绑卡（可选，镜头级也行）
-6) studio_shot {action:'create', projectId, shot:{title, durationSec, mode:'ref2va',
-                  cardIds, refs:{images:[], videos:[{rel,hasAudio}], audios:[]},
-                  refImageSize:'match', sound, music, description, camera}}
-7) studio_generate {projectId, shotId, backend:'h3-local'}   → 得 jobId
-8) studio_jobs {action:'get', jobId}                         → 轮询到 completed
-9) 产物 data/outputs/<jobId>.mp4（**带音轨**），且已自动归档进素材库
-```
-
-> **务必先调 `/render/plan`**。编号（`<Picture N>` / `<Video K>` / `<Audio J>`）
-> 由后端统一算，自己推极易错 —— 尤其 `<Audio>` 是**全局累加**，
-> 视频自带的音轨会先占号。
-
-### 4.2 出一张图
+### 5.1 从头做一条视频（推荐：角色卡 + 渲染页那套）
 
 ```
-1) studio_image {action:'meta'}                                     → 确认模型就绪 + 看真实生效参数
-2) studio_image {action:'generate', prompt:'...', sizeId:'sq-2048'}  → 得 jobId
-3) studio_jobs  {action:'list'}                                     → 查状态
+1) GET  /vault/cards                                    → 拿已有角色卡 id
+2) POST /render/plan {cardIds, videos:[{rel}], audios:[{rel}], refImageSize}
+     → ★ 先看"这一镜到底传什么"：images[{index,source,cardName}]、videos[{index,audioIndex}]、warnings
+3) POST /render/compile {cardIds, ..., shots:[...]}     → 编译好的提示词（含 <Picture N>）
+4) studio_project {action:'create', patch:{name}}       → 得 projectId
+5) POST /projects/:id/cards {cardIds}                   → 项目级绑卡（可选）
+6) studio_shot {action:'create', projectId, shot:{
+     title, durationSec, mode:'ref2va',
+     cardIds,
+     refs:{ images:[], videos:[{rel, hasAudio}], audios:[] },
+     refImageSize:'match', sound, music, description, camera }}
+7) studio_generate {projectId, shotId, backend:'h3-nanfeng'}   → 得 jobId
+8) studio_jobs {action:'get', jobId}                           → 轮询到 completed
+9) 产物 data/outputs/<jobId>.mp4（带音轨），已自动归档进素材库
 ```
 
-**改图（编辑模式）** —— 参考图第 1 张就是"被编辑的原图"：
+> **务必先调 `/render/plan`**。编号（`<Picture N>` / `<Video K>` / `<Audio J>`）由后端统一算，
+> 自己推极易错 —— `<Audio>` 是**全局累加**（视频自带的音轨先占号）。规则见
+> `jiuzhang-studio-prompt`。
+
+### 5.2 出一张图
 
 ```
-1) studio_image {action:'lora'}                                     → 看装了哪些图像 LoRA（可选）
+1) studio_image {action:'meta'}                                    → 确认模型就绪 + 看真实生效参数
+2) studio_image {action:'generate', prompt:'...', sizeId:'sq-2048'} → 得 jobId
+3) studio_jobs  {action:'list'}                                    → 查状态
+```
+
+**改图（编辑模式）**——第 1 张参考图就是"被编辑的原图"：
+
+```
+1) studio_image {action:'lora'}          → 看装了哪些图像 LoRA（可选）
 2) studio_image {
      action:'generate',
      prompt:'Edit <Picture 1>: change the dress to red silk, keep the face and pose unchanged.',
-     refImages:['assets/立绘.png', 'assets/红色礼服参考.png'],        ← 第 1 张决定画布与编辑目标
-     sizeId:'auto',                                                  ← auto 继承第 1 张的尺寸
+     refImages:['assets/立绘.png','assets/红色礼服参考.png'],   ← 第 1 张决定画布与编辑目标
+     sizeId:'auto',                                            ← auto 继承第 1 张尺寸
      loras:[{name:'h3img/30_style/xxx.safetensors', strength:0.8}],
-     count:2,                                                        ← 同 prompt 两个种子（拆成 2 个任务）
-   }                                                                 → 得 jobId + jobIds[]
-3) GET /image/progress?ids=<jobIds 逗号连接>                          → 排队 / 生成中 / 取回产物
+     count:2                                                   ← 同 prompt 两个种子（拆 2 个任务）
+   }                                        → 得 jobId + jobIds[]
+3) GET /image/progress?ids=<jobIds 逗号连接>  → 排队 / 生成中 / 取回产物
 ```
 
-> 编辑模式下**不要用文字复述图里的长相与服装** —— 模型看得见；只写"要改什么"。
-> 想改的范围越大，越要把"保持不变"的部分写清楚（`keep the face and pose unchanged`）。
+> 编辑模式下**不要用文字复述图里的长相与服装** —— 模型看得见，只写"要改什么；什么保持不变"。
 
-### 4.3 做角色卡（立绘 → 拆解 → 入库）
+### 5.3 局部重绘
 
 ```
-1) GET  /assets                                                     → 选立绘（拿 rel）
-2) GET  /breakdown/meta                                             → 取默认提示词
-   （要换装/加视角：在默认提示词上改，再把整段作为 prompt 提交）
-3) POST /breakdown/preview  {prompt}                                → 先看提交用词
-4) POST /breakdown/generate {prompt, refImages:[rel]}                → 出设定卡图
-5) POST /assets/archive {items:[{rel, type:'character_sheet'}]}      → 设定卡入库
+1) GET  /image/inpaint/meta                           → 确认 cropAvailable 与强度档
+2) POST /image/inpaint {
+     prompt:'a translucent blue crystal embedded in the skirt folds',
+     source:'assets/立绘.png',
+     mask:'assets/mask.png',                          ← 白=重绘区，尺寸与源图一致
+     mode:'crop',
+     strength:'strong',
+     crop:{resolutionId:'auto'}                       ← 不给 bbox 时后端从 mask 实测
+   }                                                  → {jobId, cropResolution, cropSampleEdge, warnings}
+3) GET  /image/progress?ids=<jobId>
+```
+
+### 5.4 做角色卡（立绘 → 拆解 → 入库）
+
+```
+1) GET  /assets                                                → 选立绘（拿 rel）
+2) GET  /breakdown/meta                                        → 取默认提示词
+3) POST /breakdown/preview {prompt}                            → 先看提交用词
+4) POST /breakdown/generate {prompt, refImages:[rel]}          → 出设定卡图
+5) POST /assets/archive {items:[{rel, type:'character_sheet'}]} → 入库
 6) POST /vault/cards {name, traits, images:{sheet:[rel], origin:[rel]},
-                      refPolicy:{mode:'sheet-first', maxImages:1}}   → 建卡
+                      refPolicy:{mode:'sheet-first', maxImages:1}}  → 建卡
 ```
 
-**提示词即唯一输入**：不传 `prompt` 就是用默认三视图设定卡。
-想让角色换一套衣服，直接改提示词里对应的服装段落 —— 但必须保留
-「文字里明确写出的要求优先于参考图」这条授权句，否则参考图会盖掉改动。
-
-### 4.4 长视频：续写批次（替代已删除的剧本/漫画流水线）
-
-早期有「剧本 → 漫画」的产线，那三个模块（script / comic / mw）已整体删除。
-现在要把一段戏做成超过单镜时长的连续视频，走**潜空间续写批次**：
+### 5.5 长视频：续写批次
 
 ```
-1) studio_shot  写镜头卡（每段一张，durationSec 建议 5.17 / 5.88）
-2) POST /nanfeng/continuation/plan {count:3, durationSec:10}
-                                       → 先看分段方案（每段多少帧、交付多长）
-3) POST /nanfeng/continuation/batches/run
-   {projectId, shotIds:['s1','s2','s3'], preset:'continuation', contextLength:'22'}
-                                       → 后台串行跑完整组
-4) GET  /nanfeng/continuation/batches/:id    → 轮询进度
-5) POST /h3/film/render {inputs:['outputs/a.mp4','outputs/b.mp4']}  → 拼成一条
+1) studio_shot 写镜头卡（每段一张）
+2) POST /nanfeng/continuation/plan {targetSeconds:30, segments:6, contextLength:'22'}
+                                      → 先看分段方案（每段帧数、交付多长）
+3) POST /nanfeng/continuation/batches {projectId, shotIds:['s1','s2','s3'],
+                                       preset:'continuation', contextLength:'22'}  → 201
+4) POST /nanfeng/continuation/batches/run {batchId, resetFailed?}   → 202，后台串行
+5) GET  /nanfeng/continuation/batches/:id                            → 轮询进度（或订 SSE batch-progress）
+6) POST /h3/film/render {inputs:['outputs/a.mp4','outputs/b.mp4']}   → 拼成一条
 ```
 
-**为什么必须走批次**：段与段之间靠 AV latent 接续（`clip_1`、`clip_2`…）。
-单镜头渲染拿不到上一段的 latent，接不上 —— 插件会关掉续写并警告。
+**为什么必须走批次**：段间靠 AV latent（`clip_1`、`clip_2`…）接续，单镜头渲染拿不到上一段的
+latent，接不上 —— 插件会关掉续写并给警告。**段 1 也必须带续写任务**（Load 0 / Save 1），
+否则 latent 不落盘、段 2 必然失败。失败即停（后续段依赖前段）。
 
-> 各段编码参数需一致才能无损 concat；续写段本身已经是同一套编码。
+各段编码参数需一致才能无损 concat；续写段本身已经是同一套编码。
 
-
-### 4.5 Blender 白模 → 参考视频 → 成片（★ 推荐路径）
-
-**这是当前最可靠的做法**：用 Blender 渲一段灰模视频当参考，比纯提示词稳定得多。
+### 5.6 Blender 白模 → 参考视频 → 成片（★ 最可靠的路径）
 
 ```
 # ① 确认引擎
-studio_blender {action:"health"}
+studio_blender {action:'health'}
 
-# ② 写镜头卡（走位/道具/机位）—— 没有 actors 只能用默认两人占位
-studio_shot {action:"save", projectId, shot:{
-  title:"镜1", durationSec:3, ratio:"16:9", mode:"ref2va",
+# ② 写镜头卡（走位 / 道具 / 机位）
+studio_shot {action:'save', projectId, shot:{
+  title:'镜1', durationSec:3, ratio:'16:9', mode:'ref2va',
   actors:[
-    {name:"初华", heightM:1.68, color:"#ffb347", position:[-1.1,0,0.85],
-     action:"walk", startFrame:0, durationFrames:72,
-     from:[-1.1,0,0.85], to:[-0.22,0,0.30]},
-    {name:"祥子", heightM:1.66, color:"#a06cff", position:[0.9,0,0.85],
-     action:"walk", startFrame:0, durationFrames:72,
-     from:[0.9,0,0.85], to:[0.20,0,0.30]}
+    {name:'初华', heightM:1.68, color:'#ffb347', position:[-1.1,0,0.85],
+     action:'walk', startFrame:0, durationFrames:72, from:[-1.1,0,0.85], to:[-0.22,0,0.30]},
+    {name:'祥子', heightM:1.66, color:'#a06cff', position:[0.9,0,0.85],
+     action:'walk', startFrame:0, durationFrames:72, from:[0.9,0,0.85], to:[0.20,0,0.30]}
   ],
-  props:[{kind:"box", name:"bench", position:[0,0.28,0.6], scale:[1.5,0.55,0.5]}],
+  props:[{kind:'box', name:'bench', position:[0,0.28,0.6], scale:[1.5,0.55,0.5]}],
   camera3d:{position:[0,1.55,-4.2], target:[0,0.95,0.4], fov:45},
-  cardIds:["card_A","card_B"]
+  cardIds:['card_A','card_B']
 }}
 
-# ③ 先渲预览确认动画（4 秒，人眼看）
-studio_blender {action:"render", mode:"preview", projectId, shotId}
+# ③ 先渲预览确认走位（人眼看，4 秒级）
+studio_blender {action:'render', mode:'preview', projectId, shotId}
 
-# ④ 渲灰模参考视频（约 21 秒）
-studio_blender {action:"render", mode:"blockout", projectId, shotId}
-#    → 返回 {rel:"previz/blender/xxx/blockout.mp4"}
+# ④ 渲灰模参考视频（~21 秒）
+studio_blender {action:'render', mode:'blockout', projectId, shotId, timeoutMs:600000}
+#    → {rel:'previz/blender/<jobId>/blockout.mp4'}
 
-# ⑤ 把 rel 写进镜头卡的参考视频，再生成
-studio_shot {action:"save", projectId, shot:{  id: shotId,
-  refs:{ videos:[{rel:"previz/blender/xxx/blockout.mp4", name:"blockout.mp4"}] }
-}}
-studio_generate {projectId, shotId, backend:"h3-local", seed:2024}
+# ⑤ 写进镜头卡再生成
+studio_shot {action:'save', projectId, shot:{ id:shotId,
+  refs:{ videos:[{rel:'previz/blender/<jobId>/blockout.mp4', name:'blockout.mp4'}] }}}
+studio_generate {projectId, shotId, backend:'h3-nanfeng', seed:2024}
 ```
 
-#### 分段串联（长片拆段，每段尾帧接下一段首帧）
+**提示词必须描述画面里真实存在的东西**（人数、主要道具、机位方向），否则前几秒会被提示词
+抢走。首尾帧：**南风 V15** 直接占「图片1 / 图片2」，没有 AddGuide 节点（I2VA 恰好 1 张图、
+FL2VA 恰好 2 张图，由插件在提交前填槽）；`h3-local` 旧路径才有 AddGuide。
+
+### 5.7 视频换人
 
 ```
-# 段1 完成后，抽末帧：
-ffmpeg -sseof -0.1 -i shot1.mp4 -frames:v 1 data/assets/chain_s1_last.png
-
-# 段2：加 previz.firstFramePath 指向它
-studio_shot {action:"save", projectId, shot:{
-  title:"镜2", durationSec:3.7, mode:"ref2va",
-  actors:[...],  # 起点必须 == 段1 的终点，否则瞬移
-  refs:{ videos:[{rel:"...段2的blockout.mp4", name:"blockout.mp4"}] },
-  previz:{firstFramePath:"assets/chain_s1_last.png"}
-}}
-studio_generate {...}
-
-# 最后拼接
-ffmpeg -f concat -safe 0 -i list.txt -c copy final.mp4
+1) GET  /replace/meta                                            → 取默认值 / 上限 / 重叠帧档
+2) POST /replace/prompt-template {refCount:1}                    → 拿模板（<Picture 1> = 目标角色）
+3) POST /replace/preview-prompt {roles[], shotBeats, extraNote}  → 预览
+4) POST /replace/compile-prompt {prompt}                         → 三层降级编译（可选）
+5) POST /replace/tasks {sourceRel, refImages:[rel], prompt, continuation:true,
+                        accelPlan:'dmad8', contextLength:'22'}    → 建任务（不启动）
+6) POST /replace/run/<id>                                        → 启动，进度走 SSE replace-progress
+7) GET  /replace/tasks/<id>                                      → 轮询（阶段：queued/cutting/running/joining/done）
 ```
 
-> **南风 V15 上这条结论不成立**：V15 的首尾帧就是「图片1/图片2」本身，
-> 没有 AddGuide 节点。I2VA 必须恰好 1 张图、FL2VA 必须恰好 2 张图，
-> 由插件在提交前自动把 previz 首尾帧填进对应槽位（见 generator.js 的 frameSlotOverrides）。h3-local 旧路径仍有 AddGuide，那是另一条链路。
-
-> **提示词必须描述画面里真实存在的东西**（人数、主要道具、机位方向），
-> 否则前几秒会被提示词抢走。实测见 `docs/probes/h3-controlnet-2026-11-14/REPORT.md`。
-
-
-### 4.6 成片合成
-
-```
-1) POST /h3/film/render {inputs:['outputs/a.mp4','outputs/b.mp4'],
-                          output:'film.mp4', subtitleFile?}
-2) GET  /h3/film/status                              → 查进度
-```
-
-> `inputs` 里的相对路径按 `dataDir` 解析（不是进程 cwd）。
-> 各段的编码参数需一致才能无损 concat。
+> 源视频**必须先 `POST /post/stripAudio`**：自带音轨会被当作 `<Audio j>` 送进条件，
+> 干扰换人结果。
 
 ---
 
-## 5. 任务生命周期
+## 6. 任务生命周期
 
 ```
 queued → running → completed
                  ↘ failed
                  ↘ cancelled（用户取消）
-                 ↘ interrupted（重启后恢复时检测到）
+                 ↘ interrupted（插件重启，可重试）
 ```
 
-**轮询建议**：图像 5 秒一次（或直接轮 `/image/progress?ids=` 拿排队/生成/取回三态），视频 10 秒一次。插件内部最长等 40 分钟（`comfyTimeoutMin` 可调）。
+`TERMINAL = {completed, failed, cancelled, interrupted}`。`jobs.json` 只保留最近 **500** 条终态
+且 **30 天**内的记录；**未终态的任务永不裁剪**。
 
-**任务产物**：
-- 视频：`data/outputs/<jobId>.mp4`
-- 图像：`data/outputs/<jobId>.png`
-- 画布产物：写回节点（data/canvas/）
+**轮询建议**：图像 5 秒（或直接轮 `/image/progress?ids=`），视频 10 秒。后端单任务等待上限
+由 `comfyTimeoutMin`（默认 120 分钟）控制。
 
-取文件：`GET /jiuzhang/api/file?path=outputs/<jobId>.mp4`（支持 Range）
+**产物**：视频 `data/outputs/<jobId>.mp4`、图像 `data/outputs/<jobId>.png`。
+取文件 `GET /file?path=outputs/<jobId>.mp4`（支持 Range）。
 
 ---
 
-## 6. 数据存储
+## 7. 数据目录
 
 ```
 data/
-├── config.json          配置（运行期写入；绝对路径会被校验，换机自动回退）
-├── projects.json        项目列表
-├── assets-index.json    素材索引
-├── jobs.json            任务历史（终态自动裁剪：最近 500 条 / 30 天）
-├── workflows/           ★ 工作流模板（h3.json / h3-image.json，随插件分发）
-├── assets/              上传的素材文件
-├── outputs/             生成产物
-├── shots/<projectId>/   镜头卡
-├── vault/               角色卡仓库
-├── previz/              Blender 预演渲染产物
-├── previz-shots/        预演截图
-├── extras/              模板/服化道/日志
-├── runs/                续写批次状态
-└── post/                后处理产物
+├─ config.json           配置（只写 17 个白名单键；dataDir 的"不存在则回落"只在内存里）
+├─ workflows/            ★ 工作流模板 h3.json / h3-image.json（随插件分发，不跟随 dataDir）
+├─ projects.json         项目列表
+├─ projects/<id>/cards.json   项目绑定的角色卡
+├─ shots/<id>/shots.json 镜头卡
+├─ assets-index.json     素材索引
+├─ assets/               上传素材（含 3D 模型，同时被 /jiuzhang/assets 静态服务）
+├─ outputs/              生成产物
+├─ vault/cards.json      角色卡仓库
+├─ previz/blender/<run>/ Blender 预演帧序列 + mp4 + .blend
+├─ post/                 后处理产物
+├─ edit/ + edit/outputs/ 剪辑工程与成片
+├─ replace/              换人任务与切段
+├─ runs/                 续写批次状态
+├─ extras/               prompt-templates.json / wardrobe.json / motion-shots.json / logs.json
+├─ tmp-inline/           dataURL 落盘的临时图（带 TTL 回收）
+└─ jobs.json             任务历史
 ```
 
-> 已删除的目录：`comic/`、`mw/`、`script/`（对应模块在 2.0.0 移除）。
-
+> `/file` 白名单里的 `comic/` `script/` `previz-shots/` `inputs/` 只用于兼容历史数据，
+> 引擎不再写入这几个目录。
 
 ---
 
-## 7. 常见错误码
+## 8. 错误码
+
+`host/api/errors.js` 有 **141 个错误码 → HTTP 状态**映射。解析顺序：
+`err.status` → `err.code` 查表 → message 的 `CODE:` 前缀查表 → `*_REQUIRED` 文案兜底 → 500。
+
+| 状态 | 数量 | 典型码 |
+|---|---|---|
+| 400 | 71 | `INVALID_ID` `INPUT_REQUIRED` `PROMPT_TOO_LONG` `UNKNOWN_BACKEND` `MASK_REQUIRED` `INPAINT_BAD_CROP` `NANFENG_CONSTRAINT` |
+| 403 | 6 | `FORBIDDEN_PATH` `FORBIDDEN_HOST` `FORBIDDEN_ORIGIN` `WRITE_TOKEN_REQUIRED` `PERMISSION_DENIED` |
+| 404 | 24 | `SHOT_NOT_FOUND` `JOB_NOT_FOUND` `PROJECT_NOT_FOUND` `WORKFLOW_MISSING` `CARD_NOT_FOUND` |
+| 409 | 6 | `CANCELLED` `REPLACE_ALREADY_RUNNING` `IMAGE_MODEL_MISSING` `IMAGE_VRAM_LOW` |
+| 413 / 415 | 4 | `BODY_TOO_LARGE` `FILE_TOO_LARGE` `UNSUPPORTED_FILE_TYPE` |
+| 499 | 1 | `LLM_ABORTED` |
+| 500 | 9 | `CORRUPT_JSON` `RUNTIME_NOT_READY` `FFMPEG_MISSING` `INPAINT_NODES_MISSING` `WORKFLOW_SHAPE_CHANGED` |
+| 502 | 12 | `COMFY_*` `BLENDER_NO_OUTPUT` `IMAGE_STAGE_INCOMPLETE` `PROBE_FAILED` |
+| 503 | 6 | `LLM_UNAVAILABLE` `GENERATE_UNAVAILABLE` `SKILL_UNAVAILABLE` |
+| 504 | 2 | `COMFY_TIMEOUT` `BLENDER_TIMEOUT` |
+
+常见处置：
 
 | 错误 | 含义 | 处理 |
 |---|---|---|
-| `SHOT_NOT_FOUND` | 镜头不存在 | 先 list 确认 id |
+| `UNKNOWN_ROUTE` | 路由不存在（含已删除的 script/comic/mw） | 查 §2 表 |
 | `WORKFLOW_MISSING` | 缺 `data/workflows/*.json` | 从仓库恢复 |
 | `IMAGE_MODEL_MISSING` | 图像模型没下载 | 见 setup skill |
-| `COMFY_HTTP_500` | 工作流被拒（多为非数字 key） | 检查工作流 JSON |
-| `COMFY_EXEC_ERROR @节点` | ComfyUI 执行报错 | 看错误里的节点名与消息 |
-| `PERMISSION_DENIED` | 画布 Agent 权限不足 | 提升对应权限位 |
+| `INPAINT_NODES_MISSING` | 没部署 crop&stitch 节点 | 跑 `vendor/inpaint-nodes/deploy-vendor.ps1` |
+| `MASK_SIZE_MISMATCH` | mask 与源图尺寸不符 | 重新导出同尺寸 mask |
+| `PERMISSION_DENIED` | 画布 Agent 权限不足 | 提对应权限位 |
 | `CONFIRM_REQUIRED` | 危险操作需确认 | 传 `confirm: true` |
-| `BAD_RESPONSE` | 页面缓存了旧端口 | `Ctrl+Shift+R` |
-| `GENERATE_TIMEOUT` | 超过 40 分钟 | 查 ComfyUI 队列是否卡住 |
 
 ---
 
-## 8. 硬约束速查
+## 9. 硬约束速查
 
 | 约束 | 值 |
 |---|---|
-| 视频分辨率 | 32 倍数 + 官方档位 |
-| 视频帧数 | 17k+5（124/243/362） |
-| H3 guidance | 1.0 |
-| 视频步数 | DMAD 学生 4 或 8 |
-| 图像步数 | 固定 6（PDD 头网格决定；`cfg.imageSteps` 仅排障用） |
+| 视频帧数 | `17k+5`（124 / 243 / 362），由 `h3Length()` 统一算 |
+| 视频时长 | 5–15 秒（>14 警告）；官方范围 4–15 |
+| 视频分辨率 | 32 倍数 + 官方档位（`P12-draft` 864×480 … `P768-quality` 1344×768） |
+| H3 guidance | 固定 1.0（压制词只走 `SUPPRESSION_GUARDS` 授权位置） |
+| 视频步数 | DMAD 学生 4 或 8（`dmad4` / `dmad8`）；`none` = 原模型 50 步 |
+| 图像步数 | 6 步锁定（PDD 头网格），`cfg.imageSteps` 仅作用于普通出图 |
 | 图像 guidance | 固定 1.0 |
 | 图像负面提示 | **不支持**（`BasicGuider` 无 negative 分支） |
-| 图像尺寸 | 宽高 **32 的倍数**（非 32 会被补边，产出尺寸与请求不符） |
-| 图像批量 | 1–4 张，**拆成 N 个独立任务**（DiT 拒绝 batch>1） |
-| 参考图 | Ref2VA ≤9 / H3-Image ≤16 |
-| 参考文件总数 | ≤12 |
-| 12GB 显存 | **不能并行**，串行执行 |
-| 提示词上限 | 7000 字符（H3）/ 4096 字符（H3-Image，超长 400 拒绝不截断） |
+| 图像尺寸 | 宽高 **32 的倍数** |
+| 图像批量 | 1–4，**拆成 N 个独立任务** |
+| 局部重绘 denoise | **锁定 1.0**，强弱用 `strength`（SplitSigmas 切片） |
+| 参考图 | Ref2VA ≤9 / H3-Image ≤16 / 换人 ≤9 |
+| 参考文件总数 | ≤12（视频 ≤3、音频 ≤3，单段 2–15 秒，总量 ≤15 秒） |
+| 提示词上限 | 7000 字符（官方）/ 6000（本地 lint 阈值）/ 4096（H3-Image，超长 400 不截断） |
 | 图像 LoRA | ≤6 条，只在 `models/loras/h3img/` 下生效 |
-| 控制模型目录 | `models/model_patches/`（不是 `controlnet/`） |
-| Ref2VA 首尾帧 | **南风 V15**：直接占 图片1/图片2（无 AddGuide）；`h3-local` 旧路径才走 AddGuide |
+| 12GB 显存 | **不能并行**，`maxConcurrentLocal` 默认 1 |
 | 镜头卡坐标系 | (x, y=高度, z=深度)；Blender 是 Z-up |

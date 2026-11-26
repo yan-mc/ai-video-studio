@@ -37,17 +37,22 @@ export const STYLE_PRESETS = Object.freeze([
     name: '新海诚风',
     category: '2D手绘柔光',
     changesAppearance: false,
-    en: 'Studio Ghibli / Makoto Shinkai inspired cinematic anime style. Soft atmospheric lighting, bokeh depth of field, warm natural sunlight, gentle pastel gradients. Soft cel-shaded character rendering with gentle shadows. Render characters as 2D anime, NOT 3D. NO photorealistic textures. NO subtitles, NO on-screen text.',
-    ban: '硬阴影、粗黑轮廓、高对比、块状阴影、赛璐珞质感、胶片颗粒',
-    best: '治愈系、都市夜景、梦幻场景',
+    // 新海诚的辨识点是「高饱和天空 + 强烈光晕 + 细密云层 + 镜头光斑」，
+    // 与吉卜力的「哑光水彩、低饱和、手绘颗粒」是两种不同的东西。
+    // 这两条 en 曾经逐字节相同（选哪个都一样），这里按各自特征重写。
+    en: 'Makoto Shinkai inspired cinematic anime style. Vast hyper-detailed skies with towering cumulus clouds, saturated twilight gradients of magenta and cyan, intense lens flare and bloom around light sources, glistening specular highlights on wet surfaces and glass. Photographic depth of field with radiant bokeh. Meticulous background detail — power lines, train crossings, city lights. Render characters as 2D anime, NOT 3D. NO photorealistic skin textures. NO subtitles, NO on-screen text.',
+    ban: '哑光低饱和、手绘纸纹颗粒、水彩晕染、粗黑轮廓、块状阴影',
+    best: '都市夜景、天空特写、青春情感、雨后光影',
   },
   {
     id: 'ghibli',
     name: '吉卜力风',
     category: '2D手绘柔光',
     changesAppearance: false,
-    en: 'Studio Ghibli / Makoto Shinkai inspired cinematic anime style. Soft atmospheric lighting, bokeh depth of field, warm natural sunlight, gentle pastel gradients. Soft cel-shaded character rendering with gentle shadows. Render characters as 2D anime, NOT 3D. NO photorealistic textures. NO subtitles, NO on-screen text.',
-    ban: '硬阴影、高对比、冷色过蓝、过曝、写实质感、数码感',
+    // 吉卜力的辨识点是「哑光水彩、自然色、圆润造型、手绘笔触」，
+    // 刻意**不要**新海诚那种高饱和天空与镜头光斑。
+    en: 'Studio Ghibli inspired hand-painted animation style. Matte watercolor backgrounds with soft natural earth tones, gentle hand-painted brushwork and subtle paper grain. Rounded, simple character shapes with clean thin outlines and flat soft shading. Warm, nostalgic, unhurried atmosphere. Lush greenery and open skies rendered in muted greens and pale blues. Render characters as 2D anime, NOT 3D. NO glossy highlights. NO lens flare. NO high-saturation gradients. NO subtitles, NO on-screen text.',
+    ban: '高饱和天空、镜头光斑、数字锐利感、写实质感、重度 Bloom',
     best: '田园风光、异世界、奇幻冒险、温馨日常',
   },
   {

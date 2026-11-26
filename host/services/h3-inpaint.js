@@ -289,8 +289,37 @@ export function resolveCropResolution(req, info = {}, cfg = loadConfig()) {
     ? { w: info.bboxW, h: info.bboxH }
     : estimateBboxFromStroke(info.strokePixels, info.maskDims);
 
+  // strokePixels 必须无条件落到 crop 上：羽化带宽要按笔画宽度封顶
+  // （见 inpaint-params 的 featherFor）。只有 auto 档才用它算分辨率，
+  // 但**任何档位**都要它算羽化 —— 漏写会让手动档退回固定半径糊死细线。
+  if (Number.isFinite(info.strokePixels) && info.strokePixels > 0) {
+    req.crop.strokePixels = Math.floor(info.strokePixels);
+  }
+
+  req.crop.bbox = bbox;
+  req.crop.bboxEstimated = !hasBbox;
+
+  /**
+   * auto 档的分辨率必须按**含 padding 的实际裁剪块**算，不能只看 bbox。
+   *
+   * 决定"选区占多少采样像素"的是裁剪块 —— 块被整块缩放到 base_res，
+   * 所以缩放比 = base_res / 块长边。若 base_res 只跟 bbox 走，padding 越大
+   * 块越大、缩放比越小，同样的选区就被稀释得越厉害。实测 33×33 选区：
+   *   padding=0   → 块 256，选区占画布 12.9%
+   *   padding=256 → 块 768，选区占画布 4.3%
+   * 后者等于把本来就小的选区再缩小 3 倍，出图几乎看不出改动。
+   *
+   * 所以 auto 按块长边算（见下方 effectiveEdge），而**覆盖范围**仍然只由 bbox
+   * 决定 —— padding 只增加上下文，不改变"哪些像素会被重绘"。
+   */
+  const blockForRes = estimateCropBlock(bbox, {
+    minCrop: req.crop.minCrop,
+    padding: req.crop.padding,
+    maskDims: info.maskDims,
+  });
+
   if (req.crop.baseResolution == null) {
-    const res = autoCropResolution(bbox, {
+    const res = autoCropResolution(blockForRes, {
       min: req.crop.minCrop,
       max: req.crop.maxCrop,
       maxMP: capMP,
@@ -308,17 +337,9 @@ export function resolveCropResolution(req, info = {}, cfg = loadConfig()) {
     req.crop.resolvedByAuto = true;
   }
 
-  req.crop.bbox = bbox;
-  req.crop.bboxEstimated = !hasBbox;
-  if (Number.isFinite(info.strokePixels)) req.crop.strokePixels = info.strokePixels;
-
   // 采样画布长边 = base_res 被 maxCrop 封顶（与 vendor 节点 `crop()` 一致）
   const sampleEdge = cropSampleEdge(req.crop.baseResolution, req.crop.maxCrop);
-  const block = estimateCropBlock(bbox, {
-    minCrop: req.crop.minCrop,
-    padding: req.crop.padding,
-    maskDims: info.maskDims,
-  });
+  const block = blockForRes;
   const sampleCanvas = sampleCanvasFor(block, sampleEdge);
   req.crop.sampleEdge = sampleEdge;
   req.crop.sampleBlock = block;
